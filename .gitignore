@@ -1,0 +1,14 @@
+# Build output
+build
+
+# Editor and debugger debris. Deliberately not *.txt: a blanket text-file
+# ignore silently swallowed a committed characterisation table in libs/image,
+# and `git status` stayed clean over it.
+*.gdb
+
+# Doxygen
+docs
+
+# Python
+**/__pycache__
+*.pyc

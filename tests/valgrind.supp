@@ -1,0 +1,5 @@
+# No suppressions.
+#
+# A leak, an invalid read, or a jump that depends on uninitialised memory in
+# this library is a defect. Add a suppression only with the frames that show
+# the allocation is not ours, and say why in the comment above it.

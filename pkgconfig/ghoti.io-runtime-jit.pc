@@ -1,0 +1,7 @@
+Name: Ghoti.io Runtime-jit(BRANCH)
+Description: The language runtime stack's baseline JIT: a low-level IR, an x86-64 backend, and the stack maps and deopt records it emits in runtime-core's format.
+Version: (VERSION)
+URL: https://github.com/Ghoti-io/runtime-jit
+Libs: -L(PC_LIB_DIR) -l(SUITE)-(PROJECT)(BRANCH) -pthread
+CFlags: -I(PC_INCLUDE_DIR)
+Requires: (REQUIRES)
