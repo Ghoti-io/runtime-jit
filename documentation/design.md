@@ -79,7 +79,20 @@ Rejected:
   can walk to its caller's.
 
 A frame over `max_frame_bytes` (default 1 MiB) or code over `max_code_bytes`
-(default 16 MiB) is `GRJIT_ERR_LIMIT` with nothing changed.
+(default 16 MiB) is `GRJIT_ERR_LIMIT` with nothing changed. So is a function whose
+stack maps would hold more than `max_site_entries` registers (default 4 Mi) summed
+over all its sites: neither of the other caps bounds that, since sites times live
+registers can be many times the code (at the default operation and register limits
+it is 262,144 times 65,536), and it is what the working memory of the liveness pass
+and the metadata are made of. The liveness pass reads a site's live set by its set
+bits through a bit-to-register table, so its cost is sites times the words of a set
+plus the entries recorded; reading every register at every site was quadratic, and
+the `compile-12k-sites` bench case (12,000 sites, as many tracked registers) went
+from 373 ms to 25 ms. The verifier also refuses an operation that assigns a
+register while a derived pointer based on it is live after it (the pointer would be
+rebuilt from the new value by a collector that reads derived triples, AD-12); that a
+derived register is written only as base plus delta is not checked, because it
+changes what the IR means and nothing consumes triples yet.
 
 ## The calling convention, and the guard exit
 
