@@ -33,7 +33,7 @@
 
 #include <ghoti.io/runtime-core/b/page.h>
 
-#include "../x86_64/emit_internal.h"
+#include "../backend/backend_internal.h"
 
 struct GRJIT_Code {
   const GRJIT_Allocator * allocator;

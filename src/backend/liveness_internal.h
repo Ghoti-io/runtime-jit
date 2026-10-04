@@ -25,8 +25,8 @@
  * and the derived-pointer check need. Never installed.
  */
 
-#ifndef GHOTI_IO_GRJIT_SRC_X86_64_LIVENESS_INTERNAL_H
-#define GHOTI_IO_GRJIT_SRC_X86_64_LIVENESS_INTERNAL_H
+#ifndef GHOTI_IO_GRJIT_SRC_BACKEND_LIVENESS_INTERNAL_H
+#define GHOTI_IO_GRJIT_SRC_BACKEND_LIVENESS_INTERNAL_H
 
 #include <ghoti.io/runtime-jit/macros.h>
 
@@ -35,6 +35,10 @@
 #include <ghoti.io/runtime-jit/ir.h>
 
 #include <stddef.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /** The registers live across one site, ascending. */
 typedef struct GRJIT_SiteLive {
@@ -69,4 +73,8 @@ GRJIT_Result grjit_liveness_compute(const GRJIT_Function * function,
 /** Frees what ::grjit_liveness_compute allocated. */
 void grjit_liveness_free(GRJIT_LiveSites * sites);
 
-#endif /* GHOTI_IO_GRJIT_SRC_X86_64_LIVENESS_INTERNAL_H */
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* GHOTI_IO_GRJIT_SRC_BACKEND_LIVENESS_INTERNAL_H */

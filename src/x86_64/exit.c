@@ -45,15 +45,15 @@ void grjit_emit_refuse_stub(GRJIT_Emit * e) {
 
 void grjit_emit_poll_stub(GRJIT_Emit * e, const GRJIT_Pending * p) {
   GRJIT_Asm * a = &e->as;
-  const GRJIT_FrameState * state = &e->f->states[p->op->state];
+  const GRJIT_FrameState * state = &e->c.f->states[p->op->state];
   grjit_asm_bind(a, p->entry);
   grjit_asm_load64(a, GRJIT_RDI, GRJIT_RBP, GRJIT_SLOT_CTX);
   grjit_asm_mov_ri(a, GRJIT_RSI, state->identity.function);
   grjit_asm_mov_ri(a, GRJIT_RDX, state->identity.offset);
-  grjit_asm_mov_ri(a, GRJIT_RAX, (uint64_t)(uintptr_t)e->f->poll_helper);
+  grjit_asm_mov_ri(a, GRJIT_RAX, (uint64_t)(uintptr_t)e->c.f->poll_helper);
   grjit_asm_call_r(a, GRJIT_RAX);
   /* The return address is the site: the helper may be a GC point. */
-  grjit_emit_add_site(e, (uint32_t)grjit_asm_size(a),
+  grjit_emit_add_site(&e->c, (uint32_t)grjit_asm_size(a),
       GRCORE_SITE_GC_POINT_POLL, state->identity, p->live_index,
       p->op->state);
   grjit_asm_mov32_rr(a, GRJIT_RAX, GRJIT_RAX);
@@ -64,11 +64,11 @@ void grjit_emit_poll_stub(GRJIT_Emit * e, const GRJIT_Pending * p) {
 
 void grjit_emit_guard_stub(GRJIT_Emit * e, const GRJIT_Pending * p) {
   GRJIT_Asm * a = &e->as;
-  const GRJIT_FrameState * state = &e->f->states[p->op->state];
+  const GRJIT_FrameState * state = &e->c.f->states[p->op->state];
   grjit_asm_bind(a, p->entry);
   uint32_t offset = (uint32_t)grjit_asm_size(a);
   grjit_emit_add_site(
-      e, offset, GRCORE_SITE_GUARD, state->identity, p->live_index,
+      &e->c, offset, GRCORE_SITE_GUARD, state->identity, p->live_index,
       p->op->state);
   grjit_asm_load64(a, GRJIT_RDX, GRJIT_RBP, GRJIT_SLOT_OUT);
   for (size_t i = 0; i < state->slot_count; i++) {

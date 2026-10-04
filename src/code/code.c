@@ -33,6 +33,7 @@
 #include <ghoti.io/runtime-jit/verify.h>
 
 #include "code_internal.h"
+#include "../x86_64/emit_internal.h"
 
 #include "../ir/ir_internal.h"
 
@@ -147,7 +148,7 @@ GRJIT_Result grjit_compile(const GRJIT_CompileOptions * options,
     goto done;
   }
   size_t code_bytes = grjit_asm_size(&emit.as);
-  r = grjit_metadata_build(function, &live, emit.sites, emit.site_count,
+  r = grjit_metadata_build(function, &live, emit.c.sites, emit.c.site_count,
       (uint32_t)frame, (uint32_t)code_bytes, a, &meta);
   if (r != GRJIT_OK) {
     goto done;

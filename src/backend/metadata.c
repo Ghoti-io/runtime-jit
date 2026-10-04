@@ -27,12 +27,13 @@
  * A live REF register is a stack-map entry at its frame slot with slot kind
  * VALUE; a live derived pointer is a (slot, base slot, delta) triple; the frame
  * state is one location per interpreter slot. Nothing here is specific to a
- * register: the offsets are from the frame base, which is `rbp` here.
+ * register or an instruction set: the offsets are from the frame base, which is
+ * the frame pointer of whichever backend emitted the code.
  */
 
 #include <ghoti.io/runtime-jit/macros.h>
 
-#include "emit_internal.h"
+#include "backend_internal.h"
 
 #include "../ir/ir_internal.h"
 

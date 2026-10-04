@@ -43,49 +43,6 @@
 static const GRJIT_Reg arg_regs[GRJIT_BACKEND_MAX_ARGS] = {
     GRJIT_RDI, GRJIT_RSI, GRJIT_RDX, GRJIT_RCX, GRJIT_R8, GRJIT_R9};
 
-void grjit_emit_add_site(GRJIT_Emit * e, uint32_t offset,
-    GRCORE_CodeSiteKind kind, GRCORE_PollIdentity identity, size_t live_index,
-    uint32_t state) {
-  if (e->error != GRJIT_OK) {
-    return;
-  }
-  if (e->site_count == e->site_capacity) {
-    size_t cap = e->site_capacity == 0 ? 16 : e->site_capacity * 2;
-    GRJIT_SiteRec * grown =
-        e->allocator->realloc_fn(e->allocator->ctx, e->sites, cap * sizeof *grown);
-    if (grown == NULL) {
-      e->error = GRJIT_ERR_OOM;
-      return;
-    }
-    e->sites = grown;
-    e->site_capacity = cap;
-  }
-  GRJIT_SiteRec * s = &e->sites[e->site_count++];
-  s->offset = offset;
-  s->kind = kind;
-  s->identity = identity;
-  s->live_index = live_index;
-  s->state = state;
-}
-
-void grjit_emit_add_pending(GRJIT_Emit * e, const GRJIT_Pending * p) {
-  if (e->error != GRJIT_OK) {
-    return;
-  }
-  if (e->pending_count == e->pending_capacity) {
-    size_t cap = e->pending_capacity == 0 ? 16 : e->pending_capacity * 2;
-    GRJIT_Pending * grown = e->allocator->realloc_fn(
-        e->allocator->ctx, e->pending, cap * sizeof *grown);
-    if (grown == NULL) {
-      e->error = GRJIT_ERR_OOM;
-      return;
-    }
-    e->pending = grown;
-    e->pending_capacity = cap;
-  }
-  e->pending[e->pending_count++] = *p;
-}
-
 /* Loads an operand into a register: a register's slot, or an immediate. */
 static void load_operand(GRJIT_Emit * e, GRJIT_Reg r, const GRJIT_Operand * o) {
   if (o->kind == GRJIT_OPERAND_VREG) {
@@ -221,9 +178,9 @@ static void emit_call(GRJIT_Emit * e, const GRJIT_Op * op) {
   grjit_asm_call_r(a, GRJIT_RAX);
   if (op->attr == GRJIT_CALL_GC_POINT) {
     /* The return address is the site. */
-    const GRJIT_FrameState * s = &e->f->states[op->state];
-    grjit_emit_add_site(e, (uint32_t)grjit_asm_size(a), op->site_kind,
-        s->identity, e->live_cursor++, op->state);
+    const GRJIT_FrameState * s = &e->c.f->states[op->state];
+    grjit_emit_add_site(&e->c, (uint32_t)grjit_asm_size(a), op->site_kind,
+        s->identity, e->c.live_cursor++, op->state);
   }
   if (op->dst != GRJIT_NO_VREG) {
     store_result(e, op->dst, GRJIT_RAX);
@@ -287,13 +244,13 @@ static void emit_op(GRJIT_Emit * e, const GRJIT_Op * op, size_t block) {
       p.entry = grjit_asm_label(a);
       p.back = grjit_asm_label(a);
       p.op = op;
-      p.live_index = e->live_cursor++;
+      p.live_index = e->c.live_cursor++;
       grjit_asm_load64(a, GRJIT_RAX, GRJIT_RBP, GRJIT_SLOT_CTX);
-      grjit_asm_load64(a, GRJIT_RAX, GRJIT_RAX, (int32_t)e->request_offset);
+      grjit_asm_load64(a, GRJIT_RAX, GRJIT_RAX, (int32_t)e->c.request_offset);
       grjit_asm_test_rr(a, GRJIT_RAX, GRJIT_RAX);
       grjit_asm_jcc(a, GRJIT_COND_NE, p.entry);
       grjit_asm_bind(a, p.back);
-      grjit_emit_add_pending(e, &p);
+      grjit_emit_add_pending(&e->c, &p);
       break;
     }
     case GRJIT_OP_GUARD: {
@@ -302,11 +259,11 @@ static void emit_op(GRJIT_Emit * e, const GRJIT_Op * op, size_t block) {
       p.entry = grjit_asm_label(a);
       p.back = 0;
       p.op = op;
-      p.live_index = e->live_cursor++;
+      p.live_index = e->c.live_cursor++;
       load_operand(e, GRJIT_RAX, &op->a);
       grjit_asm_test_rr(a, GRJIT_RAX, GRJIT_RAX);
       grjit_asm_jcc(a, GRJIT_COND_E, p.entry);
-      grjit_emit_add_pending(e, &p);
+      grjit_emit_add_pending(&e->c, &p);
       break;
     }
     case GRJIT_OP_BR:
@@ -337,15 +294,9 @@ static void emit_op(GRJIT_Emit * e, const GRJIT_Op * op, size_t block) {
       grjit_asm_ret(a);
       break;
     case GRJIT_OP_COUNT:
-      e->error = GRJIT_ERR_INTERNAL;
+      e->c.error = GRJIT_ERR_INTERNAL;
       break;
   }
-}
-
-static int site_order(const void * x, const void * y) {
-  const GRJIT_SiteRec * a = x;
-  const GRJIT_SiteRec * b = y;
-  return a->offset < b->offset ? -1 : a->offset > b->offset ? 1 : 0;
 }
 
 GRJIT_Result grjit_emit_function(const GRJIT_Function * f,
@@ -353,13 +304,8 @@ GRJIT_Result grjit_emit_function(const GRJIT_Function * f,
     GRJIT_EntryHook hook, uint32_t request_offset, uint32_t frame_bytes,
     const GRJIT_LiveSites * live, GRJIT_Emit * e) {
   memset(e, 0, sizeof *e);
-  e->f = f;
-  e->allocator = allocator;
-  e->frame_bytes = frame_bytes;
-  e->request_offset = request_offset;
-  e->hook = hook;
-  e->live = live;
-  e->error = GRJIT_OK;
+  grjit_emit_common_init(
+      &e->c, f, allocator, hook, request_offset, frame_bytes, live);
   GRJIT_Asm * a = &e->as;
   grjit_asm_init(a, allocator, max_code_bytes);
   e->blocks = allocator->malloc_fn(allocator->ctx, f->block_count * sizeof *e->blocks);
@@ -394,7 +340,7 @@ GRJIT_Result grjit_emit_function(const GRJIT_Function * f,
     }
   }
 
-  for (size_t b = 0; b < f->block_count && e->error == GRJIT_OK; b++) {
+  for (size_t b = 0; b < f->block_count && e->c.error == GRJIT_OK; b++) {
     grjit_asm_bind(a, e->blocks[b]);
     const GRJIT_BlockInfo * blk = &f->blocks[b];
     for (size_t i = 0; i < blk->count; i++) {
@@ -402,17 +348,17 @@ GRJIT_Result grjit_emit_function(const GRJIT_Function * f,
     }
   }
   /* A pending stub may add sites but never another pending stub. */
-  for (size_t i = 0; i < e->pending_count && e->error == GRJIT_OK; i++) {
-    if (e->pending[i].kind == GRJIT_PENDING_POLL) {
-      grjit_emit_poll_stub(e, &e->pending[i]);
+  for (size_t i = 0; i < e->c.pending_count && e->c.error == GRJIT_OK; i++) {
+    if (e->c.pending[i].kind == GRJIT_PENDING_POLL) {
+      grjit_emit_poll_stub(e, &e->c.pending[i]);
     } else {
-      grjit_emit_guard_stub(e, &e->pending[i]);
+      grjit_emit_guard_stub(e, &e->c.pending[i]);
     }
   }
   grjit_emit_refuse_stub(e);
   grjit_asm_finish(a);
-  if (e->error != GRJIT_OK) {
-    return e->error;
+  if (e->c.error != GRJIT_OK) {
+    return e->c.error;
   }
   switch (grjit_asm_status(a)) {
     case GRJIT_ASM_OK:
@@ -424,19 +370,16 @@ GRJIT_Result grjit_emit_function(const GRJIT_Function * f,
     default:
       return GRJIT_ERR_INTERNAL;
   }
-  if (e->site_count > 1) {
-    qsort(e->sites, e->site_count, sizeof *e->sites, site_order);
-  }
+  grjit_emit_sort_sites(&e->c);
   return GRJIT_OK;
 }
 
 void grjit_emit_free(GRJIT_Emit * e) {
-  if (e->allocator == NULL) {
+  if (e->c.allocator == NULL) {
     return;
   }
-  e->allocator->free_fn(e->allocator->ctx, e->blocks);
-  e->allocator->free_fn(e->allocator->ctx, e->sites);
-  e->allocator->free_fn(e->allocator->ctx, e->pending);
+  e->c.allocator->free_fn(e->c.allocator->ctx, e->blocks);
   grjit_asm_free(&e->as);
+  grjit_emit_common_free(&e->c);
   memset(e, 0, sizeof *e);
 }

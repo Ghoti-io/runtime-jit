@@ -143,7 +143,7 @@ call, would need the instruction's length to find. A plain `NO_GC` call is not a
 site.
 
 The stack map is every register of type REF that is live across the site, by a
-backward dataflow over the blocks (`src/x86_64/liveness.c`). For a poll or a
+backward dataflow over the blocks (`src/backend/liveness.c`). For a poll or a
 call, live means "used after it, or named by its frame state, and not the
 register the call assigns"; for a guard, the exit stub leaves the function, so
 it means "named by its frame state". `PTR` and `I64` are never in a map. A
@@ -160,6 +160,21 @@ saved-`rbp` chain to its caller's frame, computes the return address's offset,
 finds the site, and reads every live slot and every deopt slot at the recorded
 offsets, and the test compares the values with the ones the program holds. It
 compares values, not offsets, so it needs no knowledge of the frame layout.
+
+## What the backends share
+
+Everything that is not instruction encoding is in `src/backend/` and is used by
+every backend: the liveness pass (which the verifier uses too), the metadata
+builder, the frame layout (`backend_internal.h`) and the compile state that is
+not an instruction set's (`GRJIT_EmitCommon`: the sites the emitter records, the
+stubs it queues, the sort that puts the sites in order). Each backend's
+directory holds its assembler, its operation emitter and its stubs. They share
+the frame layout because the stack-map and deopt format, and every consumer's
+frame walk, are written against it; keeping the frame base and the slot offsets
+makes the second backend a matter of encoding. `test_pin.cpp` records a hash of
+every byte of the code of the differential's 2000 generated functions, so a
+change that is meant to leave the code alone (the move to this directory was
+one) fails if it does not.
 
 ## The assembler
 

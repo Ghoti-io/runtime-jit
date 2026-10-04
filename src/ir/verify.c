@@ -31,7 +31,7 @@
 
 #include "ir_internal.h"
 
-#include "../x86_64/liveness_internal.h"
+#include "../backend/liveness_internal.h"
 
 #include <stdarg.h>
 #include <stdio.h>

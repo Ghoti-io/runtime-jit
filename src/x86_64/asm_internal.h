@@ -44,6 +44,8 @@
 #include <ghoti.io/runtime-jit/allocator.h>
 #include <ghoti.io/runtime-jit/core.h>
 
+#include "../backend/backend_internal.h"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -72,9 +74,6 @@ typedef enum GRJIT_AluOp {
   GRJIT_ALU_ADD = 0x01, GRJIT_ALU_OR = 0x09, GRJIT_ALU_AND = 0x21,
   GRJIT_ALU_SUB = 0x29, GRJIT_ALU_XOR = 0x31, GRJIT_ALU_CMP = 0x39
 } GRJIT_AluOp;
-
-/** A label: an index into the assembler's label table. */
-typedef size_t GRJIT_Label;
 
 /** What went wrong, if anything. */
 typedef enum GRJIT_AsmStatus {
