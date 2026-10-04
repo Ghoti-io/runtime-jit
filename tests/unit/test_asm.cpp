@@ -324,6 +324,17 @@ TEST(Asm, ABranchAcrossMoreThanOneHundredTwentySevenBytesUsesRel32BothWays) {
   }
 }
 
+TEST(Asm, RawBytesAreAppendedAndCountAgainstTheCap) {
+  Asm as(8);
+  const uint8_t pad[4] = {0x90, 0x90, 0xCC, 0xCC};
+  grjit_asm_raw(&as.a, pad, sizeof pad);
+  grjit_asm_ret(&as.a);
+  EXPECT_EQ(as.bytes(), (std::vector<uint8_t>{0x90, 0x90, 0xCC, 0xCC, 0xC3}));
+  grjit_asm_raw(&as.a, pad, sizeof pad); // 9 bytes: past the cap of 8
+  EXPECT_EQ(grjit_asm_status(&as.a), GRJIT_ASM_LIMIT);
+  EXPECT_EQ(grjit_asm_size(&as.a), 5u);
+}
+
 TEST(Asm, AnUnboundLabelFailsTheFinish) {
   Asm as;
   GRJIT_Label l = grjit_asm_label(&as.a);
