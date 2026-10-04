@@ -216,6 +216,14 @@ reference**, and the reverse makes a reference only by naming a value the
 engine has built as one. The library still emits no barrier and still has no
 `gc_store`; a `BITCAST` writes a register, never a heap word.
 
+Two consequences for a consumer. An `I64` copy of a `REF` is plain bits: it is not
+in any stack map, and a collector that moves objects rewrites `VALUE` slots only
+(`grcore_deopt_write_back` covers nothing else), so the copy goes stale at a move
+and must not be held across a GC point as if it were a reference. And a `REF`
+register may hold a non-pointer tagged word (a small integer, a boolean), because
+a `REF` is an engine value word, so a reader of stack maps must tolerate slots
+that name no object.
+
 ## The IR is never interpreted
 
 The library has no evaluator (AD-9: each language owns its interpreter, and the

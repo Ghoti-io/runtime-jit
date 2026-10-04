@@ -158,7 +158,12 @@ typedef enum GRJIT_OpKind {
   GRJIT_OP_BR_IF,  ///< Jump to `target` if `a` is non-zero, else `target_else`.
   GRJIT_OP_RET,    ///< Return `a`, or nothing.
   GRJIT_OP_BITCAST, ///< `dst = a`, reinterpreted: a word copied between two
-                    ///< registers of any of the types `I64`, `REF`, `PTR`.
+                    ///< registers of any of the types `I64`, `REF`, `PTR`. An
+                    ///< `I64` copy of a `REF` is plain bits: a moving collector
+                    ///< does not update it (write-back covers `VALUE` slots
+                    ///< only), so it must not be held across a GC point as a
+                    ///< reference. A `REF` register may hold a non-pointer tagged
+                    ///< word, which a reader of stack maps must tolerate.
   GRJIT_OP_COUNT   ///< Not an operation; closes the enum.
 } GRJIT_OpKind;
 
