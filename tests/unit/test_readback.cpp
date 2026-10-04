@@ -116,7 +116,7 @@ __attribute__((noinline)) uint32_t poll_helper(void * ctx, uint64_t fn, uint64_t
   return 0;
 }
 
-const GRCORE_Key kKey = {"readback", GRCORE_CARDINALITY_MANY, GRCORE_PHASE_NONE, nullptr, nullptr};
+const GRCORE_Key kKey = {"readback", GRCORE_CARDINALITY_MANY, GRCORE_PHASE_NONE, nullptr, nullptr, nullptr, nullptr, nullptr};
 
 /* The program: two live REFs, one dead REF, a live I64, and a derived pointer
  * with its base, then a site (a call or a poll), then a use of all the live
