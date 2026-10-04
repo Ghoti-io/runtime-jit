@@ -201,13 +201,18 @@ GRJIT_Result grjit_liveness_compute(const GRJIT_Function * f,
           if (op->kind == GRJIT_OP_GUARD) {
             memcpy(site_set, state_set, words * sizeof *site_set);
           } else {
-            for (size_t w = 0; w < words; w++) {
-              site_set[w] = cur[w] | state_set[w];
-            }
+            /* The call's own result is not yet assigned at the return
+             * address, so it leaves what is live after the call; but a frame
+             * state that names it names the value it held before, which is
+             * still in its slot and must stay in the map. */
+            memcpy(site_set, cur, words * sizeof *site_set);
             GRJIT_VReg def = grjit_op_def(op);
             if (def != GRJIT_NO_VREG && def < f->vreg_count &&
                 index[def] != UINT32_MAX) {
               clear_bit(site_set, index[def]);
+            }
+            for (size_t w = 0; w < words; w++) {
+              site_set[w] |= state_set[w];
             }
           }
           if (pass == 0) {

@@ -387,21 +387,20 @@ TEST(Verify, ADerivedDeclarationMustBeAPtrOverARef) {
   EXPECT_EQ(not_ref.first, GRJIT_ERR_INVALID);
 }
 
-TEST(Verify, SevenCallArgumentsIsALimitErrorFromTheVerifier) {
-  // A builder allowed eight can hold seven, which the verifier then refuses:
-  // the backend passes six in registers.
+TEST(Verify, ALimitAboveWhatTheBackendPassesInRegistersIsClampedToSix) {
+  // Asking for eight arguments gets six: the builder refuses a seventh with
+  // ERR_LIMIT, so the verifier never sees one it would have to refuse.
   GRJIT_Limits eight{};
   eight.max_call_arguments = 8;
   B b("t", 0, &eight);
   b.at(b.block());
   std::vector<GRJIT_Operand> args(7, I(1));
-  b.call(GRJIT_NO_VREG, reinterpret_cast<const void *>(0x1000), args);
-  b.ret();
-  Fn f(b.finish());
-  std::string why;
-  EXPECT_EQ(verify(f, &why), GRJIT_ERR_LIMIT);
-  EXPECT_NE(why.find("7 arguments"), std::string::npos) << why;
-  EXPECT_EQ(verify(f, &why, &eight), GRJIT_ERR_LIMIT); // still six at most
+  EXPECT_EQ(grjit_builder_call(b.b, GRJIT_NO_VREG, 0x1000, GRJIT_CALL_NO_GC,
+                GRCORE_SITE_GC_POINT_CALL, args.data(), 7, {0, 0}, nullptr, 0),
+      GRJIT_ERR_LIMIT);
+  EXPECT_EQ(grjit_builder_call(b.b, GRJIT_NO_VREG, 0x1000, GRJIT_CALL_NO_GC,
+                GRCORE_SITE_GC_POINT_CALL, args.data(), 6, {0, 0}, nullptr, 0),
+      GRJIT_OK);
 }
 
 TEST(Verify, TheCapsOfTheLimitsStructAreEnforcedAndChangeNothing) {

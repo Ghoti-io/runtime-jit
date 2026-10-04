@@ -84,4 +84,21 @@ TEST(Limits, AZeroFieldIsThatFieldsDefaultAndANullStructIsAllDefaults) {
   }
 }
 
+TEST(Limits, CallArgumentsAndFrameStateSlotsAreClampedToWhatTheBackendCanAddress) {
+  // A limit above the backend's six argument registers is six, and a frame
+  // state may not be so long that a guard exit's 8 * i displacement wraps.
+  GRJIT_Limits limits{};
+  limits.max_call_arguments = 100;
+  limits.max_frame_state_slots = SIZE_MAX;
+  B b("f", 0, &limits);
+  b.at(b.block());
+  std::vector<GRJIT_Operand> args(7, I(1));
+  EXPECT_EQ(grjit_builder_call(b.b, GRJIT_NO_VREG, 0x1000, GRJIT_CALL_NO_GC,
+                GRCORE_SITE_GC_POINT_CALL, args.data(), 7, {0, 0}, nullptr, 0),
+      GRJIT_ERR_LIMIT);
+  GRJIT_Builder * huge = nullptr;
+  EXPECT_EQ(grjit_builder_create("g", (size_t{1} << 30) / 8 + 1, &limits, nullptr, &huge),
+      GRJIT_ERR_LIMIT);
+}
+
 GRJIT_TEST_MAIN()

@@ -49,6 +49,9 @@ GRJIT_Result grjit_memory_create(const GRCORE_PageProvider * pages,
     return GRJIT_ERR_OOM;
   }
   memcpy(mapping, bytes, length);
+  /* The tail of the last page would otherwise be zero bytes, which decode as
+   * an instruction; int3 traps instead. */
+  memset((unsigned char *)mapping + length, 0xCC, size - length);
   GRCORE_Result r =
       grcore_page_protect(pages, mapping, size, GRCORE_PAGE_READ_EXECUTE);
   if (r != GRCORE_OK) {

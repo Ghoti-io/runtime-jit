@@ -100,7 +100,10 @@ a call (the format is shared) with the compiled frame gone.
 
 The **entry hook** is the stand-in for AD-21's "checked at every JIT prologue":
 a function can name a `uint32_t (*)(void * context)` called before anything
-else, and a non-zero answer makes it return `GRJIT_EXIT_REFUSED`. It exists so
+else, and a non-zero answer makes it return `GRJIT_EXIT_REFUSED`. It runs before the
+parameters are in their frame slots and no site is recorded for it, so **a hook
+must not reach a GC point**: it may not allocate or poll, or the caller's
+reference arguments would be unmapped while a collection ran. It exists so
 that the check has a place and a test; the engine's trampoline owns the real
 accounting.
 

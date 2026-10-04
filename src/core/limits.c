@@ -75,10 +75,12 @@ void grjit_limits_resolve(const GRJIT_Limits * in, GRJIT_Limits * out) {
   }
   if (in->max_call_arguments != 0) {
     out->max_call_arguments =
-        clamp_max(in->max_call_arguments, GRJIT_BUILDER_MAX_ARGS);
+        clamp_max(in->max_call_arguments, GRJIT_BACKEND_MAX_ARGS);
   }
   if (in->max_frame_state_slots != 0) {
-    out->max_frame_state_slots = in->max_frame_state_slots;
+    /* A guard exit addresses `out[i]` with a 32-bit displacement of 8 * i. */
+    out->max_frame_state_slots =
+        clamp_max(in->max_frame_state_slots, GRJIT_FRAME_CEILING / 8);
   }
   if (in->max_frame_bytes != 0) {
     out->max_frame_bytes = clamp_max(in->max_frame_bytes, GRJIT_FRAME_CEILING);

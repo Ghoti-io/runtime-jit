@@ -252,6 +252,35 @@ TEST(Readback, ThePollSlowPathShowsTheSameThingsAndKeepsItsIdentity) {
   grcore_port_release(port);
 }
 
+TEST(Readback, ACallWhoseResultRegisterIsNamedByItsFrameStateKeepsTheOldValueInTheMap) {
+  GRJIT_REQUIRE_BACKEND();
+  JitWorld w;
+  B b("dst", 1);
+  GRJIT_VReg r = b.reg(GRJIT_TYPE_REF);
+  GRJIT_VReg t = b.reg();
+  b.at(b.block());
+  b.cnst(r, static_cast<int64_t>(kR0));
+  // r is the call's result and also the slot the frame state locates: at the
+  // return address it still holds kR0, so the stack map must say so.
+  b.call_gc(r, reinterpret_cast<const void *>(gc_helper), {I(1), I(2)}, {9, 77},
+      {grjit_frame_slot_vreg(r)});
+  b.cmp(GRJIT_CMP_EQ, t, V(r), V(r));
+  b.ret(V(t));
+  Fn f(b.finish());
+  Compiled c(f, w.pages());
+  ASSERT_TRUE(c) << grjit_result_string(c.result);
+  g_code = c.code;
+  g_seen.clear();
+  c.run(w.ctx);
+  ASSERT_EQ(g_seen.size(), 1u);
+  ASSERT_TRUE(g_seen[0].site_found);
+  ASSERT_EQ(g_seen[0].state.size(), 1u);
+  EXPECT_EQ(g_seen[0].state[0].value, kR0);
+  EXPECT_EQ(g_seen[0].state[0].slot_kind, GRCORE_SLOT_VALUE);
+  EXPECT_EQ(g_seen[0].live_values, std::vector<uint64_t>{kR0})
+      << "the deopt slot is a VALUE the collector was not told about";
+}
+
 TEST(Readback, TheTableHasASitePerGcPointCallAndPollAndGuardAndNothingElse) {
   GRJIT_REQUIRE_BACKEND();
   JitWorld w;

@@ -62,6 +62,11 @@ extern "C" {
  * A non-zero return makes the function return ::GRJIT_EXIT_REFUSED with that
  * value in `out[0]`. It is the stand-in for AD-21's "checked at every JIT
  * prologue" until the engine's trampoline owns native-depth accounting.
+ *
+ * The hook runs before the parameters are in their frame slots and no site is
+ * recorded for it, so it **must not reach a GC point**: it may not allocate,
+ * poll, or call anything that can, or the caller's reference arguments would be
+ * unmapped while a collection ran.
  */
 typedef uint32_t (*GRJIT_EntryHook)(void * context);
 

@@ -448,6 +448,22 @@ TEST(Compile, UnreachableBlocksAndUnusedRegistersCompile) {
   EXPECT_EQ(c.run(w.ctx).out[0], 9u);
 }
 
+TEST(Compile, TheUnusedTailOfTheLastPageIsInt3NotZeroBytes) {
+  GRJIT_REQUIRE_BACKEND();
+  JitWorld w;
+  B b("tiny");
+  b.at(b.block());
+  b.ret();
+  Fn f(b.finish());
+  Compiled c(f, w.pages());
+  ASSERT_TRUE(c);
+  const unsigned char * code = static_cast<const unsigned char *>(grjit_code_address(c.code));
+  ASSERT_GT(grjit_code_mapped_size(c.code), grjit_code_size(c.code));
+  for (size_t i = grjit_code_size(c.code); i < grjit_code_mapped_size(c.code); i++) {
+    ASSERT_EQ(code[i], 0xCC) << i;
+  }
+}
+
 TEST(Compile, TheCodeCarriesItsLayoutAndAddressAndIsOneMapping) {
   GRJIT_REQUIRE_BACKEND();
   JitWorld w;
