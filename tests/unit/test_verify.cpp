@@ -368,6 +368,78 @@ TEST(Verify, ADerivedPointerWithADeadBaseIsInvalid) {
   EXPECT_EQ(ok.first, GRJIT_OK) << ok.second;
 }
 
+TEST(Verify, AssigningTheBaseOfALiveDerivedPointerIsInvalid) {
+  // der = base + 16 is live across the reassignment of base: a collector that
+  // rebuilds der from its base would rebuild it from the new value.
+  auto bad = check([](B & b) {
+    GRJIT_VReg base = b.reg(GRJIT_TYPE_REF);
+    GRJIT_VReg other = b.reg(GRJIT_TYPE_REF);
+    GRJIT_VReg der = b.reg(GRJIT_TYPE_PTR);
+    GRJIT_VReg sink = b.reg();
+    b.derived(der, base, 16);
+    b.at(b.block());
+    b.cnst(base, 0x1000);
+    b.cnst(other, 0x2000);
+    b.cnst(der, 0x1010);
+    b.mov(base, V(other)); // der is still to be used
+    b.call_gc(GRJIT_NO_VREG, reinterpret_cast<const void *>(0x1000), {}, {1, 2}, {});
+    b.load(sink, der, 0, 64);
+    b.ret(V(sink));
+  });
+  EXPECT_EQ(bad.first, GRJIT_ERR_INVALID);
+  EXPECT_NE(bad.second.find("v0 is assigned"), std::string::npos) << bad.second;
+  EXPECT_NE(bad.second.find("derived pointer v2"), std::string::npos) << bad.second;
+
+  // The same assignment once the derived pointer is dead, or before it is
+  // assigned (a register that has not been written is not live), is fine.
+  auto after = check([](B & b) {
+    GRJIT_VReg base = b.reg(GRJIT_TYPE_REF);
+    GRJIT_VReg other = b.reg(GRJIT_TYPE_REF);
+    GRJIT_VReg der = b.reg(GRJIT_TYPE_PTR);
+    GRJIT_VReg sink = b.reg();
+    b.derived(der, base, 16);
+    b.at(b.block());
+    b.cnst(base, 0x1000);
+    b.cnst(other, 0x2000);
+    b.cnst(der, 0x1010);
+    b.call_gc(GRJIT_NO_VREG, reinterpret_cast<const void *>(0x1000), {}, {1, 2}, {});
+    b.load(sink, der, 0, 64);
+    GRJIT_VReg word = b.reg();
+    b.bitcast(word, base); // the base outlives the site, as the rule requires
+    b.bin(GRJIT_OP_ADD, sink, V(sink), V(word));
+    b.mov(base, V(other)); // der is dead from here on
+    b.ret(V(sink));
+  });
+  EXPECT_EQ(after.first, GRJIT_OK) << after.second;
+  auto loop = check([](B & b) {
+    // loop: der = base + 16 (assigned afresh each time); use der;
+    // base = next; repeat. der is dead across the assignment of base.
+    GRJIT_VReg base = b.param(GRJIT_TYPE_REF);
+    GRJIT_VReg next = b.reg(GRJIT_TYPE_REF);
+    GRJIT_VReg der = b.reg(GRJIT_TYPE_PTR);
+    GRJIT_VReg sink = b.reg();
+    GRJIT_VReg more = b.reg();
+    GRJIT_VReg word = b.reg();
+    b.derived(der, base, 16);
+    GRJIT_BlockId entry = b.block(), head = b.block(), done = b.block();
+    b.at(entry);
+    b.br(head);
+    b.at(head);
+    b.cnst(der, 0x1010);
+    b.call_gc(GRJIT_NO_VREG, reinterpret_cast<const void *>(0x1000), {}, {1, 2}, {});
+    b.load(sink, der, 0, 64);
+    b.bitcast(word, base); // the base outlives the site, as the rule requires
+    b.bin(GRJIT_OP_ADD, sink, V(sink), V(word));
+    b.cnst(next, 0x3000);
+    b.mov(base, V(next));
+    b.cmp(GRJIT_CMP_NE, more, V(sink), I(0));
+    b.br_if(V(more), head, done);
+    b.at(done);
+    b.ret(V(sink));
+  });
+  EXPECT_EQ(loop.first, GRJIT_OK) << loop.second;
+}
+
 TEST(Verify, ADerivedDeclarationMustBeAPtrOverARef) {
   auto not_ptr = check([](B & b) {
     GRJIT_VReg base = b.param(GRJIT_TYPE_REF);

@@ -37,6 +37,7 @@
 
 #include "../ir/ir_internal.h"
 
+#include <stdint.h>
 #include <string.h>
 
 static GRCORE_CodeLocation slot_location(GRJIT_VReg v, GRJIT_Type type) {
@@ -65,6 +66,11 @@ GRJIT_Result grjit_metadata_build(const GRJIT_Function * f,
       }
     }
     loc_total += f->states[recs[i].state].slot_count;
+  }
+  if (count > SIZE_MAX / sizeof *out->sites ||
+      loc_total > SIZE_MAX / sizeof *out->locations ||
+      der_total > SIZE_MAX / sizeof *out->derived) {
+    return GRJIT_ERR_LIMIT;
   }
   if (count != 0) {
     out->sites = a->calloc_fn(a->ctx, count, sizeof *out->sites);

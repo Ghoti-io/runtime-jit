@@ -514,9 +514,18 @@ static GRJIT_Result check_assigned(Verify * v) {
 static GRJIT_Result check_derived(Verify * v) {
   const GRJIT_Function * f = v->f;
   GRJIT_LiveSites live;
-  GRJIT_Result r = grjit_liveness_compute(f, f->allocator, &live);
+  GRJIT_Result r = grjit_liveness_compute(f, f->allocator, v->limits.max_site_entries, &live);
   if (r != GRJIT_OK) {
     return r;
+  }
+  if (live.base_redefined) {
+    GRJIT_Result bad = refuse(v, GRJIT_ERR_INVALID,
+        "v%u is assigned at block b%u op %zu while derived pointer v%u, based "
+        "on it, is live",
+        live.redefined_base, live.redefined_block, live.redefined_op,
+        live.redefined_derived);
+    grjit_liveness_free(&live);
+    return bad;
   }
   for (size_t s = 0; s < live.count; s++) {
     const GRJIT_SiteLive * site = &live.sites[s];
@@ -525,11 +534,20 @@ static GRJIT_Result check_derived(Verify * v) {
       if (!f->vregs[d].derived) {
         continue;
       }
+      /* The registers of a site are ascending, so the base is a search. */
       bool found = false;
-      for (size_t k = 0; k < site->count; k++) {
-        if (site->vregs[k] == f->vregs[d].base) {
+      size_t lo = 0;
+      size_t hi = site->count;
+      while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (site->vregs[mid] == f->vregs[d].base) {
           found = true;
           break;
+        }
+        if (site->vregs[mid] < f->vregs[d].base) {
+          lo = mid + 1;
+        } else {
+          hi = mid;
         }
       }
       if (!found) {

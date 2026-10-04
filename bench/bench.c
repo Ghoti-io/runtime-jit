@@ -259,6 +259,56 @@ static uint64_t compile_run(uint64_t iterations) {
   return sink;
 }
 
+#define SITES_N 12000u
+
+/* SITES_N garbage-collection points, each with one reference live across it,
+ * and as many reference registers as sites: ref_i = bitcast(i); call; use
+ * ref_i. The compile of it is the cost of the liveness and metadata passes
+ * with many sites and many tracked registers, where a pass that looks at
+ * every register at every site is quadratic. An iteration is one compile. */
+static GRJIT_Function * build_sites(void) {
+  GRJIT_Builder * b;
+  check(grjit_builder_create("sites", 0, NULL, NULL, &b), "builder");
+  GRJIT_VReg acc, k, t;
+  GRJIT_BlockId entry;
+  check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &acc), "vreg");
+  check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &k), "vreg");
+  check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &t), "vreg");
+  check(grjit_builder_block(b, &entry), "block");
+  check(grjit_builder_set_block(b, entry), "at");
+  check(grjit_builder_const(b, acc, 0), "op");
+  GRCORE_PollIdentity id = {0, 0};
+  for (unsigned i = 0; i < SITES_N; i++) {
+    GRJIT_VReg r;
+    check(grjit_builder_vreg(b, GRJIT_TYPE_REF, &r), "vreg");
+    check(grjit_builder_const(b, k, (int64_t)i), "op");
+    check(grjit_builder_bitcast(b, r, k), "op");
+    id.offset = i;
+    check(grjit_builder_call(b, GRJIT_NO_VREG, (uint64_t)(uintptr_t)no_op_helper,
+              GRJIT_CALL_GC_POINT, GRCORE_SITE_GC_POINT_CALL, NULL, 0, id, NULL, 0),
+        "call");
+    check(grjit_builder_bitcast(b, t, r), "op");
+    check(grjit_builder_binary(b, GRJIT_OP_ADD, acc, grjit_operand_vreg(acc), grjit_operand_vreg(t)), "op");
+  }
+  check(grjit_builder_ret(b, grjit_operand_vreg(acc)), "op");
+  GRJIT_Function * f;
+  check(grjit_builder_finish(b, &f), "finish");
+  return f;
+}
+
+static uint64_t compile_sites_run(uint64_t iterations) {
+  world_open();
+  GRJIT_Function * f = build_sites();
+  uint64_t sink = grjit_function_op_count(f);
+  for (uint64_t i = 0; i < iterations; i++) {
+    GRJIT_Code * code = compile(f);
+    sink += grjit_code_size(code);
+    grjit_code_destroy(code);
+  }
+  grjit_function_destroy(f);
+  return sink;
+}
+
 static int compare_double(const void * a, const void * b) {
   double x = *(const double *)a, y = *(const double *)b;
   return x < y ? -1 : x > y ? 1 : 0;
@@ -267,6 +317,7 @@ static int compare_double(const void * a, const void * b) {
 static const Case cases[] = {
     {"calibration", calibration_run, 50000000, 100000},
     {"compile-100", compile_run, 2000, 3},
+    {"compile-12k-sites", compile_sites_run, 3, 1},
     {"loop-plain", loop_plain_run, 10000000, 1000},
     {"loop-poll", loop_poll_run, 10000000, 1000},
     {"loop-call", loop_call_run, 10000000, 1000},

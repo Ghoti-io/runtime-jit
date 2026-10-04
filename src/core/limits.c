@@ -36,6 +36,7 @@
 #define GRJIT_DEFAULT_FRAME_STATE_SLOTS 4096u
 #define GRJIT_DEFAULT_FRAME_BYTES (1u << 20)
 #define GRJIT_DEFAULT_CODE_BYTES (16u << 20)
+#define GRJIT_DEFAULT_SITE_ENTRIES (4u << 20)
 
 /* Compiled code addresses its frame with a 32-bit displacement and its
  * branches with a 32-bit offset, so a cap past these is no cap. */
@@ -53,6 +54,7 @@ void grjit_limits_default(GRJIT_Limits * limits) {
   limits->max_frame_state_slots = GRJIT_DEFAULT_FRAME_STATE_SLOTS;
   limits->max_frame_bytes = GRJIT_DEFAULT_FRAME_BYTES;
   limits->max_code_bytes = GRJIT_DEFAULT_CODE_BYTES;
+  limits->max_site_entries = GRJIT_DEFAULT_SITE_ENTRIES;
 }
 
 static size_t clamp_max(size_t value, size_t ceiling) {
@@ -87,5 +89,8 @@ void grjit_limits_resolve(const GRJIT_Limits * in, GRJIT_Limits * out) {
   }
   if (in->max_code_bytes != 0) {
     out->max_code_bytes = clamp_max(in->max_code_bytes, GRJIT_CODE_CEILING);
+  }
+  if (in->max_site_entries != 0) {
+    out->max_site_entries = in->max_site_entries;
   }
 }

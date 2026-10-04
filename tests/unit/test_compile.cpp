@@ -9,6 +9,8 @@
 
 #include "test_helpers.h"
 
+#include "../../src/code/code_internal.h"
+
 #include <cstdint>
 #include <cstring>
 
@@ -322,6 +324,39 @@ TEST(Compile, ABranchOverMoreThanOneHundredTwentySevenBytesUsesRel32) {
   EXPECT_EQ(c.run(w.ctx, {1}).out[0], 1u + add);
 }
 
+TEST(Compile, ACallOfNullCodeOrOfCodeMadeForAnotherLayoutIsRefusedAndNothingRuns) {
+  GRJIT_REQUIRE_BACKEND();
+  JitWorld w;
+  B b("seven");
+  b.at(b.block());
+  GRJIT_VReg d = b.reg();
+  b.cnst(d, 7);
+  b.ret(V(d));
+  Fn f(b.finish());
+  Compiled c(f, w.pages());
+  ASSERT_TRUE(c) << grjit_result_string(c.result);
+  EXPECT_EQ(c.run(w.ctx).exit, static_cast<uint32_t>(GRJIT_EXIT_RETURNED));
+
+  // A NULL code, with and without somewhere to put the reason.
+  uint64_t out[2] = {0xDEADBEEF, 0xDEADBEEF};
+  EXPECT_EQ(grjit_code_call(nullptr, w.ctx, nullptr, out),
+      static_cast<uint32_t>(GRJIT_EXIT_REFUSED));
+  EXPECT_EQ(out[0], static_cast<uint64_t>(GRCORE_ERR_INVALID));
+  EXPECT_EQ(grjit_code_call(nullptr, w.ctx, nullptr, nullptr),
+      static_cast<uint32_t>(GRJIT_EXIT_REFUSED));
+
+  // The same code, as if a different core had compiled it: no instruction of
+  // it runs (the function would have written 7 to out[0]).
+  uint32_t * offset = &c.code->request_offset;
+  uint32_t real = *offset;
+  *offset = real + 8;
+  out[0] = 0xDEADBEEF;
+  EXPECT_EQ(grjit_code_call(c.code, w.ctx, nullptr, out), static_cast<uint32_t>(GRJIT_EXIT_REFUSED));
+  EXPECT_EQ(out[0], static_cast<uint64_t>(GRCORE_ERR_INVALID));
+  *offset = real;
+  EXPECT_EQ(c.run(w.ctx).exit, static_cast<uint32_t>(GRJIT_EXIT_RETURNED));
+}
+
 TEST(Compile, AFunctionThatFailsTheVerifierIsRefused) {
   GRJIT_REQUIRE_BACKEND();
   JitWorld w;
@@ -384,6 +419,52 @@ TEST(Compile, AFrameOverTheLimitIsALimitErrorAndNothingIsMapped) {
   Compiled ok(f, w.pages(), nullptr, &roomy);
   ASSERT_TRUE(ok) << grjit_result_string(ok.result);
   EXPECT_EQ(ok.run(w.ctx).out[0], 1u);
+}
+
+namespace {
+uint64_t helper_zero() { return 0; }
+
+/* `sites` GC-point calls, a reference live across each: `sites` entries. */
+GRJIT_Function * with_sites(int sites, const GRJIT_Limits * limits) {
+  B b("sites", 0, limits);
+  GRJIT_VReg acc = b.reg(), k = b.reg(), t = b.reg();
+  b.at(b.block());
+  b.cnst(acc, 0);
+  for (int i = 0; i < sites; i++) {
+    GRJIT_VReg r = b.reg(GRJIT_TYPE_REF);
+    b.cnst(k, i);
+    b.bitcast(r, k);
+    b.call_gc(GRJIT_NO_VREG, reinterpret_cast<const void *>(helper_zero), {},
+        GRCORE_PollIdentity{1, static_cast<uint64_t>(i)}, {});
+    b.bitcast(t, r);
+    b.bin(GRJIT_OP_ADD, acc, V(acc), V(t));
+  }
+  b.ret(V(acc));
+  return b.finish();
+}
+} // namespace
+
+TEST(Compile, TheRegistersRecordedAsLiveOverAllSitesAreCappedAndNothingIsMapped) {
+  GRJIT_REQUIRE_BACKEND();
+  JitWorld w;
+  constexpr int kSites = 50;
+  Fn f(with_sites(kSites, nullptr));
+  // Fifty sites with one live reference each: fifty entries. At the cap it
+  // compiles; one under it is a limit error from the verifier's own liveness
+  // as much as from the emitter's.
+  GRJIT_Limits at{};
+  at.max_site_entries = kSites;
+  Compiled ok(f, w.pages(), nullptr, &at);
+  ASSERT_TRUE(ok) << grjit_result_string(ok.result);
+  EXPECT_EQ(ok.run(w.ctx).out[0], static_cast<uint64_t>(kSites * (kSites - 1) / 2));
+  GRJIT_Limits under{};
+  under.max_site_entries = kSites - 1;
+  uint64_t blocks = w.blocks_in_use();
+  Compiled refused(f, w.pages(), nullptr, &under);
+  EXPECT_EQ(refused.result, GRJIT_ERR_LIMIT);
+  EXPECT_EQ(w.blocks_in_use(), blocks);
+  EXPECT_EQ(grjit_function_verify(f, &under, nullptr, 0), GRJIT_ERR_LIMIT);
+  EXPECT_EQ(grjit_function_verify(f, &at, nullptr, 0), GRJIT_OK);
 }
 
 TEST(Compile, ATwoMebibyteFrameIsALimitError) {

@@ -61,6 +61,12 @@ typedef struct GRJIT_Limits {
                                ///< Default 1 MiB.
   size_t max_code_bytes;       ///< Emitted machine code, bytes. Default
                                ///< 16 MiB.
+  size_t max_site_entries;     ///< The registers recorded as live, summed over
+                               ///< every site of a function (what the stack
+                               ///< maps are made of). Default 4 Mi, 16 MiB of
+                               ///< working memory. The code and frame caps do
+                               ///< not bound it: sites times live registers
+                               ///< can be many times either.
 } GRJIT_Limits;
 
 /**

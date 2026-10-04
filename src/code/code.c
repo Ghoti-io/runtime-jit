@@ -120,8 +120,18 @@ __attribute__((no_sanitize("function")))
 uint32_t grjit_code_call(const GRJIT_Code * code, void * context,
     const uint64_t * args, uint64_t * out) {
   /* Code is compiled against one build's layout of the context; a core that
-   * moved the request word makes every poll in it read the wrong word. */
-  assert(code->request_offset == grcore_jit_layout()->request_word_offset);
+   * moved the request word makes every poll in it read the wrong word, so the
+   * call is refused before any of it runs. The same refusal answers a NULL
+   * code. It is the exit the poll helper uses, with ::GRCORE_ERR_INVALID in
+   * out[0] (when there is somewhere to put it), and costs one compare on a
+   * call that has just loaded the entry point. */
+  if (code == NULL ||
+      code->request_offset != grcore_jit_layout()->request_word_offset) {
+    if (out != NULL) {
+      out[0] = (uint64_t)GRCORE_ERR_INVALID;
+    }
+    return GRJIT_EXIT_REFUSED;
+  }
   return code->entry(context, args, out);
 }
 
@@ -150,7 +160,7 @@ GRJIT_Result grjit_emit_for(GRJIT_Arch arch, const GRJIT_Function * function,
     return GRJIT_ERR_LIMIT;
   }
   GRJIT_LiveSites live;
-  GRJIT_Result r = grjit_liveness_compute(function, a, &live);
+  GRJIT_Result r = grjit_liveness_compute(function, a, limits.max_site_entries, &live);
   if (r != GRJIT_OK) {
     return r;
   }

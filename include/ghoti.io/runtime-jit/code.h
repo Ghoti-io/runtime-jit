@@ -124,9 +124,11 @@ GRJIT_API size_t grjit_code_param_count(const GRJIT_Code * code);
 /**
  * @brief Calls the code.
  *
- * Asserts, in a build without `NDEBUG`, that the layout descriptor of
- * runtime-core still names the request-word offset the code was compiled
- * against.
+ * Refuses, without running any of the code, a NULL `code` and code compiled
+ * against a different request-word offset than the runtime-core now loaded
+ * names (a core and a JIT built from different versions): the answer is
+ * ::GRJIT_EXIT_REFUSED with ::GRCORE_ERR_INVALID in `out[0]`, written only if
+ * `out` is not NULL.
  *
  * @param code The code.
  * @param context The context pointer the code's polls load through.

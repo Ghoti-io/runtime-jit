@@ -64,6 +64,7 @@ TEST(Limits, DefaultsAreTheDocumentedOnes) {
   EXPECT_EQ(limits.max_frame_state_slots, 4096u);
   EXPECT_EQ(limits.max_frame_bytes, 1u << 20);
   EXPECT_EQ(limits.max_code_bytes, 16u << 20);
+  EXPECT_EQ(limits.max_site_entries, 4u << 20);
   grjit_limits_default(nullptr); // ignored
 }
 

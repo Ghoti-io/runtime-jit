@@ -54,6 +54,15 @@ typedef struct GRJIT_LiveSites {
   GRJIT_SiteLive * sites;
   size_t count;
   GRJIT_VReg * pool;
+  /** The first operation (block then operation order) that assigns a register
+   *  some live derived pointer is based on, if any: a collector that rebuilds
+   *  the pointer from its base would rebuild it from the new value. Set only
+   *  for a function that has sites. */
+  bool base_redefined;
+  GRJIT_BlockId redefined_block;
+  size_t redefined_op;
+  GRJIT_VReg redefined_base;
+  GRJIT_VReg redefined_derived;
 } GRJIT_LiveSites;
 
 /**
@@ -66,9 +75,14 @@ typedef struct GRJIT_LiveSites {
  * guard it is what its frame state names (the exit stub leaves the function).
  * A register that has not been assigned is not live: it is not read before it
  * is written, so the backward analysis never reaches it.
+ *
+ * `max_entries` caps the registers recorded as live summed over every site;
+ * past it the answer is ::GRJIT_ERR_LIMIT and nothing is kept. The work is
+ * the sites times the words of a set plus the entries, never the sites times
+ * the registers.
  */
 GRJIT_Result grjit_liveness_compute(const GRJIT_Function * function,
-    const GRJIT_Allocator * allocator, GRJIT_LiveSites * out);
+    const GRJIT_Allocator * allocator, size_t max_entries, GRJIT_LiveSites * out);
 
 /** Frees what ::grjit_liveness_compute allocated. */
 void grjit_liveness_free(GRJIT_LiveSites * sites);

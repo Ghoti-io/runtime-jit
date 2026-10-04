@@ -31,6 +31,7 @@
 
 #include "../ir/ir_internal.h"
 
+#include <stdint.h>
 #include <string.h>
 
 typedef struct Ctx {
@@ -43,12 +44,12 @@ static void set_bit(uint64_t * s, uint32_t bit) {
   s[bit / 64] |= UINT64_C(1) << (bit % 64);
 }
 
-static void clear_bit(uint64_t * s, uint32_t bit) {
-  s[bit / 64] &= ~(UINT64_C(1) << (bit % 64));
-}
-
 static bool test_bit(const uint64_t * s, uint32_t bit) {
   return (s[bit / 64] >> (bit % 64)) & 1u;
+}
+
+static void clear_bit(uint64_t * s, uint32_t bit) {
+  s[bit / 64] &= ~(UINT64_C(1) << (bit % 64));
 }
 
 static void add_use(void * user, GRJIT_VReg v) {
@@ -89,7 +90,7 @@ static void transfer(Ctx * c, const GRJIT_Op * op, uint64_t * live) {
 }
 
 GRJIT_Result grjit_liveness_compute(const GRJIT_Function * f,
-    const GRJIT_Allocator * a, GRJIT_LiveSites * out) {
+    const GRJIT_Allocator * a, size_t max_entries, GRJIT_LiveSites * out) {
   memset(out, 0, sizeof *out);
   out->allocator = a;
   size_t site_total = 0;
@@ -103,15 +104,36 @@ GRJIT_Result grjit_liveness_compute(const GRJIT_Function * f,
   if (site_total == 0) {
     return GRJIT_OK;
   }
-  uint32_t * index = a->malloc_fn(a->ctx, (f->vreg_count + 1) * sizeof *index);
+  /* `index` maps a register to its bit, and the second half of the block maps
+   * a bit back to its register, so that a set is read by its set bits and not
+   * by testing every register. */
+  uint32_t * index =
+      a->malloc_fn(a->ctx, (4 * (f->vreg_count + 1)) * sizeof *index);
   if (index == NULL) {
     return GRJIT_ERR_OOM;
   }
+  uint32_t * bit_vreg = index + f->vreg_count + 1;
+  /* The derived pointers based on each register, as a list threaded through
+   * `next_derived`: `first_derived[v]` is the first, UINT32_MAX for none. */
+  uint32_t * first_derived = bit_vreg + f->vreg_count + 1;
+  uint32_t * next_derived = first_derived + f->vreg_count + 1;
   uint32_t tracked = 0;
+  for (size_t v = 0; v < f->vreg_count; v++) {
+    first_derived[v] = UINT32_MAX;
+    next_derived[v] = UINT32_MAX;
+  }
   for (size_t v = 0; v < f->vreg_count; v++) {
     bool t = f->vregs[v].type == GRJIT_TYPE_REF ||
              (f->vregs[v].type == GRJIT_TYPE_PTR && f->vregs[v].derived);
-    index[v] = t ? tracked++ : UINT32_MAX;
+    index[v] = t ? tracked : UINT32_MAX;
+    if (t) {
+      bit_vreg[tracked++] = (uint32_t)v;
+    }
+    if (f->vregs[v].type == GRJIT_TYPE_PTR && f->vregs[v].derived &&
+        f->vregs[v].base < f->vreg_count) {
+      next_derived[v] = first_derived[f->vregs[v].base];
+      first_derived[f->vregs[v].base] = (uint32_t)v;
+    }
   }
   size_t words = ((size_t)tracked + 63) / 64;
   if (words == 0) {
@@ -186,6 +208,23 @@ GRJIT_Result grjit_liveness_compute(const GRJIT_Function * f,
       size_t slot = at + block_sites;
       for (size_t i = b->count; i-- > 0;) {
         const GRJIT_Op * op = &b->ops[i];
+        if (pass == 0 && !out->base_redefined) {
+          /* `cur` is what is live after this operation. */
+          GRJIT_VReg def = grjit_op_def(op);
+          if (def != GRJIT_NO_VREG && def < f->vreg_count) {
+            for (uint32_t d = first_derived[def]; d != UINT32_MAX;
+                d = next_derived[d]) {
+              if (index[d] != UINT32_MAX && test_bit(cur, index[d])) {
+                out->base_redefined = true;
+                out->redefined_block = (GRJIT_BlockId)bi;
+                out->redefined_op = i;
+                out->redefined_base = def;
+                out->redefined_derived = d;
+                break;
+              }
+            }
+          }
+        }
         if (grjit_op_has_state(op)) {
           slot--;
           memset(state_set, 0, words * sizeof *state_set);
@@ -216,19 +255,24 @@ GRJIT_Result grjit_liveness_compute(const GRJIT_Function * f,
             }
           }
           if (pass == 0) {
-            for (size_t v = 0; v < f->vreg_count; v++) {
-              if (index[v] != UINT32_MAX && test_bit(site_set, index[v])) {
-                pool_size++;
-              }
+            for (size_t w = 0; w < words; w++) {
+              pool_size += (size_t)__builtin_popcountll(site_set[w]);
+            }
+            if (pool_size > max_entries) {
+              a->free_fn(a->ctx, index);
+              a->free_fn(a->ctx, live_in);
+              a->free_fn(a->ctx, sites);
+              return GRJIT_ERR_LIMIT;
             }
           } else {
             sites[slot].block = (GRJIT_BlockId)bi;
             sites[slot].op_index = i;
             sites[slot].vregs = pool + fill;
             size_t n = 0;
-            for (size_t v = 0; v < f->vreg_count; v++) {
-              if (index[v] != UINT32_MAX && test_bit(site_set, index[v])) {
-                pool[fill++] = (GRJIT_VReg)v;
+            for (size_t w = 0; w < words; w++) {
+              for (uint64_t bits = site_set[w]; bits != 0; bits &= bits - 1) {
+                pool[fill++] =
+                    (GRJIT_VReg)bit_vreg[w * 64 + (size_t)__builtin_ctzll(bits)];
                 n++;
               }
             }
@@ -240,6 +284,12 @@ GRJIT_Result grjit_liveness_compute(const GRJIT_Function * f,
       at += block_sites;
     }
     if (pass == 0) {
+      if (pool_size > SIZE_MAX / sizeof *pool - 1) {
+        a->free_fn(a->ctx, index);
+        a->free_fn(a->ctx, live_in);
+        a->free_fn(a->ctx, sites);
+        return GRJIT_ERR_LIMIT;
+      }
       pool = a->malloc_fn(a->ctx, (pool_size + 1) * sizeof *pool);
       if (pool == NULL) {
         a->free_fn(a->ctx, index);
