@@ -131,8 +131,12 @@ GRJIT_INTERNAL_API GRJIT_Result grjit_memory_create(
 GRJIT_INTERNAL_API void grjit_icache_sync(void * mapping, size_t size);
 
 /** How many times ::grjit_icache_sync has been called in this process (only the
- *  arm64 path of ::grjit_memory_create calls it). A diagnostic a test reads to
- *  prove the call is reached; nothing depends on it. */
+ *  arm64 path of ::grjit_memory_create calls it). **Test-only, and present in
+ *  the shipped library**: the counter is one relaxed atomic add per code
+ *  mapping, kept in the same object as the sync it counts, so this reader is
+ *  hidden (not exported, not part of any header under include/) rather than
+ *  absent. Nothing in the library reads it; it is a diagnostic a test uses to
+ *  prove the call is reached. */
 GRJIT_INTERNAL_API uint64_t grjit_icache_sync_count(void);
 
 /** Releases a mapping made by ::grjit_memory_create, first removing its
