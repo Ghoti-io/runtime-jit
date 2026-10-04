@@ -262,6 +262,16 @@ stack for aarch64 and runs every test of this library, and `lang-tang`'s JIT arm
 under `qemu-aarch64`, with the arm64 planted defect (`SHR` and `SAR` swapped in
 the arm64 emitter) caught by the native differential there.
 
+**Pointer authentication and BTI.** Compiled code and the frame-record walk
+assume the saved link register at `[x29 + 8]` is a plain return address: nothing
+signs it (no `paciasp`/`autiasp`, no `pac-ret`), and nothing marks the code with
+branch-target landing pads. A build that signs return addresses (`-mbranch-protection=pac-ret`),
+or a process that enforces BTI on executable pages, would make the walk read a
+signed address and would trap on entry, so **PAC-enabled and BTI-enforcing
+builds are unsupported and untested**. The helper's walk
+(`lang-tang/src/jit/helpers.c`) would need to strip the signature (`xpaclri`)
+before using the return address.
+
 **Rejected:**
 
 - **Values in callee-saved registers** (`x19`-`x28`). They are why a second
@@ -423,6 +433,7 @@ numbers; the calibration row is what to read them against.
   and compiled code is for Linux x86-64 and Linux arm64 only, so
   `grjit_backend_available()` is false elsewhere. Windows arm64 and macOS are not
   here.
+- **Pointer authentication and BTI** (above): unsupported and untested.
 - **Real arm64 hardware.** The arm64 backend's code runs under `qemu-aarch64`
   (every test of this library and `lang-tang`'s JIT arm) and in a simulator, and
   nowhere else. Instruction-cache coherence, memory ordering and a real kernel's

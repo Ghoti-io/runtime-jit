@@ -36,9 +36,10 @@
 static uint64_t g_icache_syncs; /* __atomic builtins only */
 
 void grjit_icache_sync(void * mapping, size_t size) {
-  /* On x86-64 the builtin is a no-op (instruction fetch is coherent with
-   * stores), and it is still called: what a test counts is that the arm64 path
-   * reaches this line, which is the claim a run under an emulator cannot make. */
+  /* Only the arm64 branch of grjit_memory_create calls this; an x86-64 mapping
+   * never does. On an x86-64 host the builtin is a no-op (instruction fetch is
+   * coherent with stores), which lets a test make an arm64 mapping there and
+   * count that this line was reached: the claim an emulator cannot make. */
   __builtin___clear_cache((char *)mapping, (char *)mapping + size);
   __atomic_add_fetch(&g_icache_syncs, 1, __ATOMIC_RELAXED);
 }
