@@ -22,7 +22,8 @@
  * @file backend.h
  * @stability free
  *
- * The baseline backends: x86-64 and arm64.
+ * The baseline backends: x86-64 (SysV on Linux, Microsoft x64 on Windows) and
+ * arm64.
  *
  * The baseline is deliberately dull: every register and parameter lives in a
  * frame slot at a negative offset from the frame pointer (`rbp` on x86-64,
@@ -36,11 +37,13 @@
  * both.
  *
  * The backend is chosen when the library is built, by the compiler's target,
- * never at run time. It exists on Linux x86-64 and Linux arm64 and is compiled
- * out elsewhere: ::grjit_backend_available is then false and ::grjit_compile
- * returns ::GRJIT_ERR_UNSUPPORTED. The Windows unwind registration is a stub;
- * Windows arm64 and macOS are not here. On arm64 the instruction cache is made
- * coherent with the code after it is written and before it is made executable.
+ * never at run time. It exists on Linux x86-64, Linux arm64 and Windows x86-64
+ * and is compiled out elsewhere: ::grjit_backend_available is then false and
+ * ::grjit_compile returns ::GRJIT_ERR_UNSUPPORTED. Windows arm64 and macOS are
+ * not here. On Windows x86-64 the code is in the Microsoft x64 calling
+ * convention and carries unwind information registered with the system; on
+ * arm64 the instruction cache is made coherent with the code after it is
+ * written and before it is made executable.
  */
 
 #ifndef GHOTI_IO_GRJIT_BACKEND_H
@@ -87,8 +90,8 @@ typedef struct GRJIT_CompileOptions {
   GRJIT_EntryHook entry_hook;        ///< NULL for none.
 } GRJIT_CompileOptions;
 
-/** @brief Whether this build can compile and run code: true on Linux x86-64
- *  and Linux arm64, false elsewhere. */
+/** @brief Whether this build can compile and run code: true on Linux x86-64,
+ *  Linux arm64 and Windows x86-64, false elsewhere. */
 GRJIT_API bool grjit_backend_available(void);
 
 /**
@@ -97,7 +100,8 @@ GRJIT_API bool grjit_backend_available(void);
  * An unverified function is refused with ::GRJIT_ERR_INVALID (a function over
  * a cap, ::GRJIT_ERR_LIMIT). A frame over `max_frame_bytes` or code over
  * `max_code_bytes` is ::GRJIT_ERR_LIMIT. A page provider with no `protect` is
- * ::GRJIT_ERR_UNSUPPORTED and one whose `protect` fails is ::GRJIT_ERR_IO. The
+ * ::GRJIT_ERR_UNSUPPORTED and one whose `protect` fails, or (Windows x86-64) a
+ * system that refuses the unwind registration, is ::GRJIT_ERR_IO. The
  * emitted metadata is validated before this returns; a failure is
  * ::GRJIT_ERR_INTERNAL. On any failure everything made is freed and the page
  * provider's accounting is where it started.

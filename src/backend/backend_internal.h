@@ -31,7 +31,10 @@
  * at `-8 * (v + 4)`. Nothing is ever pushed or allocated after the prologue, so
  * the stack pointer is 16-byte aligned at every call. Both backends use this
  * layout, which is why the stack-map and deopt format, the liveness pass and
- * every consumer's frame walk are the same for both.
+ * every consumer's frame walk are the same for both. (The Windows x86-64 flavour
+ * adds 48 bytes of outgoing area at the very bottom of the frame, below every
+ * slot, for a callee's shadow space and the fifth and sixth arguments; the
+ * metadata's frame size is the base frame without it.)
  */
 
 #ifndef GHOTI_IO_GRJIT_SRC_BACKEND_BACKEND_INTERNAL_H
@@ -55,6 +58,16 @@ extern "C" {
 #define GRJIT_SLOT_OUT (-16)
 #define GRJIT_SLOT_ARGS (-24)
 #define GRJIT_FIXED_SLOTS 3
+
+/** Where the instructions of the x86-64 prologue (`push rbp; mov rbp, rsp;
+ *  sub rsp, N`) end, as offsets from the first byte of code, and `N`. The
+ *  Windows unwind information names exactly these. */
+typedef struct GRJIT_Prologue {
+  uint32_t push_end;    ///< After `push rbp`.
+  uint32_t setfp_end;   ///< After `mov rbp, rsp`.
+  uint32_t alloc_end;   ///< After `sub rsp, N`.
+  uint32_t alloc_bytes; ///< `N`: the base frame, and on Win64 the outgoing area.
+} GRJIT_Prologue;
 
 /** A label: an index into an assembler's label table. */
 typedef size_t GRJIT_Label;

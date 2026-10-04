@@ -39,17 +39,24 @@ void grjit_emit_refuse_stub(GRJIT_Emit * e) {
   grjit_asm_load64(a, GRJIT_RDX, GRJIT_RBP, GRJIT_SLOT_OUT);
   grjit_asm_store64(a, GRJIT_RDX, 0, GRJIT_RAX);
   grjit_asm_mov_ri(a, GRJIT_RAX, GRJIT_EXIT_REFUSED);
-  grjit_asm_leave(a);
-  grjit_asm_ret(a);
+  grjit_emit_epilogue(e);
 }
 
 void grjit_emit_poll_stub(GRJIT_Emit * e, const GRJIT_Pending * p) {
   GRJIT_Asm * a = &e->as;
   const GRJIT_FrameState * state = &e->c.f->states[p->op->state];
   grjit_asm_bind(a, p->entry);
-  grjit_asm_load64(a, GRJIT_RDI, GRJIT_RBP, GRJIT_SLOT_CTX);
-  grjit_asm_mov_ri(a, GRJIT_RSI, state->identity.function);
-  grjit_asm_mov_ri(a, GRJIT_RDX, state->identity.offset);
+  /* The helper is (context, function, offset): rdi, rsi, rdx on SysV; rcx,
+   * rdx, r8 on Win64. */
+  if (e->win64) {
+    grjit_asm_load64(a, GRJIT_RCX, GRJIT_RBP, GRJIT_SLOT_CTX);
+    grjit_asm_mov_ri(a, GRJIT_RDX, state->identity.function);
+    grjit_asm_mov_ri(a, GRJIT_R8, state->identity.offset);
+  } else {
+    grjit_asm_load64(a, GRJIT_RDI, GRJIT_RBP, GRJIT_SLOT_CTX);
+    grjit_asm_mov_ri(a, GRJIT_RSI, state->identity.function);
+    grjit_asm_mov_ri(a, GRJIT_RDX, state->identity.offset);
+  }
   grjit_asm_mov_ri(a, GRJIT_RAX, (uint64_t)(uintptr_t)e->c.f->poll_helper);
   grjit_asm_call_r(a, GRJIT_RAX);
   /* The return address is the site: the helper may be a GC point. */
@@ -86,6 +93,5 @@ void grjit_emit_guard_stub(GRJIT_Emit * e, const GRJIT_Pending * p) {
   grjit_asm_mov_ri(a, GRJIT_RAX, offset);
   grjit_asm_store64(a, GRJIT_RDX, (int32_t)(8 * state->slot_count), GRJIT_RAX);
   grjit_asm_mov_ri(a, GRJIT_RAX, GRJIT_EXIT_DEOPT);
-  grjit_asm_leave(a);
-  grjit_asm_ret(a);
+  grjit_emit_epilogue(e);
 }

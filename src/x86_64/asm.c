@@ -63,6 +63,17 @@ size_t grjit_asm_size(const GRJIT_Asm * a) {
   return a->length;
 }
 
+uint32_t grjit_asm_regs_used(const GRJIT_Asm * a) {
+  return a->regs_used;
+}
+
+/* Records that an instruction names register `r`. Called for the operands that
+ * are registers only, never for the opcode extension a ModRM reg field can
+ * carry. */
+static void note(GRJIT_Asm * a, int r) {
+  a->regs_used |= (uint32_t)1 << (r & 15);
+}
+
 static void fail(GRJIT_Asm * a, GRJIT_AsmStatus status) {
   if (a->status == GRJIT_ASM_OK) {
     a->status = status;
@@ -164,6 +175,8 @@ static void modrm_mem(GRJIT_Asm * a, int reg, GRJIT_Reg base, int32_t disp) {
  * two opcode bytes, ModRM. */
 static void inst_mem(GRJIT_Asm * a, bool p66, bool w, uint8_t op1, int op2,
     int reg, GRJIT_Reg base, int32_t disp, bool force_rex) {
+  note(a, reg);
+  note(a, base);
   if (p66) {
     byte(a, 0x66);
   }
@@ -176,18 +189,23 @@ static void inst_mem(GRJIT_Asm * a, bool p66, bool w, uint8_t op1, int op2,
 }
 
 void grjit_asm_mov_rr(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg src) {
+  note(a, dst);
+  note(a, src);
   rex(a, true, src, dst, false);
   byte(a, 0x89);
   modrm_rr(a, src, dst);
 }
 
 void grjit_asm_mov32_rr(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg src) {
+  note(a, dst);
+  note(a, src);
   rex(a, false, src, dst, false);
   byte(a, 0x89);
   modrm_rr(a, src, dst);
 }
 
 void grjit_asm_mov_ri(GRJIT_Asm * a, GRJIT_Reg dst, uint64_t imm) {
+  note(a, dst);
   if (imm <= UINT32_MAX) {
     rex(a, false, 0, dst, false);
     byte(a, (uint8_t)(0xB8 + (dst & 7)));
@@ -203,6 +221,7 @@ void grjit_asm_mov_ri(GRJIT_Asm * a, GRJIT_Reg dst, uint64_t imm) {
 }
 
 void grjit_asm_mov_ri64(GRJIT_Asm * a, GRJIT_Reg dst, uint64_t imm) {
+  note(a, dst);
   rex(a, true, 0, dst, false);
   byte(a, (uint8_t)(0xB8 + (dst & 7)));
   imm64(a, imm);
@@ -214,6 +233,14 @@ void grjit_asm_load64(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg base, int32_t disp
 
 void grjit_asm_store64(GRJIT_Asm * a, GRJIT_Reg base, int32_t disp, GRJIT_Reg src) {
   inst_mem(a, false, true, 0x89, -1, src, base, disp, false);
+}
+
+void grjit_asm_lea(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg base, int32_t disp) {
+  inst_mem(a, false, true, 0x8D, -1, dst, base, disp, false);
+}
+
+void grjit_asm_probe(GRJIT_Asm * a, GRJIT_Reg base, int32_t disp) {
+  inst_mem(a, false, false, 0x84, -1, GRJIT_RAX, base, disp, false);
 }
 
 void grjit_asm_load8u(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg base, int32_t disp) {
@@ -253,12 +280,16 @@ void grjit_asm_store32(GRJIT_Asm * a, GRJIT_Reg base, int32_t disp, GRJIT_Reg sr
 }
 
 void grjit_asm_alu_rr(GRJIT_Asm * a, GRJIT_AluOp op, GRJIT_Reg dst, GRJIT_Reg src) {
+  note(a, dst);
+  note(a, src);
   rex(a, true, src, dst, false);
   byte(a, (uint8_t)op);
   modrm_rr(a, src, dst);
 }
 
 void grjit_asm_imul_rr(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg src) {
+  note(a, dst);
+  note(a, src);
   rex(a, true, dst, src, false);
   byte(a, 0x0F);
   byte(a, 0xAF);
@@ -266,6 +297,7 @@ void grjit_asm_imul_rr(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg src) {
 }
 
 static void group3(GRJIT_Asm * a, uint8_t opcode, int ext, GRJIT_Reg r) {
+  note(a, r);
   rex(a, true, 0, r, false);
   byte(a, opcode);
   modrm_rr(a, ext, r);
@@ -292,12 +324,15 @@ void grjit_asm_sar_cl(GRJIT_Asm * a, GRJIT_Reg r) {
 }
 
 void grjit_asm_test_rr(GRJIT_Asm * a, GRJIT_Reg x, GRJIT_Reg y) {
+  note(a, x);
+  note(a, y);
   rex(a, true, y, x, false);
   byte(a, 0x85);
   modrm_rr(a, y, x);
 }
 
 void grjit_asm_setcc(GRJIT_Asm * a, GRJIT_Cond cond, GRJIT_Reg r) {
+  note(a, r);
   rex(a, false, 0, r, r >= 4 && r < 8);
   byte(a, 0x0F);
   byte(a, (uint8_t)(0x90 + cond));
@@ -305,6 +340,8 @@ void grjit_asm_setcc(GRJIT_Asm * a, GRJIT_Cond cond, GRJIT_Reg r) {
 }
 
 void grjit_asm_movzx_r8(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg src) {
+  note(a, dst);
+  note(a, src);
   rex(a, false, dst, src, src >= 4 && src < 8);
   byte(a, 0x0F);
   byte(a, 0xB6);
@@ -312,16 +349,19 @@ void grjit_asm_movzx_r8(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg src) {
 }
 
 void grjit_asm_push(GRJIT_Asm * a, GRJIT_Reg r) {
+  note(a, r);
   rex(a, false, 0, r, false);
   byte(a, (uint8_t)(0x50 + (r & 7)));
 }
 
 void grjit_asm_pop(GRJIT_Asm * a, GRJIT_Reg r) {
+  note(a, r);
   rex(a, false, 0, r, false);
   byte(a, (uint8_t)(0x58 + (r & 7)));
 }
 
 static void rsp_adjust(GRJIT_Asm * a, int ext, uint32_t bytes) {
+  note(a, GRJIT_RSP);
   rex(a, true, 0, GRJIT_RSP, false);
   if (bytes <= 127) {
     byte(a, 0x83);
@@ -343,6 +383,7 @@ void grjit_asm_add_rsp(GRJIT_Asm * a, uint32_t bytes) {
 }
 
 void grjit_asm_call_r(GRJIT_Asm * a, GRJIT_Reg r) {
+  note(a, r);
   rex(a, false, 0, r, false);
   byte(a, 0xFF);
   modrm_rr(a, 2, r);

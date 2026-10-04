@@ -36,10 +36,16 @@
  * here. Destroying a code object unmaps its pages, so destroying one that a
  * thread is still running is the caller's error.
  *
- * **The calling convention** is the SysV one for
- * `uint32_t (void * context, const uint64_t * args, uint64_t * out)`. The
- * function loads its parameters from `args`, and returns one of the exits
- * below. `out` must hold ::grjit_code_out_words words.
+ * **The calling convention** is the target's own for
+ * `uint32_t (void * context, const uint64_t * args, uint64_t * out)`: SysV on
+ * Linux x86-64 (`rdi`, `rsi`, `rdx`), Microsoft x64 on Windows x86-64 (`rcx`,
+ * `rdx`, `r8`) and AAPCS64 on Linux arm64. The function loads its parameters
+ * from `args`, and returns one of the exits below. `out` must hold
+ * ::grjit_code_out_words words. On Windows x86-64 the code's pages also hold its
+ * unwind information, registered with the operating system for as long as the
+ * code lives, so that a native stack walk (a debugger, an exception dispatch,
+ * `RtlVirtualUnwind`) passes through the compiled frame; ::grjit_code_destroy
+ * removes the registration before it unmaps the pages.
  */
 
 #ifndef GHOTI_IO_GRJIT_CODE_H

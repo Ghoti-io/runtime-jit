@@ -102,6 +102,7 @@ typedef struct GRJIT_Asm {
   GRJIT_AsmFixup * fixups;
   size_t fixup_count;
   size_t fixup_capacity;
+  uint32_t regs_used;  ///< Bit `r` is set once register `r` has been encoded.
 } GRJIT_Asm;
 
 /** Starts an assembler whose output may not exceed `limit` bytes. */
@@ -110,6 +111,11 @@ void grjit_asm_init(GRJIT_Asm * a, const GRJIT_Allocator * allocator, size_t lim
 void grjit_asm_free(GRJIT_Asm * a);
 /** The first failure, or ::GRJIT_ASM_OK. */
 GRJIT_AsmStatus grjit_asm_status(const GRJIT_Asm * a);
+/** Every register an emitted instruction has named, one bit per hardware
+ *  number (`rsp` included). It is what the Win64 tests read to show that a
+ *  callee-saved register (`rbx`, `rsi`, `rdi`, `r12`-`r15`) is never touched,
+ *  without disassembling anything. */
+uint32_t grjit_asm_regs_used(const GRJIT_Asm * a);
 /** The bytes emitted so far. */
 const uint8_t * grjit_asm_bytes(const GRJIT_Asm * a);
 /** Their count: also the offset of the next instruction. */
@@ -136,6 +142,11 @@ void grjit_asm_mov_ri(GRJIT_Asm * a, GRJIT_Reg dst, uint64_t imm);
 void grjit_asm_mov_ri64(GRJIT_Asm * a, GRJIT_Reg dst, uint64_t imm);
 void grjit_asm_load64(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg base, int32_t disp);
 void grjit_asm_store64(GRJIT_Asm * a, GRJIT_Reg base, int32_t disp, GRJIT_Reg src);
+/** `lea dst, [base + disp]`. */
+void grjit_asm_lea(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg base, int32_t disp);
+/** `test byte [base + disp], al`: a read of that byte that changes only the
+ *  flags, for the stack probes of a Win64 frame of a page or more. */
+void grjit_asm_probe(GRJIT_Asm * a, GRJIT_Reg base, int32_t disp);
 /** Zero-extending loads of 8, 16 and 32 bits into a 64-bit register. */
 void grjit_asm_load8u(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg base, int32_t disp);
 void grjit_asm_load16u(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg base, int32_t disp);

@@ -609,7 +609,7 @@ TEST(Arm64Memory, EveryArm64MappingIsSyncedOnceBetweenTheWriteAndTheFlipAndFille
   void * mapping = nullptr;
   size_t mapped = 0;
   ASSERT_EQ(grjit_memory_create(&pages.vtable, GRJIT_ARCH_ARM64, code, sizeof code,
-                &mapping, &mapped),
+                nullptr, &mapping, &mapped, nullptr),
       GRJIT_OK);
   EXPECT_EQ(grjit_icache_sync_count(), before + 1) << "once per mapping";
   EXPECT_EQ(at_protect, before + 1) << "before the mapping was made executable";
@@ -629,7 +629,7 @@ TEST(Arm64Memory, EveryArm64MappingIsSyncedOnceBetweenTheWriteAndTheFlipAndFille
   // An x86-64 mapping is not synced and is filled with int3.
   before = grjit_icache_sync_count();
   ASSERT_EQ(grjit_memory_create(&pages.vtable, GRJIT_ARCH_X86_64, code, sizeof code,
-                &mapping, &mapped),
+                nullptr, &mapping, &mapped, nullptr),
       GRJIT_OK);
   EXPECT_EQ(grjit_icache_sync_count(), before);
   EXPECT_EQ(static_cast<const uint8_t *>(mapping)[sizeof code], 0xCC);
@@ -656,8 +656,8 @@ TEST(Arm64Memory, ACompileOnArm64SyncsTheCacheOncePerCode) {
 
 /* ---- Availability ---------------------------------------------------------------------------- */
 
-TEST(Arm64Availability, ExactlyLinuxX86_64AndLinuxArm64ReportABackend) {
-#if (defined(__x86_64__) || defined(__aarch64__)) && defined(__linux__)
+TEST(Arm64Availability, ExactlyLinuxX86_64LinuxArm64AndWindowsX86_64ReportABackend) {
+#if GRJIT_TEST_HAVE_BACKEND
   EXPECT_TRUE(grjit_backend_available());
 #else
   EXPECT_FALSE(grjit_backend_available());
@@ -676,6 +676,8 @@ TEST(Arm64Availability, ExactlyLinuxX86_64AndLinuxArm64ReportABackend) {
   EXPECT_EQ(grjit_native_arch(), GRJIT_ARCH_X86_64);
 #elif defined(__aarch64__) && defined(__linux__)
   EXPECT_EQ(grjit_native_arch(), GRJIT_ARCH_ARM64);
+#elif defined(_WIN64) && defined(__x86_64__)
+  EXPECT_EQ(grjit_native_arch(), GRJIT_ARCH_X86_64_WIN64);
 #endif
 }
 

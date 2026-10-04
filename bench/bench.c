@@ -283,7 +283,8 @@ int main(int argc, char ** argv) {
     }
   }
   if (!grjit_backend_available()) {
-    /* Exit status 77 is "skipped": the Makefile counts it and does not fail. */
+    /* Exit status 77 is "skipped": the Makefile counts it and does not fail.
+     * Only a target with no backend (Windows arm64, macOS) gets here. */
     printf("SKIP: bench: no native code backend on this target\n");
     return 77;
   }

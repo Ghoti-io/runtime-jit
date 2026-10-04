@@ -22,7 +22,7 @@
  * @file
  *
  * Compiling a function, and the compiled-code handle. Machine code is made
- * for Linux x86-64 and Linux arm64, chosen by the compiler's target when the
+ * for Linux x86-64, Linux arm64 and Windows x86-64, chosen by the compiler's target when the
  * library is built, never at run time; elsewhere ::grjit_backend_available is
  * false and ::grjit_compile says so. Both instruction sets can be *emitted* on
  * any host (::grjit_emit_for), which is how the arm64 backend's encodings,
@@ -50,6 +50,9 @@
 #if defined(__x86_64__) && defined(__linux__)
 #define GRJIT_HAVE_BACKEND 1
 #define GRJIT_NATIVE GRJIT_ARCH_X86_64
+#elif defined(_WIN64) && defined(__x86_64__)
+#define GRJIT_HAVE_BACKEND 1
+#define GRJIT_NATIVE GRJIT_ARCH_X86_64_WIN64
 #elif defined(__aarch64__) && defined(__linux__)
 #define GRJIT_HAVE_BACKEND 1
 #define GRJIT_NATIVE GRJIT_ARCH_ARM64
@@ -71,7 +74,8 @@ void grjit_code_destroy(GRJIT_Code * code) {
     return;
   }
   const GRJIT_Allocator * a = code->allocator;
-  grjit_memory_destroy(code->pages, code->mapping, code->mapped_size);
+  grjit_memory_destroy(
+      code->pages, code->mapping, code->mapped_size, code->unwind_table);
   grjit_metadata_free(&code->meta);
   a->free_fn(a->ctx, code);
 }
@@ -167,7 +171,10 @@ GRJIT_Result grjit_emit_for(GRJIT_Arch arch, const GRJIT_Function * function,
     rec_count = a64.c.site_count;
   } else {
     r = grjit_emit_function(function, a, limits.max_code_bytes, hook,
-        request_offset, (uint32_t)frame, &live, &x86);
+        request_offset, (uint32_t)frame, arch == GRJIT_ARCH_X86_64_WIN64,
+        &live, &x86);
+    out->prologue = x86.prologue;
+    out->regs_used = grjit_asm_regs_used(&x86.as);
     bytes = grjit_asm_bytes(&x86.as);
     code_bytes = grjit_asm_size(&x86.as);
     recs = x86.c.sites;
@@ -244,7 +251,8 @@ GRJIT_Result grjit_compile(const GRJIT_CompileOptions * options,
     return GRJIT_ERR_OOM;
   }
   r = grjit_memory_create(options->pages, GRJIT_NATIVE, emitted.bytes,
-      emitted.size, &code->mapping, &code->mapped_size);
+      emitted.size, &emitted.prologue, &code->mapping, &code->mapped_size,
+      &code->unwind_table);
   if (r != GRJIT_OK) {
     a->free_fn(a->ctx, code);
     grjit_emitted_free(&emitted);

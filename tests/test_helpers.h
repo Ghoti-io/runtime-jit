@@ -323,14 +323,24 @@ struct Compiled {
   }
 };
 
-/* On a gated target (Linux x86-64, Linux arm64) the backend must exist: a test
- * that cannot run there fails, it is never skipped. Elsewhere it must say it is
- * absent, and the test is reported as SKIPPED, so that a target without a
- * backend (Windows) shows a count of what was not run and not a count of tests
- * that passed having proved nothing. The condition is the one the library
- * compiles its backend under, and a test in test_compile.cpp asserts that
- * exactly these targets report true. */
-#if (defined(__x86_64__) || defined(__aarch64__)) && defined(__linux__)
+/* The targets the library has a backend for, spelled as the library spells
+ * them (src/code/code.c): Linux x86-64, Linux arm64 and Windows x86-64. */
+#if ((defined(__x86_64__) || defined(__aarch64__)) && defined(__linux__)) || \
+    (defined(_WIN64) && defined(__x86_64__))
+#define GRJIT_TEST_HAVE_BACKEND 1
+#else
+#define GRJIT_TEST_HAVE_BACKEND 0
+#endif
+
+/* On a gated target (Linux x86-64, Linux arm64, Windows x86-64) the backend
+ * must exist: a test that cannot run there fails, it is never skipped.
+ * Elsewhere (Windows arm64, macOS) it must say it is absent, and the test is
+ * reported as SKIPPED, so that a target without a backend shows a count of
+ * what was not run and not a count of tests that passed having proved
+ * nothing. The condition is the one the library compiles its backend under,
+ * and a test in test_compile.cpp asserts that exactly these targets report
+ * true. */
+#if GRJIT_TEST_HAVE_BACKEND
 #define GRJIT_REQUIRE_BACKEND() \
   ASSERT_TRUE(grjit_backend_available()) \
       << "the backend is unavailable on the gated target"

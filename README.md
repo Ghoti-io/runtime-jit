@@ -20,11 +20,15 @@ The library depends on `cutil` and `runtime-core` and nothing else, accepts no
 collector type, and never interprets the IR: a test-only evaluator checks the
 backend against it, on 2000 generated functions per run.
 
-Nothing is released. Linux x86-64 and Linux arm64 are implemented, chosen by the
-compiler's target when the library is built (never at run time), and with the
-same frame layout, so the stack maps, the deopt records and every consumer's
-frame walk are the same; on any other target `grjit_backend_available()` is
-false and `grjit_compile` returns `GRJIT_ERR_UNSUPPORTED`. The arm64 backend's
+Nothing is released. Linux x86-64, Linux arm64 and Windows x86-64 are
+implemented, chosen by the compiler's target when the library is built (never at
+run time), and with the same frame layout, so the stack maps, the deopt records
+and every consumer's frame walk are the same; on any other target (Windows arm64,
+macOS) `grjit_backend_available()` is false and `grjit_compile` returns
+`GRJIT_ERR_UNSUPPORTED`. The Windows flavour is the x86-64 emitter in the
+Microsoft x64 calling convention, with its unwind information registered with the
+system; it is emitted and its bytes tested on every host, and run under wine
+(`tools/xwin/m1-run.sh` in the workspace), not yet on a Windows machine. The arm64 backend's
 encodings and hazards are tested on every host (the assembler is plain C that
 emits bytes, and a small simulator in the tests executes what it emits); running
 its code for real is `tools/xarch/jit-arm64.sh` in the workspace, under
@@ -93,7 +97,7 @@ this library:
 | `check-labels` | fail if a public header has no `@stability free` label (every header here is `free`) |
 | `check-edges` | fail on any `#include` or shared-object dependency on a Ghoti library other than `cutil`, `runtime-core` and this one |
 | `check-gates` | run each gate against a planted defect and a control, and against an empty tree, and fail unless each behaves |
-| `check-planted` | build the library with a planted backend defect (`SHR` and `SAR` swapped; every stack-map slot 8 bytes off; a live reference left out) and require the differential or the read-back to fail on it, and to pass without it |
+| `check-planted` | build the library with a planted backend defect (`SHR` and `SAR` swapped; every stack-map slot 8 bytes off; a live reference left out; and in the Windows flavour a callee-saved register used, no shadow space, an unwind table never registered) and require the differential, the read-back or the Win64 structural tests to fail on it, and to pass without it |
 | `bench` | run the benchmark harness in full; it prints a calibration result first |
 | `test-asan`, `test-tsan`, `test-valgrind-quiet` | the same tests under ASan+UBSan, ThreadSanitizer and Valgrind |
 | `coverage` | instrumented run and line report |
@@ -105,8 +109,8 @@ running a program that includes only the umbrella header.
 ## Status
 
 Scaffolded. The IR, the verifier, the printer, the x86-64 and arm64 baseline
-backends and their assemblers, the metadata, W^X code memory, the gates, the examples and the
+backends (the Windows one with its unwind registration) and their assemblers, the metadata, W^X code memory, the gates, the examples and the
 benchmark harness are in. Not here: wiring it into an engine, tier-up and
 compiled-code reference counting, rebuilding interpreter frames from compiled
-ones, unwind registration, Windows and macOS. `documentation/design.md` says
-why each is where it is.
+ones, Windows arm64 and macOS. `documentation/design.md` says why each is where
+it is.

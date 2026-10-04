@@ -40,8 +40,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* The registers that carry a helper's arguments. SysV: all six of the IR's.
+ * Win64: the first four; the fifth and sixth go at [rsp + 32] and [rsp + 40],
+ * above the callee's shadow space. */
 static const GRJIT_Reg arg_regs[GRJIT_BACKEND_MAX_ARGS] = {
     GRJIT_RDI, GRJIT_RSI, GRJIT_RDX, GRJIT_RCX, GRJIT_R8, GRJIT_R9};
+static const GRJIT_Reg win64_arg_regs[4] = {
+    GRJIT_RCX, GRJIT_RDX, GRJIT_R8, GRJIT_R9};
+#define GRJIT_WIN64_REG_ARGS 4
 
 /* Loads an operand into a register: a register's slot, or an immediate. */
 static void load_operand(GRJIT_Emit * e, GRJIT_Reg r, const GRJIT_Operand * o) {
@@ -171,8 +177,22 @@ static void emit_binary(GRJIT_Emit * e, const GRJIT_Op * op) {
 
 static void emit_call(GRJIT_Emit * e, const GRJIT_Op * op) {
   GRJIT_Asm * a = &e->as;
-  for (size_t i = 0; i < op->arg_count; i++) {
-    load_operand(e, arg_regs[i], &op->args[i]);
+  if (e->win64) {
+    /* The stack arguments first, through rax: they are stores to the outgoing
+     * area, and the register arguments are loads straight from slots, so no
+     * order between them can clobber an operand. */
+    for (size_t i = GRJIT_WIN64_REG_ARGS; i < op->arg_count; i++) {
+      load_operand(e, GRJIT_RAX, &op->args[i]);
+      grjit_asm_store64(a, GRJIT_RSP,
+          (int32_t)(32 + 8 * (i - GRJIT_WIN64_REG_ARGS)), GRJIT_RAX);
+    }
+    for (size_t i = 0; i < op->arg_count && i < GRJIT_WIN64_REG_ARGS; i++) {
+      load_operand(e, win64_arg_regs[i], &op->args[i]);
+    }
+  } else {
+    for (size_t i = 0; i < op->arg_count; i++) {
+      load_operand(e, arg_regs[i], &op->args[i]);
+    }
   }
   grjit_asm_mov_ri(a, GRJIT_RAX, op->address);
   grjit_asm_call_r(a, GRJIT_RAX);
@@ -290,8 +310,7 @@ static void emit_op(GRJIT_Emit * e, const GRJIT_Op * op, size_t block) {
         grjit_asm_store64(a, GRJIT_RDX, 0, GRJIT_RAX);
       }
       grjit_asm_mov_ri(a, GRJIT_RAX, GRJIT_EXIT_RETURNED);
-      grjit_asm_leave(a);
-      grjit_asm_ret(a);
+      grjit_emit_epilogue(e);
       break;
     case GRJIT_OP_COUNT:
       e->c.error = GRJIT_ERR_INTERNAL;
@@ -299,11 +318,48 @@ static void emit_op(GRJIT_Emit * e, const GRJIT_Op * op, size_t block) {
   }
 }
 
+void grjit_emit_epilogue(GRJIT_Emit * e) {
+  GRJIT_Asm * a = &e->as;
+  if (e->win64) {
+    /* The forms a Win64 unwinder recognises when it stops inside an epilogue:
+     * `lea rsp, [fp + 0]` for a frame with a frame register, then the pops,
+     * then `ret`. `leave` does the same work and is not one of them. */
+    grjit_asm_lea(a, GRJIT_RSP, GRJIT_RBP, 0);
+    grjit_asm_pop(a, GRJIT_RBP);
+    grjit_asm_ret(a);
+  } else {
+    grjit_asm_leave(a);
+    grjit_asm_ret(a);
+  }
+}
+
+/* Win64: a frame of a page or more is probed a page at a time, downwards from
+ * the return address, before rsp moves, so that the guard page is touched in
+ * order and the stack grows to cover the frame (a single access further down
+ * than the guard page is a stack overflow). The last probe is exactly at the
+ * new rsp. r10 and r11 are volatile on Win64. */
+static void emit_stack_probe(GRJIT_Emit * e, uint32_t alloc) {
+  GRJIT_Asm * a = &e->as;
+  GRJIT_Label loop = grjit_asm_label(a);
+  GRJIT_Label tail = grjit_asm_label(a);
+  grjit_asm_lea(a, GRJIT_R10, GRJIT_RSP, -(int32_t)alloc);
+  grjit_asm_lea(a, GRJIT_R11, GRJIT_RSP, 8);
+  grjit_asm_bind(a, loop);
+  grjit_asm_lea(a, GRJIT_R11, GRJIT_R11, -(int32_t)GRJIT_WIN64_PAGE);
+  grjit_asm_alu_rr(a, GRJIT_ALU_CMP, GRJIT_R11, GRJIT_R10);
+  grjit_asm_jcc(a, GRJIT_COND_BE, tail);
+  grjit_asm_probe(a, GRJIT_R11, 0);
+  grjit_asm_jmp(a, loop);
+  grjit_asm_bind(a, tail);
+  grjit_asm_probe(a, GRJIT_R10, 0);
+}
+
 GRJIT_Result grjit_emit_function(const GRJIT_Function * f,
     const GRJIT_Allocator * allocator, size_t max_code_bytes,
     GRJIT_EntryHook hook, uint32_t request_offset, uint32_t frame_bytes,
-    const GRJIT_LiveSites * live, GRJIT_Emit * e) {
+    bool win64, const GRJIT_LiveSites * live, GRJIT_Emit * e) {
   memset(e, 0, sizeof *e);
+  e->win64 = win64;
   grjit_emit_common_init(
       &e->c, f, allocator, hook, request_offset, frame_bytes, live);
   GRJIT_Asm * a = &e->as;
@@ -318,12 +374,40 @@ GRJIT_Result grjit_emit_function(const GRJIT_Function * f,
   e->refuse = grjit_asm_label(a);
 
   /* Prologue: frame, the three fixed slots, the entry hook, the parameters. */
+  uint32_t alloc = frame_bytes;
+  if (win64) {
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 6
+    /* Planted defect 6 (tests only): no outgoing area, so a callee's shadow
+     * space and the stack arguments land on the frame's own slots. */
+#else
+    alloc += GRJIT_WIN64_OUTGOING;
+#endif
+  }
+  if (alloc > (uint32_t)INT32_MAX - GRJIT_WIN64_PAGE) {
+    /* The allocation and the probe displacements are signed 32-bit fields of
+     * the encodings; a cap raised past 2 GiB is a limit, not a wrapped value. */
+    return GRJIT_ERR_LIMIT;
+  }
   grjit_asm_push(a, GRJIT_RBP);
+  e->prologue.push_end = (uint32_t)grjit_asm_size(a);
   grjit_asm_mov_rr(a, GRJIT_RBP, GRJIT_RSP);
-  grjit_asm_sub_rsp(a, frame_bytes);
-  grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_CTX, GRJIT_RDI);
-  grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_OUT, GRJIT_RDX);
-  grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_ARGS, GRJIT_RSI);
+  e->prologue.setfp_end = (uint32_t)grjit_asm_size(a);
+  if (win64 && (uint64_t)alloc + 8 > GRJIT_WIN64_PAGE) {
+    emit_stack_probe(e, alloc);
+  }
+  grjit_asm_sub_rsp(a, alloc);
+  e->prologue.alloc_end = (uint32_t)grjit_asm_size(a);
+  e->prologue.alloc_bytes = alloc;
+  if (win64) {
+    /* Microsoft x64: context in rcx, args in rdx, out in r8. */
+    grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_CTX, GRJIT_RCX);
+    grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_OUT, GRJIT_R8);
+    grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_ARGS, GRJIT_RDX);
+  } else {
+    grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_CTX, GRJIT_RDI);
+    grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_OUT, GRJIT_RDX);
+    grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_ARGS, GRJIT_RSI);
+  }
   if (hook != NULL) {
     grjit_asm_mov_ri(a, GRJIT_RAX, (uint64_t)(uintptr_t)hook);
     grjit_asm_call_r(a, GRJIT_RAX);
@@ -332,9 +416,17 @@ GRJIT_Result grjit_emit_function(const GRJIT_Function * f,
     grjit_asm_jcc(a, GRJIT_COND_NE, e->refuse);
   }
   if (f->param_count != 0) {
-    grjit_asm_load64(a, GRJIT_RSI, GRJIT_RBP, GRJIT_SLOT_ARGS);
+    /* The pointer to the arguments is held in a scratch register: rsi on SysV,
+     * where it is caller-saved, and r10 on Win64, where rsi is callee-saved. */
+    GRJIT_Reg args_reg = win64 ? GRJIT_R10 : GRJIT_RSI;
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 5
+    /* Planted defect 5 (tests only): the SysV register, callee-saved on Win64,
+     * is used and never restored. */
+    args_reg = GRJIT_RSI;
+#endif
+    grjit_asm_load64(a, args_reg, GRJIT_RBP, GRJIT_SLOT_ARGS);
     for (size_t i = 0; i < f->param_count; i++) {
-      grjit_asm_load64(a, GRJIT_RAX, GRJIT_RSI, (int32_t)(8 * i));
+      grjit_asm_load64(a, GRJIT_RAX, args_reg, (int32_t)(8 * i));
       grjit_asm_store64(
           a, GRJIT_RBP, grjit_emit_slot((GRJIT_VReg)i), GRJIT_RAX);
     }

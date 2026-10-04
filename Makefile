@@ -779,24 +779,36 @@ endif
 
 # Each defect is compiled into the library objects of a tree of its own, by
 # the macro GRJIT_TEST_PLANT_BUG (1: SHR and SAR swapped, 4: the same in the
-# arm64 emitter, 2: every stack-map
-# slot offset off by 8, 3: one live REF left out of a stack map), and the test
+# arm64 emitter, 2: every stack-map slot offset off by 8, 3: one live REF left
+# out of a stack map, and the Windows x86-64 flavour's three: 5: a callee-saved
+# register (rsi) used for the parameter loads, 6: no outgoing area, so a
+# callee's shadow space and the stack arguments land on the frame's slots, 7:
+# the unwind table written and never registered), and the test
 # that is meant to catch it is built and run there. The test must FAIL, and
 # say what it saw; the same test in the ordinary tree passes (it is part of
 # `make test`). The ordinary tree never sees the macro.
 PLANT_DEFECTS := 1:testDifferential 2:testReadback 3:testReadback \
-	4:testDifferential:Differential.GeneratedFunctionsRunTheSameWhenArm64CodeIsSimulatedAndEvaluated
+	4:testDifferential:Differential.GeneratedFunctionsRunTheSameWhenArm64CodeIsSimulatedAndEvaluated \
+	5:testWin64:Win64Registers.* 6:testWin64:Win64Shape.* 7:testWin64:Win64Memory.*
 
-# The tests that catch a planted defect run generated code, and there is no
-# backend to generate it off Linux (they are reported SKIPPED there), so a
-# planted defect would be caught by nothing and the gate would be measuring
-# nothing. It says so and stops, by name, as check-symbols does.
+# Defects 5 to 7 are in the Windows x86-64 flavour of the emitter, which is
+# emitted on every host, so testWin64's structural tests (what is encoded, the
+# bytes of the prologue, where the unwind table is written and when it is
+# registered) catch them here without running anything; the catch by running
+# the code, a callee-saved register changed, a live slot overwritten by a
+# callee's shadow space, a stack walk that finds no frame, is the Windows
+# build's, under wine (tools/xwin/m1-controls.sh in the workspace).
+#
+# The tests that catch defects 1 to 4 run generated code, and the library plants
+# them by building a tree of its own with make, a shell script and LD_LIBRARY_PATH,
+# none of which a Windows build has: it says so and stops, by name, as
+# check-symbols does, and the Windows catch of 5 to 7 is the workspace's.
 ifeq ($(OS_NAME), Linux)
 check-planted: $(APP_DIR)/$(STATIC_TARGET) ## Prove the differential and the read-back fail on a planted backend defect
 	@tools/check-planted.sh "$(MAKE)" "$(PLANT_DEFECTS)" "$(LIB_INSTALL_PATH)/$(SUITE)" "$(APP_DIR)" "$(BUILD_DIR)"
 else
-check-planted: ## Skipped off Linux: there is no backend whose defects it could plant
-	@printf 'check-planted: skipped (no native backend on this target: the tests that catch a planted defect are skipped too)\n'
+check-planted: ## Skipped off Linux: the planted trees are built by a shell script
+	@printf 'check-planted: skipped on this target (it builds one tree per defect with make and sh and runs the tests with LD_LIBRARY_PATH; the backend is here, and the Windows catches of defects 5 to 7 are run by tools/xwin/m1-controls.sh in the workspace)\n'
 endif
 
 ####################################################################

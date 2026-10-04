@@ -86,6 +86,16 @@ TEST(Pin, TheArm64CodeOfTheGeneratedFunctionsIsByteForByteWhatWasRecorded) {
   EXPECT_EQ(pin.bytes % 4, 0u);
 }
 
+TEST(Pin, TheWin64CodeOfTheGeneratedFunctionsIsByteForByteWhatWasRecorded) {
+  /* The Microsoft x64 flavour of the x86-64 emitter: emitted on every host,
+   * run only on Windows. The SysV pin above is untouched by it. */
+  Pin pin = pin_of(GRJIT_ARCH_X86_64_WIN64);
+  std::printf("pin win64: %llu bytes, hash %016llx\n",
+      static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
+  EXPECT_EQ(pin.hash, 0x5ab7246d43cbfd33ull) << pin.bytes << " bytes";
+  EXPECT_EQ(pin.bytes, 2120441u);
+}
+
 TEST(Pin, WhatGrjitCompileMapsIsWhatTheEmitterProducedForTheNativeInstructionSet) {
   GRJIT_REQUIRE_BACKEND();
   JitWorld w;

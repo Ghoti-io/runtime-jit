@@ -469,6 +469,17 @@ TEST(Compile, TheUnusedTailOfTheLastPageIsATrapNotZeroBytes) {
     ASSERT_EQ(code[i + 2], 0x20) << i;
     ASSERT_EQ(code[i + 3], 0xD4) << i;
   }
+#elif defined(_WIN64)
+  // `int3` on Windows x86-64 too, except where the unwind information is: a
+  // 12-byte RUNTIME_FUNCTION at the next 4-byte boundary after the code, then
+  // an UNWIND_INFO of at most 16 bytes (Win64Memory in test_win64.cpp reads them). The padding before them and everything after them is `int3`.
+  size_t table_at = (grjit_code_size(c.code) + 3) / 4 * 4;
+  for (size_t i = grjit_code_size(c.code); i < table_at; i++) {
+    ASSERT_EQ(code[i], 0xCC) << i;
+  }
+  for (size_t i = table_at + 12 + 16; i < grjit_code_mapped_size(c.code); i++) {
+    ASSERT_EQ(code[i], 0xCC) << i;
+  }
 #else
   for (size_t i = grjit_code_size(c.code); i < grjit_code_mapped_size(c.code); i++) {
     ASSERT_EQ(code[i], 0xCC) << i;

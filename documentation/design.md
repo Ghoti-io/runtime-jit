@@ -1,9 +1,10 @@
 # Design
 
 **Status:** In progress. Describes what exists: the IR with its builder,
-verifier and printer, the x86-64 and arm64 baseline backends with their
-assemblers, the stack maps and deopt records it emits in `runtime-core`'s format, W^X code
-memory, the gates, the planted-defect proofs and the benchmark harness, taken
+verifier and printer, the x86-64 (Linux and Windows) and arm64 baseline backends
+with their assemblers, the stack maps and deopt records it emits in
+`runtime-core`'s format, W^X code memory and the Windows unwind registration,
+the gates, the planted-defect proofs and the benchmark harness, taken
 from the runtime stack's architecture spine (AD-2, AD-4, AD-9, AD-12, AD-13,
 AD-14, AD-17 to AD-19, AD-21, AD-22, AD-26). What is not here is listed at the
 end.
@@ -57,9 +58,11 @@ A prologue `push rbp; mov rbp, rsp; sub rsp, N` with `N` a multiple of 16, so
 context pointer (-8), `out` (-16), `args` (-24), then one 8-byte slot per
 register, register `v` at `-8 * (v + 4)`. Each operation loads its operands
 into `rax` and `rcx`, does its work, and stores the result; a call loads its
-arguments into the SysV argument registers straight from their slots. All of
-those are caller-saved, so **no GC reference is ever in a callee-saved register**
-and AD-17's rule holds by construction, with nothing to check.
+arguments into the argument registers of the target's calling convention
+straight from their slots. All of those are caller-saved, so **no GC reference
+is ever in a callee-saved register** and AD-17's rule holds by construction, with
+nothing to check. (On Windows `N` also holds a 48-byte outgoing area; see "The
+Windows x86-64 flavour".)
 
 Rejected:
 
@@ -81,7 +84,9 @@ A frame over `max_frame_bytes` (default 1 MiB) or code over `max_code_bytes`
 ## The calling convention, and the guard exit
 
 Compiled code is `uint32_t (*)(void * context, const uint64_t * args, uint64_t * out)`
-(SysV). It returns `GRJIT_EXIT_RETURNED`, `GRJIT_EXIT_DEOPT` or
+in the calling convention of the target: SysV on Linux (the three arguments in
+`rdi`, `rsi`, `rdx`), Microsoft x64 on Windows (`rcx`, `rdx`, `r8`), AAPCS64 on
+arm64. It returns `GRJIT_EXIT_RETURNED`, `GRJIT_EXIT_DEOPT` or
 `GRJIT_EXIT_REFUSED`, and `out` is a record of what happened: the value, the
 reconstructed interpreter slots and the site's offset, or the refusing answer.
 There is no activation record, no guest-stack frame and no native-depth
@@ -288,6 +293,107 @@ before using the return address.
   fixups have to be recomputed; assembling twice is simpler and is only paid by
   a function over a mebibyte.
 
+## The Windows x86-64 flavour
+
+Windows x86-64 (`_WIN64 && __x86_64__`, MSYS2 with GCC) has a backend, and it is
+the x86-64 emitter with different register roles, not a second emitter: the
+operation emitters differ only in which registers carry the context, `out`,
+`args`, the six helper arguments and the scratch for the parameter loads, so the
+SysV output is the table's other column and did not move (the pin of the 2000
+generated functions is unchanged). The flavour is an architecture value of its
+own, `GRJIT_ARCH_X86_64_WIN64`, which `grjit_emit_for` can emit on any host. So
+what it emits, the unwind bytes and where they live are tested on Linux, with the
+bytes of a function pinned (`tests/unit/test_win64.cpp`, `test_pin.cpp`), and
+only *running* it needs Windows, which here means wine
+(`tools/xwin/m1-run.sh` in the workspace). Nothing below has run on a Windows
+machine.
+
+**Calling convention.** Entry is `uint32_t (void * context, const uint64_t * args,
+uint64_t * out)` in `rcx`, `rdx`, `r8`; the prologue stores them in the same three
+frame slots as SysV does. A helper call passes arguments 1 to 4 in `rcx`, `rdx`,
+`r8`, `r9` and 5 and 6 at `[rsp + 32]` and `[rsp + 40]`, above the callee's 32
+bytes of shadow space; the poll helper is called with the context in `rcx`, the
+function in `rdx` and the offset in `r8`, and the entry hook with the context in
+`rcx`. The frame is `N` = the base frame rounded to 16 plus **48 bytes at the
+bottom** (32 of shadow space and the two argument words), so `rsp` is 16-aligned
+at every call and no slot overlaps a callee's shadow space, which is the thing a
+SysV frame gets wrong on Windows (ctang's JIT had exactly that bug). The frame cap
+(`max_frame_bytes`) applies to the base frame, as on Linux, and the metadata names
+the base frame: the layout below `rbp` is unchanged, `[rbp]` is the saved frame
+pointer and `[rbp + 8]` the return address.
+
+**Scratch registers** are `rax`, `rcx`, `rdx`, `r8`, `r9`, `r10` and `r11`. `rsi`
+and `rdi`, which SysV uses to load the parameters and to pass arguments, are
+callee-saved on Win64, as are `rbx` and `r12`-`r15`; none of them is ever encoded,
+which the assembler records (`regs_used`) and a test reads for 2000 generated
+functions, and which objdump confirms from the bytes. The parameters are loaded
+through `r10`.
+
+**Stack probes.** Windows commits a thread's stack a page at a time, by touching
+the guard page just below what is committed, and an access further down than one
+page is a stack overflow. A frame of more than a page (`N + 8` over 4096; the
+default cap allows a megabyte) is therefore probed before `rsp` moves: a loop of
+`lea`, `cmp`, `jbe`, `test [r11], al`, `jmp` that touches each page from the return
+address down and ends exactly at the new `rsp`, between `mov rbp, rsp` and `sub rsp,
+N`. It is a loop and not an unrolled run because `SizeOfProlog` is a byte and the
+prologue, probes included, must fit in it. A test compiles and runs the largest
+frame the cap allows (131069 registers, a base frame of exactly 1 MiB).
+
+**The epilogue** is `lea rsp, [rbp]; pop rbp; ret` and not `leave; ret`: they do
+the same work, and the first is one of the forms Windows' unwinder recognises when
+it stops inside an epilogue.
+
+**Unwind information** (AD-14: `codegen` owns it) is a `RUNTIME_FUNCTION` for
+`[0, code size)` and the `UNWIND_INFO` it names: version 1, no flags, frame
+register `rbp` at offset 0, and the codes, latest first, `ALLOC_SMALL` (8 to 128
+bytes), `ALLOC_LARGE` with a 16-bit count of 8-byte units (up to 512 KiB minus 8)
+or a 32-bit size, `SET_FPREG` and `PUSH_NONVOL rbp`, each at the offset of the end
+of its instruction as the emitter recorded it. The builder is pure and its bytes
+are tested for every size from 0 to 2 MiB against a decoder written from the
+format. Both live **in the code's own mapping**, 4-byte aligned after the code,
+because `RtlAddFunctionTable(table, 1, base)` addresses everything by a 32-bit RVA
+from one base and an allocation elsewhere could be out of reach; they are written
+while the pages are read-write and covered by the same flip to read-execute. The
+table is registered after the flip and `grjit_code_destroy` calls
+`RtlDeleteFunctionTable` **before** it unmaps, so the operating system never holds
+a table that points at unmapped pages. A registration the system refuses fails the
+compile with `GRJIT_ERR_IO`, the pages unmapped and the meter where it started.
+What registers and removes a table is a two-function seam
+(`grjit_unwind_set_ops`, for tests), so the order, the failure and the leak are
+tested on a host that has no unwinder; on any target that is not Windows x86-64
+nothing is registered.
+
+**Rejected:**
+
+- **`RtlInstallFunctionTableCallback`.** A callback is more machinery than one
+  static table for one function.
+- **A table per function, in the allocator.** One code object is one function, and
+  separate memory might be out of 32-bit reach of the code.
+- **A frame without `rbp`.** The reason is the one above: consumers walk `rbp`, and
+  `lang-tang`'s poll helper follows the frame-pointer chain.
+- **Unrolled stack probes.** They do not fit `SizeOfProlog` for a megabyte frame.
+- **`__attribute__((ms_abi))` to run the flavour on Linux.** It would let the
+  executing tests run on any host, and it would also hide a mismatch between what
+  the emitter assumes and what a Windows compiler does. The flavour is run by a
+  Windows compiler's code or not at all.
+
+**What wine has and has not shown.** Under wine, the library's whole suite runs
+against the Win64 backend: the differential (2000 generated functions, calls with
+up to six arguments, polls and guards, against the evaluator), the read-back, a
+six-argument call whose helper reads `rcx`, `rdx`, `r8`, `r9`, `[rsp + 40]` and
+`[rsp + 48]` and overwrites its own shadow space while the caller's live slots are
+checked, sentinels in `rbx`, `rsi`, `rdi` and `r12`-`r15` across a return, a deopt,
+two refusals and a poll, a helper that walks up from compiled code with
+`RtlLookupFunctionEntry` and `RtlVirtualUnwind` and finds the generated frame with
+the right begin and end and the test's own function above it, and a destroy after
+which the lookup of the old address finds nothing. Planted defects (a callee-saved
+register used, no outgoing area, an unwind table never registered) are each caught
+on Linux by the structural tests and under wine by the executing ones. Wine's
+`ntdll` is wine's own: a stack walk that works there has not been shown to work
+under a real Windows kernel's exception dispatch, `VirtualProtect` returning
+success there is not evidence about data-execution prevention, and the guard-page
+growth that the probes exist for is wine's implementation of it.
+
 ## The assembler
 
 `src/x86_64/asm.c` is new code (AD-9, spine Supersedes: not seeded from ctang's
@@ -307,9 +413,11 @@ filled while read-write, then made read-execute once with `grcore_page_protect`.
 It is never writable and executable at once, a test proves it from
 `/proc/self/maps` (and, because Valgrind's `/proc/self/maps` is not the
 kernel's, a second test that writes to the code and requires a fault runs
-everywhere). Destroying code unmaps it: destroying code a thread still runs is
+everywhere); on Windows x86-64 the same tests read `VirtualQuery` over the whole
+address space and catch the access violation of a write with a vectored handler. Destroying code unmaps it: destroying code a thread still runs is
 the caller's error. x86-64 needs no instruction-cache maintenance after the flip; arm64 does it
-between the last write and the flip (above).
+between the last write and the flip (above). On Windows x86-64 the unwind
+information shares the mapping and is registered after the flip (above).
 The code is assembled into a buffer from the caller's allocator and copied
 into the mapping, because its size is not known until the assembler is done.
 
@@ -427,16 +535,17 @@ numbers; the calibration row is what to read them against.
   walk of native frames exists in `runtime-core`, and `lang-tang` is built so that
   it needs none (compiled code has no GC point except a poll that first writes
   the guest frame).
-- **Windows.** The page-protection path is `runtime-core`'s `VirtualProtect`
-  branch (it has run under wine, not on a Windows machine); unwind registration
-  (`RtlAddFunctionTable`) is a stub that returns `GRJIT_ERR_UNSUPPORTED`, marked
-  `TODO(windows)` in place; and compiled code is for Linux x86-64 and Linux
-  arm64 only, so `grjit_backend_available()` is false elsewhere. Windows arm64
-  and macOS are not here. There is no Windows backend to test, and the suite
-  says so rather than passing: every test that needs compiled code is reported
-  SKIPPED (`GRJIT_REQUIRE_BACKEND`), the encoders and the IR are still tested
-  (they run on any host), the three examples and the benchmark exit 77, which
-  the Makefile counts as skipped, and `check-planted` is skipped by name.
+- **Windows arm64 and macOS.** No backend: `grjit_backend_available()` is false,
+  `grjit_compile` returns `GRJIT_ERR_UNSUPPORTED`, and every test that needs
+  compiled code is reported SKIPPED (`GRJIT_REQUIRE_BACKEND`), the encoders and
+  the IR still being tested, the three examples and the benchmark exit 77, which
+  the Makefile counts as skipped. Windows x86-64 has a backend (above); the
+  page-protection path under it is `runtime-core`'s `VirtualProtect` branch.
+- **A real Windows machine.** Everything about the Windows backend has run under
+  wine and in the structural tests, and nowhere else: the stack walk, the
+  registration, the probes, and `check-planted` (which is a Linux target; the
+  workspace's `tools/xwin/m1-controls.sh` runs the Win64 planted defects against
+  the built executables instead).
 - **Pointer authentication and BTI** (above): unsupported and untested.
 - **Real arm64 hardware.** The arm64 backend's code runs under `qemu-aarch64`
   (every test of this library and `lang-tang`'s JIT arm) and in a simulator, and

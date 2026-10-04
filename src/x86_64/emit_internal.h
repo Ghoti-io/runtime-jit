@@ -54,7 +54,21 @@ typedef struct GRJIT_Emit {
   GRJIT_Asm as;
   GRJIT_Label * blocks;
   GRJIT_Label refuse;
+  bool win64;              ///< The Microsoft x64 flavour (see ::GRJIT_WIN64_OUTGOING).
+  GRJIT_Prologue prologue; ///< Where the prologue's instructions end.
 } GRJIT_Emit;
+
+/** The outgoing area at the bottom of a Win64 frame: 32 bytes of shadow space
+ *  for the callee and two words for the fifth and sixth arguments, at
+ *  `[rsp + 32]` and `[rsp + 40]`. The frame's `N` is the base frame plus this,
+ *  so `rsp` is 16-aligned at every call and no slot overlaps a callee's
+ *  shadow space. */
+#define GRJIT_WIN64_OUTGOING 48
+
+/** The size of the page a Win64 frame commits one at a time: a frame this big
+ *  (with the return address and the saved `rbp`) is probed a page at a time,
+ *  downwards, so the guard page is hit in order. */
+#define GRJIT_WIN64_PAGE 4096
 
 /**
  * Emits the whole function into `out`: prologue, every block, then the stubs.
@@ -67,7 +81,11 @@ typedef struct GRJIT_Emit {
 GRJIT_Result grjit_emit_function(const GRJIT_Function * function,
     const GRJIT_Allocator * allocator, size_t max_code_bytes,
     GRJIT_EntryHook hook, uint32_t request_offset, uint32_t frame_bytes,
-    const GRJIT_LiveSites * live, GRJIT_Emit * out);
+    bool win64, const GRJIT_LiveSites * live, GRJIT_Emit * out);
+
+/** The frame's end: `leave; ret` for SysV, and for Win64 the form its unwinder
+ *  recognises as an epilogue, `lea rsp, [rbp]; pop rbp; ret`. */
+void grjit_emit_epilogue(GRJIT_Emit * e);
 
 /** Frees what ::grjit_emit_function allocated. */
 void grjit_emit_free(GRJIT_Emit * e);
