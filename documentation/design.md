@@ -15,7 +15,7 @@ says, for every place where a collection can run or a guard can fail, where the
 live references are and where each slot of the interpreter frame could be
 read. It does not run guest code, rebuild interpreter frames, schedule
 anything or pick what to compile: an engine does those, and the first engine to
-do so is `lang-tang` (the next story). It depends on `cutil` and `runtime-core`
+do so is `lang-tang` (story 15, "The baseline JIT" in its design). It depends on `cutil` and `runtime-core`
 only, may include all of `runtime-core` (it emits against A's formats), and
 accepts no collector type (AD-2): the barrier and allocation-fast-path code the
 collector supplies will be passed in by the engine, in a later story.
@@ -184,8 +184,10 @@ the caller's error. x86-64 needs no instruction-cache maintenance after the flip
 The code is assembled into a buffer from the caller's allocator and copied
 into the mapping, because its size is not known until the assembler is done.
 
-`GRJIT_Code` is single-owner. Reference counting of compiled code by the core
-(AD-13) and the shared code cache arrive with tier-up (the next story).
+`GRJIT_Code` is single-owner. Reference counting of compiled code is the core's
+(AD-13): `lang-tang` wraps each code in a `GRCORE_Code` (`a/code.h`), whose
+release callback is `grjit_code_destroy`, and keeps it in a cache per execution.
+A code cache shared between contexts is still not here.
 
 ## Why the IR has no `gc_store`
 
@@ -279,13 +281,15 @@ numbers; the calibration row is what to read them against.
 
 ## What is not here
 
-- **Wiring it into `lang-tang`**, tier-up, a code cache, reference counting of
-  compiled code by the core (AD-13), code shared between contexts, a compiler
-  thread: the next story (CAP-10).
-- **Rebuilding interpreter frames from compiled ones**, and pause-time deopt.
-  The format exists, is emitted at every site, and is read back by tests; the
-  rebuild is the engine's, and so is walking native frames for roots (no frame
-  walk of native frames exists in `runtime-core` yet).
+- **Code shared between contexts** and a compiler thread. (Wiring it into
+  `lang-tang`, tier-up, a per-execution cache and reference counting by the core
+  are story 15's, and exist.)
+- **Rebuilding interpreter frames from compiled ones** is the engine's, and
+  `lang-tang` does it with `runtime-core`'s `a/deopt.h` at every poll and on
+  every guard exit. Walking native frames for roots is still not here: no frame
+  walk of native frames exists in `runtime-core`, and `lang-tang` is built so that
+  it needs none (compiled code has no GC point except a poll that first writes
+  the guest frame).
 - **Windows.** The page-protection path is `runtime-core`'s `VirtualProtect`
   branch (written, not run); unwind registration (`RtlAddFunctionTable`) is a
   stub that returns `GRJIT_ERR_UNSUPPORTED`, marked `TODO(windows)` in place;
