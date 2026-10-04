@@ -9,9 +9,19 @@
 # GRJIT_TEST_PLANT_BUG (see Makefile's "Planted defects"), and the test meant to
 # catch it is built and run there:
 #
-#   1  SHR and SAR swapped in the emitter          -> testDifferential
+#   1  SHR and SAR swapped in the x86-64 emitter   -> testDifferential
 #   2  every stack-map slot recorded 8 bytes off   -> testReadback
 #   3  one live REF left out of every stack map    -> testReadback
+#   4  SHR and SAR swapped in the arm64 emitter    -> testDifferential, the
+#                                                     test that runs arm64 code
+#
+# An entry is `n:test` or `n:test:filter`. With a filter the test binary runs
+# only that gtest (control and planted alike), which is how defect 4 is caught
+# on every host: by the differential that executes the arm64 emitter's output
+# in the simulator (tests/a64_sim.h), while the same defect in the x86-64
+# emitter's twin has no effect there. The catch by real arm64 code, under
+# qemu-aarch64, is `tools/xarch/jit-arm64.sh`'s; a host without it says so
+# below, by name, and does not count it.
 #
 # For each one, three things must hold, in this order:
 #
@@ -41,7 +51,12 @@ failures=0
 count=0
 for entry in $DEFECTS; do
   n="${entry%%:*}"
-  test_name="${entry#*:}"
+  rest="${entry#*:}"
+  test_name="${rest%%:*}"
+  filter=""
+  case "$rest" in
+    *:*) filter="--gtest_filter=${rest#*:}" ;;
+  esac
   count=$((count + 1))
   tree="$BUILD-plant-$n"
 
@@ -51,7 +66,7 @@ for entry in $DEFECTS; do
     failures=$((failures + 1))
     continue
   fi
-  if ! LD_LIBRARY_PATH="$LD_DIR:$APPS" "$APPS/$test_name" --gtest_brief=1 >/dev/null 2>&1; then
+  if ! LD_LIBRARY_PATH="$LD_DIR:$APPS" "$APPS/$test_name" --gtest_brief=1 $filter >/dev/null 2>&1; then
     printf 'check-planted: FAIL: the control %s does not pass without the planted defect\n' \
       "$test_name" >&2
     failures=$((failures + 1))
@@ -66,7 +81,7 @@ for entry in $DEFECTS; do
     failures=$((failures + 1))
     continue
   fi
-  out="$(LD_LIBRARY_PATH="$LD_DIR:$tree/apps" "$tree/apps/$test_name" --gtest_brief=1 2>&1)"
+  out="$(LD_LIBRARY_PATH="$LD_DIR:$tree/apps" "$tree/apps/$test_name" --gtest_brief=1 $filter 2>&1)"
   rc=$?
   if [ "$rc" -eq 0 ]; then
     printf 'check-planted: FAIL: defect %s was not caught by %s\n' "$n" "$test_name" >&2
@@ -84,3 +99,6 @@ if [ "$failures" -ne 0 ]; then
   exit 1
 fi
 printf 'check-planted: all %d planted defects were caught, and each control passes\n' "$count"
+if [ "$(uname -m)" != "aarch64" ]; then
+  printf 'check-planted: SKIPPED on this host, by name: defect 4 caught by arm64 code run under qemu-aarch64 (needs a cross build; run by tools/xarch/jit-arm64.sh). The simulated catch above is not that.\n'
+fi

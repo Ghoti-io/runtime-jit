@@ -33,8 +33,22 @@
 
 #include <string.h>
 
+static uint64_t g_icache_syncs; /* __atomic builtins only */
+
+void grjit_icache_sync(void * mapping, size_t size) {
+  /* On x86-64 the builtin is a no-op (instruction fetch is coherent with
+   * stores), and it is still called: what a test counts is that the arm64 path
+   * reaches this line, which is the claim a run under an emulator cannot make. */
+  __builtin___clear_cache((char *)mapping, (char *)mapping + size);
+  __atomic_add_fetch(&g_icache_syncs, 1, __ATOMIC_RELAXED);
+}
+
+uint64_t grjit_icache_sync_count(void) {
+  return __atomic_load_n(&g_icache_syncs, __ATOMIC_RELAXED);
+}
+
 GRJIT_Result grjit_memory_create(const GRCORE_PageProvider * pages,
-    const uint8_t * bytes, size_t length, void ** out_mapping,
+    GRJIT_Arch arch, const uint8_t * bytes, size_t length, void ** out_mapping,
     size_t * out_mapped_size) {
   if (pages == NULL || pages->protect == NULL) {
     return GRJIT_ERR_UNSUPPORTED;
@@ -50,8 +64,19 @@ GRJIT_Result grjit_memory_create(const GRCORE_PageProvider * pages,
   }
   memcpy(mapping, bytes, length);
   /* The tail of the last page would otherwise be zero bytes, which decode as
-   * an instruction; int3 traps instead. */
-  memset((unsigned char *)mapping + length, 0xCC, size - length);
+   * an instruction on x86-64 (and as `udf #0` on arm64, which traps, but
+   * only by accident); a breakpoint instruction traps on purpose. */
+  if (arch == GRJIT_ARCH_ARM64) {
+    static const unsigned char brk0[4] = {0x00, 0x00, 0x20, 0xD4};
+    for (size_t at = length; at + 4 <= size; at += 4) {
+      memcpy((unsigned char *)mapping + at, brk0, sizeof brk0);
+    }
+    /* Everything is written, nothing is executable yet. The caches are made
+     * coherent here, between the writes and the flip. */
+    grjit_icache_sync(mapping, size);
+  } else {
+    memset((unsigned char *)mapping + length, 0xCC, size - length);
+  }
   GRCORE_Result r =
       grcore_page_protect(pages, mapping, size, GRCORE_PAGE_READ_EXECUTE);
   if (r != GRCORE_OK) {

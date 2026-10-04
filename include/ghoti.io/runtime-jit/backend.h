@@ -22,18 +22,25 @@
  * @file backend.h
  * @stability free
  *
- * The x86-64 baseline backend.
+ * The baseline backends: x86-64 and arm64.
  *
  * The baseline is deliberately dull: every register and parameter lives in a
- * frame slot at a negative offset from `rbp`, each operation is emitted by
- * itself through fixed caller-saved scratch registers, and there is no
- * register allocator and no pass (AD-26). So no GC reference is ever held in
- * a callee-saved register across a call (AD-17 holds by construction), and
- * the stack map of a site is the set of live REF slots.
+ * frame slot at a negative offset from the frame pointer (`rbp` on x86-64,
+ * `x29` on arm64, where `[x29]` and `[x29 + 8]` hold the caller's frame
+ * pointer and the return address exactly as `[rbp]` and `[rbp + 8]` do), each
+ * operation is emitted by itself through fixed caller-saved scratch registers,
+ * and there is no register allocator and no pass (AD-26). So no GC reference
+ * is ever held in a callee-saved register across a call (AD-17 holds by
+ * construction), the stack map of a site is the set of live REF slots, and the
+ * stack-map and deopt format, and every consumer's frame walk, are the same on
+ * both.
  *
- * It exists on Linux x86-64 and is compiled out elsewhere:
- * ::grjit_backend_available is then false and ::grjit_compile returns
- * ::GRJIT_ERR_UNSUPPORTED. The Windows unwind registration is a stub.
+ * The backend is chosen when the library is built, by the compiler's target,
+ * never at run time. It exists on Linux x86-64 and Linux arm64 and is compiled
+ * out elsewhere: ::grjit_backend_available is then false and ::grjit_compile
+ * returns ::GRJIT_ERR_UNSUPPORTED. The Windows unwind registration is a stub;
+ * Windows arm64 and macOS are not here. On arm64 the instruction cache is made
+ * coherent with the code after it is written and before it is made executable.
  */
 
 #ifndef GHOTI_IO_GRJIT_BACKEND_H
@@ -80,7 +87,8 @@ typedef struct GRJIT_CompileOptions {
   GRJIT_EntryHook entry_hook;        ///< NULL for none.
 } GRJIT_CompileOptions;
 
-/** @brief Whether this build can compile and run code: true on Linux x86-64. */
+/** @brief Whether this build can compile and run code: true on Linux x86-64
+ *  and Linux arm64, false elsewhere. */
 GRJIT_API bool grjit_backend_available(void);
 
 /**

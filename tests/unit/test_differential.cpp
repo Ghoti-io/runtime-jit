@@ -16,7 +16,9 @@
 #include "test_helpers.h"
 
 #include "../ir_eval.h"
+#include "../a64_sim.h"
 #include "../ir_gen.h"
+#include "../../src/code/code_internal.h"
 
 #include <cstdio>
 #include <random>
@@ -81,9 +83,66 @@ std::string describe(const GRJIT_Function * f, uint64_t seed, const std::string 
 
 } // namespace
 
-TEST(Differential, GeneratedFunctionsRunTheSameCompiledAndEvaluated) {
-  GRJIT_REQUIRE_BACKEND();
-  JitWorld w;
+/* The two things that can run a function: the machine code the library maps
+ * for this build (where there is a backend), and the code the arm64 backend
+ * emits, executed by the simulator in tests/a64_sim.h on any host. Each gives
+ * the differential the same three things: whether it could be built, how to
+ * run it, and the metadata its exit names a site in. */
+struct NativeTarget {
+  Compiled c;
+  NativeTarget(const GRJIT_Function * f, JitWorld & w) : c(f, w.pages()) {}
+  bool ok() const { return static_cast<bool>(c); }
+  const char * why() const { return grjit_result_string(c.result); }
+  struct Run {
+    uint32_t exit;
+    std::vector<uint64_t> out;
+  };
+  Run run(JitWorld & w, const std::vector<uint64_t> & args) const {
+    auto r = c.run(w.ctx, args);
+    return {r.exit, r.out};
+  }
+  const GRCORE_CodeMeta * meta() const { return grjit_code_meta(c.code); }
+};
+
+struct SimTarget {
+  GRJIT_Emitted e{};
+  GRJIT_Result result;
+  size_t out_words;
+  size_t params;
+  explicit SimTarget(const GRJIT_Function * f, JitWorld &) {
+    result = grjit_emit_for(GRJIT_ARCH_ARM64, f, grjit_allocator_default(), nullptr,
+        nullptr, grcore_jit_layout()->request_word_offset, &e);
+    out_words = grjit_function_interp_slot_count(f) + 1;
+    params = grjit_function_param_count(f);
+  }
+  SimTarget(const SimTarget &) = delete;
+  SimTarget & operator=(const SimTarget &) = delete;
+  ~SimTarget() { grjit_emitted_free(&e); }
+  bool ok() const { return result == GRJIT_OK; }
+  const char * why() const { return grjit_result_string(result); }
+  using Run = NativeTarget::Run;
+  Run run(JitWorld & w, std::vector<uint64_t> args) const {
+    Run r;
+    r.out.assign(out_words, 0xDEADBEEFu);
+    args.resize(std::max<size_t>(args.size(), params));
+    a64sim::Config cfg;
+    cfg.code = e.bytes;
+    cfg.size = e.size;
+    cfg.args[0] = reinterpret_cast<uint64_t>(w.ctx);
+    cfg.args[1] = reinterpret_cast<uint64_t>(args.data());
+    cfg.args[2] = reinterpret_cast<uint64_t>(r.out.data());
+    cfg.returns32.insert(reinterpret_cast<uint64_t>(&poll_helper));
+    a64sim::Cpu cpu;
+    a64sim::Result res = cpu.run(cfg);
+    EXPECT_TRUE(res.ok) << res.error;
+    r.exit = static_cast<uint32_t>(res.x0);
+    return r;
+  }
+  const GRCORE_CodeMeta * meta() const { return &e.meta.meta; }
+};
+
+template <class Target>
+void run_differential(JitWorld & w) {
   size_t exits[3] = {0, 0, 0};
   size_t with_calls = 0, guards_failed = 0;
   for (uint64_t seed = 1; seed <= kFunctions; seed++) {
@@ -92,8 +151,8 @@ TEST(Differential, GeneratedFunctionsRunTheSameCompiledAndEvaluated) {
     GRJIT_Result vr;
     std::string why = verify_reason(f, &vr);
     ASSERT_EQ(vr, GRJIT_OK) << describe(f, seed, "the generator built a malformed function: " + why);
-    Compiled c(f, w.pages());
-    ASSERT_TRUE(c) << describe(f, seed, grjit_result_string(c.result));
+    Target c(f, w);
+    ASSERT_TRUE(c.ok()) << describe(f, seed, c.why());
     for (int input = 0; input < 3; input++) {
       std::mt19937_64 irng(seed * 7 + static_cast<uint64_t>(input));
       std::vector<uint8_t> image(kArena);
@@ -112,7 +171,7 @@ TEST(Differential, GeneratedFunctionsRunTheSameCompiledAndEvaluated) {
         g_calls.clear();
         g_polls = 0;
         if (which == 0) {
-          auto run = c.run(w.ctx, args);
+          auto run = c.run(w, args);
           r.exit = run.exit;
           r.out = run.out;
         } else {
@@ -138,7 +197,7 @@ TEST(Differential, GeneratedFunctionsRunTheSameCompiledAndEvaluated) {
           ASSERT_EQ(compiled.out[i], eval.out[i]) << describe(f, seed, "the deopt slots differ");
         }
         const GRCORE_CodeSite * site = grcore_codemeta_find(
-            grjit_code_meta(c.code), static_cast<uint32_t>(compiled.out[slots]));
+            c.meta(), static_cast<uint32_t>(compiled.out[slots]));
         ASSERT_NE(site, nullptr) << describe(f, seed, "the exit names no site");
         ASSERT_EQ(site->kind, GRCORE_SITE_GUARD) << describe(f, seed, "the exit names a site that is not a guard");
         ASSERT_EQ(site->identity.function, eval.identity.function) << describe(f, seed, "wrong guard identity");
@@ -157,6 +216,22 @@ TEST(Differential, GeneratedFunctionsRunTheSameCompiledAndEvaluated) {
   EXPECT_GT(exits[GRJIT_EXIT_DEOPT], 100u);
   EXPECT_GT(with_calls, 1000u);
   EXPECT_GT(guards_failed, 100u);
+}
+
+
+
+TEST(Differential, GeneratedFunctionsRunTheSameCompiledAndEvaluated) {
+  GRJIT_REQUIRE_BACKEND();
+  JitWorld w;
+  run_differential<NativeTarget>(w);
+}
+
+/* The arm64 emitter's output, executed by the simulator, against the same
+ * evaluator: on every host, with no AArch64 machine and no emulator. It is the
+ * arm64 backend's differential before qemu-aarch64 runs the real thing. */
+TEST(Differential, GeneratedFunctionsRunTheSameWhenArm64CodeIsSimulatedAndEvaluated) {
+  JitWorld w;
+  run_differential<SimTarget>(w);
 }
 
 GRJIT_TEST_MAIN()

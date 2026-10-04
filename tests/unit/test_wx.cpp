@@ -214,7 +214,7 @@ TEST(WX, CodeMemoryIsChargedToTheContextProviderItCameFrom) {
   EXPECT_GE(grcore_context_memory_peak(w.ctx), grjit_code_mapped_size(c.code));
 }
 
-#if !(defined(__x86_64__) && defined(__linux__))
+#if !((defined(__x86_64__) || defined(__aarch64__)) && defined(__linux__))
 TEST(WX, OnAnotherTargetTheBackendSaysItIsAbsent) {
   EXPECT_FALSE(grjit_backend_available());
   JitWorld w;

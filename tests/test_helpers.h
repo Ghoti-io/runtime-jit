@@ -323,9 +323,11 @@ struct Compiled {
   }
 };
 
-/* On the gated target the backend must exist: a test that cannot run there
- * fails, it is never skipped. Elsewhere it must say it is absent. */
-#if defined(__x86_64__) && defined(__linux__)
+/* On a gated target (Linux x86-64, Linux arm64) the backend must exist: a test
+ * that cannot run there fails, it is never skipped. Elsewhere it must say it is
+ * absent. The condition is the one the library compiles its backend under, and
+ * a test in test_compile.cpp asserts that exactly these targets report true. */
+#if (defined(__x86_64__) || defined(__aarch64__)) && defined(__linux__)
 #define GRJIT_REQUIRE_BACKEND() \
   ASSERT_TRUE(grjit_backend_available()) \
       << "the backend is unavailable on the gated target"

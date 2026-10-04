@@ -750,12 +750,14 @@ endif
 ####################################################################
 
 # Each defect is compiled into the library objects of a tree of its own, by
-# the macro GRJIT_TEST_PLANT_BUG (1: SHR and SAR swapped, 2: every stack-map
+# the macro GRJIT_TEST_PLANT_BUG (1: SHR and SAR swapped, 4: the same in the
+# arm64 emitter, 2: every stack-map
 # slot offset off by 8, 3: one live REF left out of a stack map), and the test
 # that is meant to catch it is built and run there. The test must FAIL, and
 # say what it saw; the same test in the ordinary tree passes (it is part of
 # `make test`). The ordinary tree never sees the macro.
-PLANT_DEFECTS := 1:testDifferential 2:testReadback 3:testReadback
+PLANT_DEFECTS := 1:testDifferential 2:testReadback 3:testReadback \
+	4:testDifferential:Differential.GeneratedFunctionsRunTheSameWhenArm64CodeIsSimulatedAndEvaluated
 
 check-planted: $(APP_DIR)/$(STATIC_TARGET) ## Prove the differential and the read-back fail on a planted backend defect
 	@tools/check-planted.sh "$(MAKE)" "$(PLANT_DEFECTS)" "$(LIB_INSTALL_PATH)/$(SUITE)" "$(APP_DIR)" "$(BUILD_DIR)"

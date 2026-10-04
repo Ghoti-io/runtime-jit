@@ -21,9 +21,13 @@
 /**
  * @file
  *
- * Compiling a function, and the compiled-code handle. Everything that
- * produces or runs machine code is for Linux x86-64 only; elsewhere
- * ::grjit_backend_available is false and ::grjit_compile says so.
+ * Compiling a function, and the compiled-code handle. Machine code is made
+ * for Linux x86-64 and Linux arm64, chosen by the compiler's target when the
+ * library is built, never at run time; elsewhere ::grjit_backend_available is
+ * false and ::grjit_compile says so. Both instruction sets can be *emitted* on
+ * any host (::grjit_emit_for), which is how the arm64 backend's encodings,
+ * frame, offsets and branch ranges are tested on an x86-64 machine; only the
+ * native one can be mapped and run.
  */
 
 #include <ghoti.io/runtime-jit/macros.h>
@@ -34,6 +38,7 @@
 
 #include "code_internal.h"
 #include "../x86_64/emit_internal.h"
+#include "../arm64/emit_internal.h"
 
 #include "../ir/ir_internal.h"
 
@@ -44,9 +49,18 @@
 
 #if defined(__x86_64__) && defined(__linux__)
 #define GRJIT_HAVE_BACKEND 1
+#define GRJIT_NATIVE GRJIT_ARCH_X86_64
+#elif defined(__aarch64__) && defined(__linux__)
+#define GRJIT_HAVE_BACKEND 1
+#define GRJIT_NATIVE GRJIT_ARCH_ARM64
 #else
 #define GRJIT_HAVE_BACKEND 0
+#define GRJIT_NATIVE GRJIT_ARCH_X86_64
 #endif
+
+GRJIT_Arch grjit_native_arch(void) {
+  return GRJIT_NATIVE;
+}
 
 bool grjit_backend_available(void) {
   return GRJIT_HAVE_BACKEND != 0;
@@ -107,6 +121,89 @@ static GRJIT_Result verify_for_compile(
   return r == GRJIT_OK ? GRJIT_OK : GRJIT_ERR_INVALID;
 }
 
+GRJIT_Result grjit_emit_for(GRJIT_Arch arch, const GRJIT_Function * function,
+    const GRJIT_Allocator * a, const GRJIT_Limits * limits_in,
+    GRJIT_EntryHook hook, uint32_t request_offset, GRJIT_Emitted * out) {
+  GRJIT_Limits limits;
+  grjit_limits_resolve(limits_in, &limits);
+  memset(out, 0, sizeof *out);
+  /* Three fixed slots and one per register, rounded to keep the stack pointer
+   * 16-aligned. */
+  size_t slots = function->vreg_count + GRJIT_FIXED_SLOTS;
+  size_t frame = (slots * 8 + 15) / 16 * 16;
+  if (frame > limits.max_frame_bytes) {
+    return GRJIT_ERR_LIMIT;
+  }
+  GRJIT_LiveSites live;
+  GRJIT_Result r = grjit_liveness_compute(function, a, &live);
+  if (r != GRJIT_OK) {
+    return r;
+  }
+  const uint8_t * bytes = NULL;
+  size_t code_bytes = 0;
+  const GRJIT_SiteRec * recs = NULL;
+  size_t rec_count = 0;
+  GRJIT_Emit x86;
+  GRJIT_A64Emit a64;
+  memset(&x86, 0, sizeof x86);
+  memset(&a64, 0, sizeof a64);
+  if (arch == GRJIT_ARCH_ARM64) {
+    r = grjit_a64_emit_function(function, a, limits.max_code_bytes, hook,
+        request_offset, (uint32_t)frame, &live, &a64);
+    bytes = grjit_a64_bytes(&a64.as);
+    code_bytes = grjit_a64_size(&a64.as);
+    recs = a64.c.sites;
+    rec_count = a64.c.site_count;
+  } else {
+    r = grjit_emit_function(function, a, limits.max_code_bytes, hook,
+        request_offset, (uint32_t)frame, &live, &x86);
+    bytes = grjit_asm_bytes(&x86.as);
+    code_bytes = grjit_asm_size(&x86.as);
+    recs = x86.c.sites;
+    rec_count = x86.c.site_count;
+  }
+  if (r != GRJIT_OK) {
+    goto done;
+  }
+  r = grjit_metadata_build(function, &live, recs, rec_count, (uint32_t)frame,
+      (uint32_t)code_bytes, a, &out->meta);
+  if (r != GRJIT_OK) {
+    goto done;
+  }
+  if (grcore_codemeta_validate(&out->meta.meta, code_bytes, NULL) != GRCORE_OK) {
+    r = GRJIT_ERR_INTERNAL;
+    goto done;
+  }
+  out->bytes = a->malloc_fn(a->ctx, code_bytes);
+  if (out->bytes == NULL) {
+    r = GRJIT_ERR_OOM;
+    goto done;
+  }
+  memcpy(out->bytes, bytes, code_bytes);
+  out->size = code_bytes;
+  out->allocator = a;
+  out->meta.meta.sites = out->meta.sites;
+  r = GRJIT_OK;
+done:
+  if (r != GRJIT_OK) {
+    grjit_metadata_free(&out->meta);
+    memset(out, 0, sizeof *out);
+  }
+  grjit_emit_free(&x86);
+  grjit_a64_emit_free(&a64);
+  grjit_liveness_free(&live);
+  return r;
+}
+
+void grjit_emitted_free(GRJIT_Emitted * emitted) {
+  if (emitted->allocator == NULL) {
+    return;
+  }
+  emitted->allocator->free_fn(emitted->allocator->ctx, emitted->bytes);
+  grjit_metadata_free(&emitted->meta);
+  memset(emitted, 0, sizeof *emitted);
+}
+
 GRJIT_Result grjit_compile(const GRJIT_CompileOptions * options,
     const GRJIT_Function * function, GRJIT_Code ** out_code) {
   if (options == NULL || function == NULL || out_code == NULL ||
@@ -117,8 +214,6 @@ GRJIT_Result grjit_compile(const GRJIT_CompileOptions * options,
   return GRJIT_ERR_UNSUPPORTED;
 #else
   const GRJIT_Allocator * a = grjit_allocator_or_default(options->allocator);
-  GRJIT_Limits limits;
-  grjit_limits_resolve(options->limits, &limits);
   GRJIT_Result r = verify_for_compile(function, options->limits);
   if (r != GRJIT_OK) {
     return r;
@@ -126,65 +221,38 @@ GRJIT_Result grjit_compile(const GRJIT_CompileOptions * options,
   if (options->pages->protect == NULL) {
     return GRJIT_ERR_UNSUPPORTED;
   }
-  /* Three fixed slots and one per register, rounded to keep rsp 16-aligned. */
-  size_t slots = function->vreg_count + GRJIT_FIXED_SLOTS;
-  size_t frame = (slots * 8 + 15) / 16 * 16;
-  if (frame > limits.max_frame_bytes) {
-    return GRJIT_ERR_LIMIT;
-  }
-
-  GRJIT_LiveSites live;
-  r = grjit_liveness_compute(function, a, &live);
+  GRJIT_Emitted emitted;
+  r = grjit_emit_for(GRJIT_NATIVE, function, a, options->limits,
+      options->entry_hook, grcore_jit_layout()->request_word_offset, &emitted);
   if (r != GRJIT_OK) {
     return r;
   }
-  GRJIT_Emit emit;
-  GRJIT_MetaStorage meta;
-  memset(&meta, 0, sizeof meta);
-  GRJIT_Code * code = NULL;
-  r = grjit_emit_function(function, a, limits.max_code_bytes, options->entry_hook,
-      grcore_jit_layout()->request_word_offset, (uint32_t)frame, &live, &emit);
-  if (r != GRJIT_OK) {
-    goto done;
-  }
-  size_t code_bytes = grjit_asm_size(&emit.as);
-  r = grjit_metadata_build(function, &live, emit.c.sites, emit.c.site_count,
-      (uint32_t)frame, (uint32_t)code_bytes, a, &meta);
-  if (r != GRJIT_OK) {
-    goto done;
-  }
-  if (grcore_codemeta_validate(&meta.meta, code_bytes, NULL) != GRCORE_OK) {
-    r = GRJIT_ERR_INTERNAL;
-    goto done;
-  }
-  code = a->calloc_fn(a->ctx, 1, sizeof *code);
+  GRJIT_Code * code = a->calloc_fn(a->ctx, 1, sizeof *code);
   if (code == NULL) {
-    r = GRJIT_ERR_OOM;
-    goto done;
+    grjit_emitted_free(&emitted);
+    return GRJIT_ERR_OOM;
   }
-  r = grjit_memory_create(options->pages, grjit_asm_bytes(&emit.as), code_bytes,
-      &code->mapping, &code->mapped_size);
+  r = grjit_memory_create(options->pages, GRJIT_NATIVE, emitted.bytes,
+      emitted.size, &code->mapping, &code->mapped_size);
   if (r != GRJIT_OK) {
     a->free_fn(a->ctx, code);
-    code = NULL;
-    goto done;
+    grjit_emitted_free(&emitted);
+    return r;
   }
   code->allocator = a;
   code->pages = options->pages;
-  code->code_bytes = code_bytes;
-  code->meta = meta;
+  code->code_bytes = emitted.size;
+  code->meta = emitted.meta;
   code->meta.meta.sites = code->meta.sites;
-  memset(&meta, 0, sizeof meta);
+  /* The metadata now belongs to the code; the bytes were copied into the
+   * mapping and are ours to free. */
+  memset(&emitted.meta, 0, sizeof emitted.meta);
+  grjit_emitted_free(&emitted);
   code->out_words = function->interp_slots + 1;
   code->param_count = function->param_count;
   code->request_offset = grcore_jit_layout()->request_word_offset;
   memcpy(&code->entry, &code->mapping, sizeof code->entry);
   *out_code = code;
-  r = GRJIT_OK;
-done:
-  grjit_metadata_free(&meta);
-  grjit_emit_free(&emit);
-  grjit_liveness_free(&live);
-  return r;
+  return GRJIT_OK;
 #endif
 }

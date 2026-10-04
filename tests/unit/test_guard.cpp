@@ -94,8 +94,13 @@ TEST(Guard, TheFailingGuardSitesOffsetIsTheStartOfItsExitStub) {
   uint32_t off = static_cast<uint32_t>(r.out[4]);
   const unsigned char * code = static_cast<const unsigned char *>(grjit_code_address(c.code));
   ASSERT_LT(off, grjit_code_size(c.code));
+#if defined(__aarch64__)
+  // The stub begins by loading `out` from its frame slot into x2: ldur x2, [x29, #-16].
+  const unsigned char want[] = {0xA2, 0x03, 0x5F, 0xF8};
+#else
   // The stub begins by loading `out` from its frame slot into rdx: mov rdx,[rbp-16].
   const unsigned char want[] = {0x48, 0x8B, 0x55, 0xF0};
+#endif
   EXPECT_EQ(std::memcmp(code + off, want, sizeof want), 0);
 }
 

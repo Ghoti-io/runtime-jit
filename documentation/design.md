@@ -1,8 +1,8 @@
 # Design
 
 **Status:** In progress. Describes what exists: the IR with its builder,
-verifier and printer, the x86-64 baseline backend with its assembler, the
-stack maps and deopt records it emits in `runtime-core`'s format, W^X code
+verifier and printer, the x86-64 and arm64 baseline backends with their
+assemblers, the stack maps and deopt records it emits in `runtime-core`'s format, W^X code
 memory, the gates, the planted-defect proofs and the benchmark harness, taken
 from the runtime stack's architecture spine (AD-2, AD-4, AD-9, AD-12, AD-13,
 AD-14, AD-17 to AD-19, AD-21, AD-22, AD-26). What is not here is listed at the
@@ -176,10 +176,113 @@ every byte of the code of the differential's 2000 generated functions, so a
 change that is meant to leave the code alone (the move to this directory was
 one) fails if it does not.
 
+## The arm64 backend
+
+`src/arm64/` is the second backend (CAP-14), with the same shape as the first and
+the same frame, which is the whole idea: the stack-map and deopt format, the
+liveness pass, the metadata builder and every consumer's frame walk are written
+against that layout, so a second instruction set is a matter of encoding.
+
+**Frame and registers.** The prologue is `stp x29, x30, [sp, #-16]!`, `mov x29,
+sp`, then the frame is allocated (`sub sp`, in one or two instructions) so that
+`sp` is a multiple of 16 and is never moved again, so it is aligned at every
+call. The frame base of the metadata is `x29`. Slots are at the offsets x86-64
+uses: context at `-8`, `out` at `-16`, `args` at `-24`, register `v` at `-8 * (v
++ 4)`. `[x29]` is the caller's frame pointer and `[x29 + 8]` the return address,
+exactly the pair `[rbp]` and `[rbp + 8]` are, which is what a native helper
+(`lang-tang`'s poll helper, the read-back test) follows to walk to its caller.
+Scratch registers are the caller-saved `x0`-`x17` only, so **no reference is
+ever live in a callee-saved register** (AD-17 holds by construction, as on
+x86-64). The roles: `x0` and `x1` carry the operands and `x0` the result; `x2`
+holds `out` in the exits; the arguments of a helper call are `x0`-`x5` (the IR's
+six); a call is through `x16` loaded by `movz`/`movk` and `blr`; `x17` holds a
+displacement that does not fit an instruction. The platform register `x18` is
+never touched. A helper that returns a `uint32_t` may leave the upper half of
+`x0` undefined (AAPCS64), so the entry hook's and the poll helper's answers are
+cleared with `mov w0, w0` before they are tested or stored.
+
+**The semantics are the IR's, not the instruction set's.** `lslv`, `lsrv` and
+`asrv` take the count modulo 64 as the IR says; `mul` wraps; a comparison is
+`cmp` and `cset` (0 or 1); a load of 8, 16 or 32 bits zero- or sign-extends as
+`LOAD` and `LOAD_S` say and a narrow store stores the low bits; an immediate is
+any 64-bit value and a displacement any `int32`. Unaligned access is allowed by
+the IR and by AArch64 normal memory, and nothing extra is done for it.
+
+**What a fixed-width instruction set costs, and what each hazard cost.**
+
+| Hazard | What was done |
+| --- | --- |
+| A slot offset beyond the signed 9-bit unscaled range (`ldur`, -256..255) or any `disp` beyond the scaled 12-bit range | One instruction when it fits (scaled if the displacement is non-negative, a multiple of the access size and in range; unscaled if it is -256..255); otherwise the displacement is built in `x17` and the register-offset form is used. Slots beyond `-256` are register 29 and up, so a function with more than 28 registers has some. Never truncated: a test sweeps every width and sign around every boundary and runs it. |
+| A frame over 4095 bytes, up to the 1 MiB cap | `sub sp, sp, #hi, lsl #12` then `sub sp, sp, #lo`, each a multiple of 16 so `sp` is aligned between them. Over 16 MiB (a raised cap) is `LIMIT`, not a truncation. At the cap runs; one register over is `LIMIT` as on x86-64. |
+| A conditional branch reaches only +-1 MiB (`b.cond`, `cbz`, `cbnz`) while `b` reaches +-128 MiB and the code cap defaults to 16 MiB | See below. |
+| A 64-bit immediate | `movz` or `movn` (whichever leaves fewer pieces) and `movk` for each 16-bit piece that differs: one to four instructions. |
+| The instruction cache | After the code is written and before the mapping is made executable, `__builtin___clear_cache` runs over it (arm64 only). |
+
+**Branches.** Every `b` reaches every block of code up to the cap (a cap set
+above 128 MiB makes an unreachable `b` a `LIMIT`). A conditional branch is
+assembled short, with a fixup, and the whole function is assembled a second time
+in *long* mode if a fixup finds a label out of reach: the long form is the
+inverted test over the next instruction, then a `b`. The second assembly happens
+only for a function with a conditional branch more than 1 MiB long, which is a
+function of more than a mebibyte; every other function pays nothing, and a
+backward branch that is out of reach is already long in the first assembly.
+Poll and guard stubs are emitted after all the blocks, so a function over 1 MiB
+reaches them by the long form too. A test builds functions with a forward branch
+over more than a mebibyte, a backward one, and a poll and a guard whose stubs are
+that far away, and runs them.
+
+**The instruction cache, and exactly what `qemu-user` cannot prove.** AArch64's
+instruction and data caches are not coherent. Code written through a data
+address is not visible to instruction fetch until the line is cleaned to the
+point of unification and the instruction cache invalidated. `grjit_memory_create`
+calls `grjit_icache_sync` (a wrapper over `__builtin___clear_cache`) between the
+last write and the flip to read-execute, once per mapping. **`qemu-user` translates
+lazily, one block at a time when it first runs it, and does not model the cache:
+code it runs would work with or without that call.** So no run under the emulator
+can prove the call is right. What is tested is that the line is *reached*: the
+function counts its calls, and a test shows that an arm64 mapping is synced once,
+before `protect` is called (a page provider that records the count when its
+`protect` runs), and an x86-64 mapping is not. Real arm64 hardware has not been
+exercised by this library, and that line is the one thing that would fail
+there and not here.
+
+**How it is tested without a machine to run it on.** The assembler is C that
+emits bytes, and it is compiled and tested on every host: each instruction is
+compared with the bytes `aarch64-linux-gnu-as` produces for the same text
+(recorded, with the disassembly `aarch64-linux-gnu-objdump` gives back, which
+`tools/xarch/jit-arm64.sh` re-checks). `tests/a64_sim.h` is a small simulator of
+exactly the subset the assembler emits: it decodes only those encodings (any
+other word stops it), executes them against real memory, and checks what AAPCS64
+asks of compiled code: the callee-saved registers, `x29`, `x30` and `sp` are what
+they were on return, `x18` is never touched, `sp` is aligned at every call, and
+after a call the caller-saved registers are noise. The differential runs the
+arm64 emitter's output in it against the evaluator on the same 2000 functions as
+the native one. And `tools/xarch/jit-arm64.sh` runs the real thing: it builds the
+stack for aarch64 and runs every test of this library, and `lang-tang`'s JIT arm,
+under `qemu-aarch64`, with the arm64 planted defect (`SHR` and `SAR` swapped in
+the arm64 emitter) caught by the native differential there.
+
+**Rejected:**
+
+- **Values in callee-saved registers** (`x19`-`x28`). They are why a second
+  backend is usually fast, and they break AD-17 and every consumer's reading of a
+  frame: a collector would have to find a reference in a register a callee saved.
+- **A register allocator now.** The same reason as on x86-64: AD-26 wants a
+  benchmark naming a function the baseline cannot serve first.
+- **`sp`-relative slots.** The metadata's frame base must be the frame pointer,
+  because a helper that walks the chain reaches its caller's `x29`, not its `sp`.
+- **Refusing long branches by shrinking `max_code_bytes`.** A 1 MiB cap would
+  reject functions x86-64 compiles, and the second assembly costs nothing for the
+  functions that fit.
+- **Branch relaxation in place.** Growing a branch moves every later label, so the
+  fixups have to be recomputed; assembling twice is simpler and is only paid by
+  a function over a mebibyte.
+
 ## The assembler
 
 `src/x86_64/asm.c` is new code (AD-9, spine Supersedes: not seeded from ctang's
-`binary.h`). It encodes what the backend emits and no more, checked against byte
+`binary.h`), and `src/arm64/asm.c` is another, written for this library and not
+seeded from either (the arm64 one is described above). It encodes what the backend emits and no more, checked against byte
 sequences written out in the test and, where `objdump` is present, against its
 disassembly (its absence fails the test on this target). Forward branches are
 `rel32` with a fixup patched when the label is bound; a backward branch within
@@ -195,7 +298,8 @@ It is never writable and executable at once, a test proves it from
 `/proc/self/maps` (and, because Valgrind's `/proc/self/maps` is not the
 kernel's, a second test that writes to the code and requires a fault runs
 everywhere). Destroying code unmaps it: destroying code a thread still runs is
-the caller's error. x86-64 needs no instruction-cache maintenance after the flip.
+the caller's error. x86-64 needs no instruction-cache maintenance after the flip; arm64 does it
+between the last write and the flip (above).
 The code is assembled into a buffer from the caller's allocator and copied
 into the mapping, because its size is not known until the assembler is done.
 
@@ -316,9 +420,14 @@ numbers; the calibration row is what to read them against.
 - **Windows.** The page-protection path is `runtime-core`'s `VirtualProtect`
   branch (written, not run); unwind registration (`RtlAddFunctionTable`) is a
   stub that returns `GRJIT_ERR_UNSUPPORTED`, marked `TODO(windows)` in place;
-  and compiled code is for Linux x86-64 only, so `grjit_backend_available()` is
-  false elsewhere.
-- **arm64**, an ahead-of-time C backend, a Wasm backend, JIT hardening, a
+  and compiled code is for Linux x86-64 and Linux arm64 only, so
+  `grjit_backend_available()` is false elsewhere. Windows arm64 and macOS are not
+  here.
+- **Real arm64 hardware.** The arm64 backend's code runs under `qemu-aarch64`
+  (every test of this library and `lang-tang`'s JIT arm) and in a simulator, and
+  nowhere else. Instruction-cache coherence, memory ordering and a real kernel's
+  W^X are not exercised.
+- An ahead-of-time C backend, a Wasm backend, JIT hardening, a
   register allocator, any pass, SSA, inlining, unboxing, floating point, SIMD,
   32-bit and 8-bit values.
 - **An in-JIT pause.** A poll's non-zero answer ends the function; see above.

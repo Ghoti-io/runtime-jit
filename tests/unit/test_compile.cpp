@@ -82,7 +82,7 @@ TEST(Compile, EveryBinaryOperationMatchesCxxOnTheEdgeValues) {
   }
 }
 
-TEST(Compile, ShiftCountsAreTakenModuloSixtyFourAsX86DoesAndTheIrSays) {
+TEST(Compile, ShiftCountsAreTakenModuloSixtyFourAsTheIrSays) {
   GRJIT_REQUIRE_BACKEND();
   JitWorld w;
   GRJIT_Function * f;
@@ -448,7 +448,7 @@ TEST(Compile, UnreachableBlocksAndUnusedRegistersCompile) {
   EXPECT_EQ(c.run(w.ctx).out[0], 9u);
 }
 
-TEST(Compile, TheUnusedTailOfTheLastPageIsInt3NotZeroBytes) {
+TEST(Compile, TheUnusedTailOfTheLastPageIsATrapNotZeroBytes) {
   GRJIT_REQUIRE_BACKEND();
   JitWorld w;
   B b("tiny");
@@ -459,9 +459,21 @@ TEST(Compile, TheUnusedTailOfTheLastPageIsInt3NotZeroBytes) {
   ASSERT_TRUE(c);
   const unsigned char * code = static_cast<const unsigned char *>(grjit_code_address(c.code));
   ASSERT_GT(grjit_code_mapped_size(c.code), grjit_code_size(c.code));
+#if defined(__aarch64__)
+  // `brk #0` words (0xD4200000, little-endian) on arm64, where a zero word is
+  // `udf #0` and traps only by accident.
+  ASSERT_EQ(grjit_code_size(c.code) % 4, 0u);
+  for (size_t i = grjit_code_size(c.code); i + 4 <= grjit_code_mapped_size(c.code); i += 4) {
+    ASSERT_EQ(code[i], 0x00) << i;
+    ASSERT_EQ(code[i + 1], 0x00) << i;
+    ASSERT_EQ(code[i + 2], 0x20) << i;
+    ASSERT_EQ(code[i + 3], 0xD4) << i;
+  }
+#else
   for (size_t i = grjit_code_size(c.code); i < grjit_code_mapped_size(c.code); i++) {
     ASSERT_EQ(code[i], 0xCC) << i;
   }
+#endif
 }
 
 TEST(Compile, TheCodeCarriesItsLayoutAndAddressAndIsOneMapping) {

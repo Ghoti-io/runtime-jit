@@ -1,8 +1,8 @@
 # Ghoti.io Runtime-jit
 
 The baseline JIT of the Ghoti.io language runtime stack, in C: a low-level IR
-with a builder, a verifier and a printer; an x86-64 backend with its own
-assembler; and the stack maps and deoptimization records the backend emits, in
+with a builder, a verifier and a printer; an x86-64 backend and an arm64 backend,
+each with its own assembler; and the stack maps and deoptimization records the backend emits, in
 the format [`runtime-core`](../runtime-core) owns (`a/codemeta.h`). An engine
 builds a function in the IR, `grjit_compile` turns it into machine code in pages
 taken from a context's counting page provider, and the code is run through one
@@ -20,9 +20,15 @@ The library depends on `cutil` and `runtime-core` and nothing else, accepts no
 collector type, and never interprets the IR: a test-only evaluator checks the
 backend against it, on 2000 generated functions per run.
 
-Nothing is released. Linux x86-64 is implemented; on any other target
-`grjit_backend_available()` is false and `grjit_compile` returns
-`GRJIT_ERR_UNSUPPORTED`. Every header is labelled `free`: a consumer requires
+Nothing is released. Linux x86-64 and Linux arm64 are implemented, chosen by the
+compiler's target when the library is built (never at run time), and with the
+same frame layout, so the stack maps, the deopt records and every consumer's
+frame walk are the same; on any other target `grjit_backend_available()` is
+false and `grjit_compile` returns `GRJIT_ERR_UNSUPPORTED`. The arm64 backend's
+encodings and hazards are tested on every host (the assembler is plain C that
+emits bytes, and a small simulator in the tests executes what it emits); running
+its code for real is `tools/xarch/jit-arm64.sh` in the workspace, under
+`qemu-aarch64`. Every header is labelled `free`: a consumer requires
 the exact version it was built against.
 
 ## Example
@@ -98,9 +104,9 @@ running a program that includes only the umbrella header.
 
 ## Status
 
-Scaffolded. The IR, the verifier, the printer, the x86-64 baseline backend and
-its assembler, the metadata, W^X code memory, the gates, the examples and the
+Scaffolded. The IR, the verifier, the printer, the x86-64 and arm64 baseline
+backends and their assemblers, the metadata, W^X code memory, the gates, the examples and the
 benchmark harness are in. Not here: wiring it into an engine, tier-up and
 compiled-code reference counting, rebuilding interpreter frames from compiled
-ones, unwind registration, Windows and arm64. `documentation/design.md` says
+ones, unwind registration, Windows and macOS. `documentation/design.md` says
 why each is where it is.
