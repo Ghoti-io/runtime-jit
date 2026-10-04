@@ -283,8 +283,9 @@ int main(int argc, char ** argv) {
     }
   }
   if (!grjit_backend_available()) {
-    fprintf(stderr, "bench: the backend is not available on this target\n");
-    return 1;
+    /* Exit status 77 is "skipped": the Makefile counts it and does not fail. */
+    printf("SKIP: bench: no native code backend on this target\n");
+    return 77;
   }
 
   /* Naming the library's version proves the harness linked the library it

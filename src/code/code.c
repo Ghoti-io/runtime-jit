@@ -121,6 +121,7 @@ uint32_t grjit_code_call(const GRJIT_Code * code, void * context,
   return code->entry(context, args, out);
 }
 
+#if GRJIT_HAVE_BACKEND
 static GRJIT_Result verify_for_compile(
     const GRJIT_Function * f, const GRJIT_Limits * limits) {
   GRJIT_Result r = grjit_function_verify(f, limits, NULL, 0);
@@ -129,6 +130,7 @@ static GRJIT_Result verify_for_compile(
   }
   return r == GRJIT_OK ? GRJIT_OK : GRJIT_ERR_INVALID;
 }
+#endif
 
 GRJIT_Result grjit_emit_for(GRJIT_Arch arch, const GRJIT_Function * function,
     const GRJIT_Allocator * a, const GRJIT_Limits * limits_in,

@@ -16,8 +16,21 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#if defined(__linux__)
 #include <unistd.h>
+#endif
 
+namespace {
+GRJIT_Function * tiny() {
+  B b("tiny");
+  GRJIT_VReg x = b.param(GRJIT_TYPE_I64);
+  b.at(b.block());
+  b.ret(V(x));
+  return b.finish();
+}
+} // namespace
+
+#if defined(__linux__)
 namespace {
 
 struct Mapping {
@@ -78,14 +91,6 @@ bool under_valgrind() {
   if (under_valgrind()) {                                                      \
     GTEST_SKIP() << "/proc/self/maps is Valgrind's, not the kernel's";         \
   }
-
-GRJIT_Function * tiny() {
-  B b("tiny");
-  GRJIT_VReg x = b.param(GRJIT_TYPE_I64);
-  b.at(b.block());
-  b.ret(V(x));
-  return b.finish();
-}
 
 } // namespace
 
@@ -213,6 +218,16 @@ TEST(WX, CodeMemoryIsChargedToTheContextProviderItCameFrom) {
   EXPECT_EQ(w.blocks_in_use(), 1u);
   EXPECT_GE(grcore_context_memory_peak(w.ctx), grjit_code_mapped_size(c.code));
 }
+
+#else // !__linux__
+/* The mappings are read from /proc/self/maps and the write to read-execute
+ * code is caught with sigsetjmp/siglongjmp, so none of the above exists off
+ * Linux. One skipped test stands in for them, so that the suite's count shows
+ * they were not run instead of showing nothing. */
+TEST(WX, IsProvedFromProcSelfMapsAndSignalsAndSoOnlyOnLinux) {
+  GTEST_SKIP() << "W^X is proved from /proc/self/maps and SIGSEGV: Linux only";
+}
+#endif
 
 #if !((defined(__x86_64__) || defined(__aarch64__)) && defined(__linux__))
 TEST(WX, OnAnotherTargetTheBackendSaysItIsAbsent) {

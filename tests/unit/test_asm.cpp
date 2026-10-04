@@ -186,6 +186,12 @@ TEST(Asm, EveryInstructionEncodesToTheReferenceBytes) {
 }
 
 TEST(Asm, TheSystemDisassemblerReadsTheSameInstructions) {
+#ifdef _WIN32
+  // The test writes a temporary file, reads objdump's output through popen and
+  // unlinks the file: POSIX calls, and an objdump the host may not have. The
+  // encodings are still checked byte for byte by the test above.
+  GTEST_SKIP() << "needs POSIX mkstemp/popen and a host objdump";
+#endif
   // objdump is required on the gated target: its absence fails this test,
   // it is not skipped (a skipped differential reports success over nothing).
   char path[] = "/tmp/grjit-asm-XXXXXX";

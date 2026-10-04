@@ -109,7 +109,8 @@ expect_fail 'edges/empty (includes)' 'measuring nothing' \
   "$E" --includes "$work/empty"
 
 printf 'check-edges --links\n'
-# TODO(windows): the .dll arm has not been run; objdump -p is the reader there.
+# The .dll arm (objdump -p is the reader there) has run under wine, cross-built
+# (tools/xwin in the workspace); it has not run on a Windows machine.
 case "$(uname -s)" in
   MINGW* | MSYS*) SHEXT=dll; SHFLAGS="-shared" ;;
   Darwin) SHEXT=dylib; SHFLAGS="-dynamiclib" ;;

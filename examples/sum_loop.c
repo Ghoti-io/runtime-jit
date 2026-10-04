@@ -53,8 +53,9 @@
 
 int main(void) {
   if (!grjit_backend_available()) {
-    fprintf(stderr, "no backend on this target\n");
-    return 1;
+    /* Exit status 77 is "skipped": the Makefile counts it and does not fail. */
+    printf("SKIP: no native code backend on this target\n");
+    return 77;
   }
 
   GRJIT_Builder * b;

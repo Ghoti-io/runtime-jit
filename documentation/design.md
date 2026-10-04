@@ -428,11 +428,15 @@ numbers; the calibration row is what to read them against.
   it needs none (compiled code has no GC point except a poll that first writes
   the guest frame).
 - **Windows.** The page-protection path is `runtime-core`'s `VirtualProtect`
-  branch (written, not run); unwind registration (`RtlAddFunctionTable`) is a
-  stub that returns `GRJIT_ERR_UNSUPPORTED`, marked `TODO(windows)` in place;
-  and compiled code is for Linux x86-64 and Linux arm64 only, so
-  `grjit_backend_available()` is false elsewhere. Windows arm64 and macOS are not
-  here.
+  branch (it has run under wine, not on a Windows machine); unwind registration
+  (`RtlAddFunctionTable`) is a stub that returns `GRJIT_ERR_UNSUPPORTED`, marked
+  `TODO(windows)` in place; and compiled code is for Linux x86-64 and Linux
+  arm64 only, so `grjit_backend_available()` is false elsewhere. Windows arm64
+  and macOS are not here. There is no Windows backend to test, and the suite
+  says so rather than passing: every test that needs compiled code is reported
+  SKIPPED (`GRJIT_REQUIRE_BACKEND`), the encoders and the IR are still tested
+  (they run on any host), the three examples and the benchmark exit 77, which
+  the Makefile counts as skipped, and `check-planted` is skipped by name.
 - **Pointer authentication and BTI** (above): unsupported and untested.
 - **Real arm64 hardware.** The arm64 backend's code runs under `qemu-aarch64`
   (every test of this library and `lang-tang`'s JIT arm) and in a simulator, and

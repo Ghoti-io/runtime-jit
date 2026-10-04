@@ -365,10 +365,14 @@ TEST_LD_PATH := $(APP_DIR):$(LIB_INSTALL_PATH)/$(SUITE)
 # something that compiles and does nothing it claims. It is a test gate for
 # the same reason (a failing example fails `make test`).
 examples: $(APP_DIR)/$(TARGET) $(EXAMPLES) ## Build the examples and run each
-	@for e in $(EXAMPLES); do \
+	@ran=0; skipped=0; for e in $(EXAMPLES); do \
 		printf '\n### Example %s ###\n\n' "$$(basename $$e $(EXE_EXTENSION))"; \
-		LD_LIBRARY_PATH="$(TEST_LD_PATH)" $$e || exit 1; \
-	done
+		LD_LIBRARY_PATH="$(TEST_LD_PATH)" $$e; rc=$$?; \
+		if [ $$rc -eq 77 ]; then skipped=$$((skipped + 1)); \
+		elif [ $$rc -ne 0 ]; then exit 1; \
+		else ran=$$((ran + 1)); fi; \
+	done; \
+	printf '\nexamples: %s ran, %s skipped (exit status 77: no native backend on this target)\n' "$$ran" "$$skipped"
 
 # clang accepts -Wstrict-aliasing and implements nothing, so under clang the
 # probe can never be reported and the gate would fail for a reason that says
@@ -452,7 +456,8 @@ ifeq ($(strip $(BENCH_EXECUTABLES)),)
 	@printf 'bench: no benchmark sources under bench/, so this measures nothing\n' >&2; exit 1
 endif
 	@for b in $(BENCH_EXECUTABLES); do \
-		LD_LIBRARY_PATH="$(TEST_LD_PATH)" $$b || exit 1; \
+		LD_LIBRARY_PATH="$(TEST_LD_PATH)" $$b; rc=$$?; \
+		if [ $$rc -ne 0 ] && [ $$rc -ne 77 ]; then exit 1; fi; \
 	done
 
 ####################################################################
@@ -526,7 +531,8 @@ test: $(APP_DIR)/$(TARGET) $(TEST_EXECUTABLES) $(BENCH_EXECUTABLES) $(TEST_GATES
 	fi
 	@for b in $(BENCH_EXECUTABLES); do \
 		printf '\n### Benchmark smoke %s ###\n\n' "$$(basename $$b $(EXE_EXTENSION))"; \
-		LD_LIBRARY_PATH="$(TEST_LD_PATH)" $$b --smoke || exit 1; \
+		LD_LIBRARY_PATH="$(TEST_LD_PATH)" $$b --smoke; rc=$$?; \
+		if [ $$rc -ne 0 ] && [ $$rc -ne 77 ]; then exit 1; fi; \
 	done
 
 test-quiet: $(APP_DIR)/$(TARGET) $(TEST_EXECUTABLES) ## Run tests, one line per suite
@@ -780,8 +786,17 @@ endif
 PLANT_DEFECTS := 1:testDifferential 2:testReadback 3:testReadback \
 	4:testDifferential:Differential.GeneratedFunctionsRunTheSameWhenArm64CodeIsSimulatedAndEvaluated
 
+# The tests that catch a planted defect run generated code, and there is no
+# backend to generate it off Linux (they are reported SKIPPED there), so a
+# planted defect would be caught by nothing and the gate would be measuring
+# nothing. It says so and stops, by name, as check-symbols does.
+ifeq ($(OS_NAME), Linux)
 check-planted: $(APP_DIR)/$(STATIC_TARGET) ## Prove the differential and the read-back fail on a planted backend defect
 	@tools/check-planted.sh "$(MAKE)" "$(PLANT_DEFECTS)" "$(LIB_INSTALL_PATH)/$(SUITE)" "$(APP_DIR)" "$(BUILD_DIR)"
+else
+check-planted: ## Skipped off Linux: there is no backend whose defects it could plant
+	@printf 'check-planted: skipped (no native backend on this target: the tests that catch a planted defect are skipped too)\n'
+endif
 
 ####################################################################
 # Install
