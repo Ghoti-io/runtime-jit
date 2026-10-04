@@ -41,6 +41,50 @@
 #include <unistd.h>
 #endif
 
+#ifndef _WIN32
+/* Whether the host has an objdump that disassembles x86-64: it runs, and it
+ * lists the machine. A host whose objdump cannot (a cross binutils for another
+ * architecture, or a machine where nothing x86-64 can be executed, such as a
+ * test binary run under an emulator for another instruction set) cannot give
+ * the independent reading these tests exist for; they are reported as skipped,
+ * with the reason, and never as passed or as failed for the tool. */
+bool host_objdump_reads_x86_64(std::string * why) {
+  /* Ask it the question the tests will: disassemble one NOP as x86-64. */
+  char path[] = "/tmp/grjit-w64-probe-XXXXXX";
+  int fd = mkstemp(path);
+  if (fd < 0) {
+    *why = "no temporary file could be made";
+    return false;
+  }
+  const unsigned char nop = 0x90;
+  bool wrote = write(fd, &nop, 1) == 1;
+  close(fd);
+  std::string text;
+  int status = -1;
+  if (wrote) {
+    std::string cmd = std::string("objdump -D -b binary -mi386:x86-64 -M intel ") + path + " 2>&1";
+    FILE * p = popen(cmd.c_str(), "r");
+    if (p != nullptr) {
+      char buf[512];
+      while (fgets(buf, sizeof buf, p) != nullptr) {
+        text += buf;
+      }
+      status = pclose(p);
+    }
+  }
+  unlink(path);
+  if (status != 0) {
+    *why = "objdump did not run or does not know the machine (exit status " + std::to_string(status) + ")";
+    return false;
+  }
+  if (text.find("nop") == std::string::npos) {
+    *why = "objdump ran but did not disassemble a NOP as x86-64";
+    return false;
+  }
+  return true;
+}
+#endif
+
 namespace {
 
 constexpr uint32_t kRequestOffset = 0x40;
@@ -298,6 +342,10 @@ TEST(Win64Shape, TheProbeLoopDisassemblesAsTheSequenceItIsMeantToBe) {
 #ifdef _WIN32
   GTEST_SKIP() << "needs POSIX mkstemp/popen and a host objdump";
 #else
+  std::string why;
+  if (!host_objdump_reads_x86_64(&why)) {
+    GTEST_SKIP() << "no objdump that reads x86-64 here: " << why;
+  }
   Fn large(frame_of(600));
   Emit em(large);
   ASSERT_TRUE(em.ok());
@@ -405,6 +453,10 @@ TEST(Win64Registers, TheDisassemblerAgreesThatNoCalleeSavedRegisterAppears) {
 #ifdef _WIN32
   GTEST_SKIP() << "needs POSIX mkstemp/popen and a host objdump";
 #else
+  std::string why;
+  if (!host_objdump_reads_x86_64(&why)) {
+    GTEST_SKIP() << "no objdump that reads x86-64 here: " << why;
+  }
   /* Independent of the assembler's own record: the bytes of 200 functions,
    * read back by objdump. */
   Bytes blob;

@@ -32,7 +32,9 @@ system; it is emitted and its bytes tested on every host, and run under wine
 encodings and hazards are tested on every host (the assembler is plain C that
 emits bytes, and a small simulator in the tests executes what it emits); running
 its code for real is `tools/xarch/jit-arm64.sh` in the workspace, under
-`qemu-aarch64`. Every header is labelled `free`: a consumer requires
+`qemu-aarch64` (a regression in the arm64 branch of `grjit_compile` passes
+`make test` and fails only that script, so `tools/m1-prerelease.sh` runs it,
+and the Windows run, as the step before a release). Every header is labelled `free`: a consumer requires
 the exact version it was built against.
 
 ## Example
