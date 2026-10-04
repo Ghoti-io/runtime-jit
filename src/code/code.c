@@ -104,6 +104,15 @@ size_t grjit_code_param_count(const GRJIT_Code * code) {
   return code == NULL ? 0 : code->param_count;
 }
 
+/* The entry is generated code, which carries no type signature in front of it.
+ * clang's -fsanitize=function reads one (the 8 bytes before the callee) at every
+ * indirect call, and the first byte of the code is the first byte of its
+ * mapping, so the read faults. The call is checked by construction instead:
+ * the entry point is ours and its type is the one declared here. GCC has no
+ * such check. */
+#if defined(__clang__)
+__attribute__((no_sanitize("function")))
+#endif
 uint32_t grjit_code_call(const GRJIT_Code * code, void * context,
     const uint64_t * args, uint64_t * out) {
   /* Code is compiled against one build's layout of the context; a core that

@@ -37,6 +37,17 @@ namespace a64sim {
 
 using Native = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
+// The simulator calls a helper through this one six-argument type whatever the
+// helper declares, the way an AArch64 `blr` does (an argument it does not read
+// is harmlessly in a register). That is not a call the language defines, and
+// clang's -fsanitize=function checks the type of every indirect call, so the
+// simulator's run() opts out of that one check; GCC has no such check.
+#if defined(__clang__)
+#define A64_SIM_NO_FUNCTION_CHECK __attribute__((no_sanitize("function")))
+#else
+#define A64_SIM_NO_FUNCTION_CHECK
+#endif
+
 struct Config {
   const uint8_t * code = nullptr;
   size_t size = 0;
@@ -63,7 +74,7 @@ inline uint64_t noise(uint64_t seed) {
 
 class Cpu {
  public:
-  Result run(Config & cfg) {
+  A64_SIM_NO_FUNCTION_CHECK Result run(Config & cfg) {
     Result res;
     std::vector<uint8_t> stack(cfg.stack_bytes + 64, 0);
     uintptr_t top = (reinterpret_cast<uintptr_t>(stack.data()) + cfg.stack_bytes) & ~uintptr_t{15};

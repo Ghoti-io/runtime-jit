@@ -95,9 +95,10 @@ GRJIT_Result grjit_metadata_build(const GRJIT_Function * f,
     s->code_offset = r->offset;
     s->kind = r->kind;
     s->identity = r->identity;
-    s->live = out->locations + loc_at;
+    /* NULL + 0 is undefined in C: the arrays are not allocated when empty. */
+    s->live = out->locations != NULL ? out->locations + loc_at : NULL;
     size_t refs = 0;
-    s->derived = out->derived + der_at;
+    s->derived = out->derived != NULL ? out->derived + der_at : NULL;
     size_t ders = 0;
 #if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 3
     /* Planted defect 3 (tests only): the first live REF that no derived
@@ -142,7 +143,7 @@ GRJIT_Result grjit_metadata_build(const GRJIT_Function * f,
     loc_at += refs;
     der_at += ders;
     const GRJIT_FrameState * st = &f->states[r->state];
-    s->frame_state = out->locations + loc_at;
+    s->frame_state = out->locations != NULL ? out->locations + loc_at : NULL;
     s->frame_state_count = st->slot_count;
     for (size_t k = 0; k < st->slot_count; k++) {
       const GRJIT_FrameSlot * slot = &st->slots[k];

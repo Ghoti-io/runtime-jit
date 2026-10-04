@@ -614,6 +614,14 @@ endif
 
 UBSAN_CHECKS := undefined,float-cast-overflow
 ASAN_UBSAN_FLAGS := -fsanitize=address,$(UBSAN_CHECKS) -fno-sanitize-recover=$(UBSAN_CHECKS) -fno-omit-frame-pointer -g -O1
+# clang's `undefined` group includes `enum`, which GCC's does not: it reports a
+# load of an enum value outside the enumerators. The tests pass such values on
+# purpose (static_cast<Kind>(99)) to prove the C API refuses an unknown kind,
+# which is undefined in C++ but is exactly the input under test, so the check
+# is switched off under clang and the compilers sanitize the same set.
+ifneq ($(findstring clang,$(shell $(CC) --version 2>/dev/null)),)
+ASAN_UBSAN_FLAGS += -fno-sanitize=enum
+endif
 COV_BUILD_DIR := ./build/$(BUILD)-cov
 ASAN_BUILD_DIR := ./build/$(BUILD)-asan
 ASAN_OBJ_DIR := $(ASAN_BUILD_DIR)/objects
@@ -662,11 +670,24 @@ $(foreach pair,$(TEST_PAIRS),\
 
 ASAN_TEST_EXECUTABLES := $(addprefix $(ASAN_APP_DIR)/,$(addsuffix $(EXE_EXTENSION),$(TEST_NAMES)))
 ASAN_RUNTIME := $(shell $(CC) -print-file-name=libasan.so 2>/dev/null)
+# How the sanitized test programs are started. GCC's runtime is a shared
+# libasan.so, which has to be preloaded because the libraries under test are
+# loaded by a program that was not linked against it. clang links its own
+# runtime statically into every program it builds with -fsanitize=address, so
+# there is nothing to preload - and preloading libasan.so beside it, or
+# anything else (this workstation's desktop sets LD_PRELOAD), makes the runtime
+# abort with "ASan runtime does not come first". So with clang the preload is
+# emptied instead of set.
+ifneq ($(findstring clang,$(shell $(CC) --version 2>/dev/null)),)
+ASAN_PRELOAD = LD_PRELOAD=
+else
+ASAN_PRELOAD = LD_PRELOAD="$(ASAN_RUNTIME)$${LD_PRELOAD:+:$$LD_PRELOAD}"
+endif
 
 test-asan: $(ASAN_TEST_EXECUTABLES) ## Build with ASan+UBSan and run the tests
 	@for test_exe in $(ASAN_TEST_EXECUTABLES); do \
 		printf '\n### ASan+UBSan %s ###\n\n' "$$(basename $$test_exe)"; \
-		LD_PRELOAD="$(ASAN_RUNTIME)$${LD_PRELOAD:+:$$LD_PRELOAD}" \
+		$(ASAN_PRELOAD) \
 		LD_LIBRARY_PATH="$(ASAN_APP_DIR):$(LIB_INSTALL_PATH)/$(SUITE)" \
 			$$test_exe --gtest_brief=1 || exit 1; \
 	done
