@@ -383,7 +383,7 @@ GRJIT_Result grjit_emit_function(const GRJIT_Function * f,
     alloc += GRJIT_WIN64_OUTGOING;
 #endif
   }
-  if (alloc > (uint32_t)INT32_MAX - GRJIT_WIN64_PAGE) {
+  if (win64 && alloc > (uint32_t)INT32_MAX - GRJIT_WIN64_PAGE) {
     /* The allocation and the probe displacements are signed 32-bit fields of
      * the encodings; a cap raised past 2 GiB is a limit, not a wrapped value. */
     return GRJIT_ERR_LIMIT;

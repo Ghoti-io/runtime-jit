@@ -176,8 +176,11 @@ GRJIT_Result grjit_memory_create(const GRCORE_PageProvider * pages,
   size_t table_at = 0;
   size_t used = length;
   if (arch == GRJIT_ARCH_X86_64_WIN64) {
-    if (prologue == NULL || out_unwind_table == NULL || length > UINT32_MAX / 2) {
+    if (prologue == NULL || out_unwind_table == NULL) {
       return GRJIT_ERR_INVALID;
+    }
+    if (length > UINT32_MAX / 2) {
+      return GRJIT_ERR_LIMIT; /* the RVAs of the unwind data are 32-bit */
     }
     info_size = grjit_unwind_info_build(prologue, info);
     if (info_size == 0) {

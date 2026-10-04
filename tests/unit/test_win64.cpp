@@ -278,6 +278,22 @@ TEST(Win64Shape, AFrameOverThePageSizeIsProbedADownwardsPageAtATimeBeforeRspMove
   EXPECT_EQ(sysv.count({0x4D, 0x8D, 0x9B, 0x00, 0xF0, 0xFF, 0xFF}), 0u);
 }
 
+TEST(Win64Shape, TheProbeThresholdIsExactlyWhereTheFramePlusAReturnAddressPassesAPage) {
+  const Bytes lea_page = {0x4D, 0x8D, 0x9B, 0x00, 0xF0, 0xFF, 0xFF};
+  /* 501 registers: a Win64 frame of 4080, and 4080 + 8 fits the page. */
+  Fn below(frame_of(501));
+  Emit b(below);
+  ASSERT_TRUE(b.ok());
+  ASSERT_EQ(b.e.prologue.alloc_bytes, 4080u);
+  EXPECT_EQ(b.count(lea_page), 0u);
+  /* 502 registers: 4096, and 4096 + 8 passes it. */
+  Fn above(frame_of(502));
+  Emit a(above);
+  ASSERT_TRUE(a.ok());
+  ASSERT_EQ(a.e.prologue.alloc_bytes, 4096u);
+  EXPECT_EQ(a.count(lea_page), 1u);
+}
+
 TEST(Win64Shape, TheProbeLoopDisassemblesAsTheSequenceItIsMeantToBe) {
 #ifdef _WIN32
   GTEST_SKIP() << "needs POSIX mkstemp/popen and a host objdump";
