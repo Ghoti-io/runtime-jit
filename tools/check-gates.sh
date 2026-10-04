@@ -108,6 +108,11 @@ expect_fail 'edges/planted-quoted' 'runtime-jit -> runtime-heap' \
 expect_fail 'edges/empty (includes)' 'measuring nothing' \
   "$E" --includes "$work/empty"
 
+expect_fail 'edges/planted-relative' 'runtime-jit -> runtime-heap' \
+  "$E" --includes "$FIX/edges/planted-relative"
+expect_fail 'edges/planted-example' 'runtime-jit -> runtime-heap' \
+  "$E" --includes "$FIX/edges/planted-example"
+
 printf 'check-edges --links\n'
 # The .dll arm (objdump -p is the reader there) has run under wine, cross-built
 # (tools/xwin in the workspace); it has not run on a Windows machine.
@@ -171,6 +176,23 @@ else
     'runtime-jit -> text' "$E" --links "$work/text"
 fi
 expect_fail 'links/empty' 'measuring nothing' "$E" --links "$work/empty"
+
+# A name that merely begins with an allowed one is another library, not that
+# library with a branch suffix.
+extra="$work/extra"
+mkdir -p "$extra" "$work/extra-stubs"
+printf 'int stub_extra(void) { return 4; }\n' > "$work/extra-stub.c"
+printf 'int stub_extra(void);\nint extended(void) { return stub_extra(); }\n' > "$work/extended.c"
+# shellcheck disable=SC2086
+if $CC $SHFLAGS -o "$work/extra-stubs/libghoti.io-cutil-extra-0.$SHEXT" "$work/extra-stub.c" &&
+  $CC $SHFLAGS -o "$extra/libextended.$SHEXT" "$work/extended.c" \
+    -L"$work/extra-stubs" -Wl,--no-as-needed -l:libghoti.io-cutil-extra-0.$SHEXT \
+    >"$work/extra-build.log" 2>&1; then
+  expect_fail 'links/planted-name-extending-an-allowed-one' 'runtime-jit -> cutil-extra' \
+    "$E" --links "$extra"
+else
+  fail "could not build the extended-name fixture"
+fi
 
 if [ "$failures" -ne 0 ]; then
   printf 'check-gates: %d of %d checks failed\n' "$failures" "$checks" >&2

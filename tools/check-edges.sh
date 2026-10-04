@@ -21,7 +21,7 @@
 # needs no edit here, and a typo in a deny list cannot let one through.
 #
 # Usage:
-#   check-edges.sh --includes <root>   scan <root>/src and <root>/include
+#   check-edges.sh --includes <root>   scan <root>/src, include, examples and bench
 #   check-edges.sh --links <dir>       read the NEEDED list of every shared
 #                                      object under <dir>
 #
@@ -33,12 +33,21 @@ mode="${1:?usage: check-edges.sh --includes <root> | --links <dir>}"
 target="${2:?usage: check-edges.sh --includes <root> | --links <dir>}"
 
 ALLOWED='cutil|runtime-core|runtime-jit'
+# What may follow an allowed name in a NEEDED entry: the BRANCH suffix of a
+# build that named one (cutil-dev). A different library whose name merely
+# begins with an allowed one (cutil-extra) is an edge, and is no longer
+# accepted as that library. GHOTI_BRANCH (for example -nightly) adds the
+# suffix of a build with a branch of its own.
+SUFFIXES='-dev'
+if [ -n "${GHOTI_BRANCH:-}" ]; then
+  SUFFIXES="$SUFFIXES|$(printf '%s' "${GHOTI_BRANCH}" | sed 's/[][\.^$*+?(){}|\/]/\\&/g')"
+fi
 status=0
 
 case "$mode" in
   --includes)
     files=""
-    for d in "$target/src" "$target/include"; do
+    for d in "$target/src" "$target/include" "$target/examples" "$target/bench"; do
       if [ -d "$d" ]; then
         found="$(find "$d" -type f \( -name '*.c' -o -name '*.h' \
           -o -name '*.cpp' \) | sort)"
@@ -55,12 +64,12 @@ $found"
     count=0
     for f in $files; do
       count=$((count + 1))
-      hits="$(grep -nE '^[[:space:]]*#[[:space:]]*include[[:space:]]*[<"]ghoti\.io/[^/>"]+/' "$f" || true)"
+      hits="$(grep -nE '^[[:space:]]*#[[:space:]]*include[^"<]*[<"][^>"]*ghoti\.io/[^/>"]+/' "$f" || true)"
       [ -n "$hits" ] || continue
       while IFS= read -r line; do
         n="${line%%:*}"
         lib="$(printf '%s\n' "$line" \
-          | sed -E 's/.*[<"]ghoti\.io\/([^\/>"]+)\/.*/\1/')"
+          | sed -E 's/.*ghoti\.io\/([^\/>"]+)\/.*/\1/')"
         if ! printf '%s\n' "$lib" | grep -qE "^($ALLOWED)\$"; then
           printf 'check-edges: forbidden edge runtime-jit -> %s: %s:%s: %s\n' \
             "$lib" "$f" "$n" "${line#*:}" >&2
@@ -123,7 +132,7 @@ HITS
             # Exactly an allowed name, or one followed by a BRANCH suffix
             # (cutil-dev, cutil-0-debug); never a different library that
             # merely starts with one.
-            if ! printf '%s\n' "$lib" | grep -qE "^($ALLOWED)(-.*)?\$"; then
+            if ! printf '%s\n' "$lib" | grep -qE "^($ALLOWED)($SUFFIXES)?\$"; then
               printf 'check-edges: forbidden edge runtime-jit -> %s: %s has NEEDED %s\n' \
                 "$lib" "$so" "$dep" >&2
               status=1
