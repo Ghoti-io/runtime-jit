@@ -205,6 +205,9 @@ struct B {
   void mov(GRJIT_VReg d, GRJIT_Operand s) {
     EXPECT_EQ(grjit_builder_move(b, d, s), GRJIT_OK);
   }
+  void bitcast(GRJIT_VReg d, GRJIT_VReg s) {
+    EXPECT_EQ(grjit_builder_bitcast(b, d, s), GRJIT_OK);
+  }
   void bin(GRJIT_OpKind k, GRJIT_VReg d, GRJIT_Operand x, GRJIT_Operand y) {
     EXPECT_EQ(grjit_builder_binary(b, k, d, x, y), GRJIT_OK);
   }

@@ -175,6 +175,20 @@ static GRJIT_Result check_op(
             index, op->a.vreg, op->dst);
       }
       return GRJIT_OK;
+    case GRJIT_OP_BITCAST:
+      // A reinterpretation between registers of any of the three types: the
+      // source is a register (an immediate has no type to reinterpret) and
+      // the destination's type decides what the word is from here on.
+      if (op->a.kind != GRJIT_OPERAND_VREG) {
+        return refuse(v, GRJIT_ERR_INVALID,
+            "block b%u op %zu: bitcast needs a register source", block, index);
+      }
+      if ((r = check_operand(v, "source", &op->a, true, block, index)) !=
+              GRJIT_OK ||
+          (r = check_dst(v, op, false, block, index)) != GRJIT_OK) {
+        return r;
+      }
+      return GRJIT_OK;
     case GRJIT_OP_ADD:
     case GRJIT_OP_SUB:
     case GRJIT_OP_MUL:

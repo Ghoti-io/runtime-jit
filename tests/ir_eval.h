@@ -116,6 +116,7 @@ inline Result eval(const GRJIT_Function * f, void * ctx, GRJIT_EntryHook hook,
       switch (op.kind) {
         case GRJIT_OP_CONST: regs[op.dst] = a; break;
         case GRJIT_OP_MOVE: regs[op.dst] = a; break;
+        case GRJIT_OP_BITCAST: regs[op.dst] = a; break;
         case GRJIT_OP_ADD: regs[op.dst] = a + b; break;
         case GRJIT_OP_SUB: regs[op.dst] = a - b; break;
         case GRJIT_OP_MUL: regs[op.dst] = a * b; break;

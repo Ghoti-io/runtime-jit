@@ -134,6 +134,7 @@
 #define grjit_asm_ud2 GHOTIIO_RUNTIME_JIT(grjit_asm_ud2)
 #define grjit_backend_available GHOTIIO_RUNTIME_JIT(grjit_backend_available)
 #define grjit_builder_binary GHOTIIO_RUNTIME_JIT(grjit_builder_binary)
+#define grjit_builder_bitcast GHOTIIO_RUNTIME_JIT(grjit_builder_bitcast)
 #define grjit_builder_block GHOTIIO_RUNTIME_JIT(grjit_builder_block)
 #define grjit_builder_br GHOTIIO_RUNTIME_JIT(grjit_builder_br)
 #define grjit_builder_br_if GHOTIIO_RUNTIME_JIT(grjit_builder_br_if)

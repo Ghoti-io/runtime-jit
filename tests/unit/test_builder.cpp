@@ -244,3 +244,21 @@ TEST(Builder, AnAllocationFailureAtEveryPointLeavesTheBuilderAsItWasAndLeaksNoth
 }
 
 GRJIT_TEST_MAIN()
+
+TEST(Builder, ABitcastIsRecordedWithItsSourceRegisterAndRefusesANullBuilder) {
+  EXPECT_EQ(grjit_builder_bitcast(nullptr, 0, 0), GRJIT_ERR_INVALID);
+  B b("f");
+  GRJIT_VReg r = b.param(GRJIT_TYPE_REF);
+  GRJIT_VReg i = b.reg(GRJIT_TYPE_I64);
+  b.at(b.block());
+  b.bitcast(i, r);
+  b.ret(V(i));
+  Fn f(b.finish());
+  size_t n = 0;
+  const GRJIT_Op * ops = grjit_function_block_ops(f, 0, &n);
+  ASSERT_EQ(n, 2u);
+  EXPECT_EQ(ops[0].kind, GRJIT_OP_BITCAST);
+  EXPECT_EQ(ops[0].dst, i);
+  EXPECT_EQ(ops[0].a.kind, GRJIT_OPERAND_VREG);
+  EXPECT_EQ(ops[0].a.vreg, r);
+}

@@ -195,6 +195,25 @@ helper `CALL` (the engine's `gc_store`, AD-11). This library never emits a
 barrier, so a barrier mode that changes how the collector works changes no code
 here, and the IR needs no knowledge of the collector's types.
 
+## Why `BITCAST`
+
+A tagged value of a dynamic language is a word that may be a reference, so the
+engine holds it in a `REF` register, and arithmetic is defined on `I64` and
+`PTR` only: the verifier refuses an `ADD` of a `REF`, and `MOVE` refuses to
+change a register's type. Without one more operation an engine could not
+compute on a tagged value at all: no way existed to shift the tag off, add, and
+tag the result. `BITCAST` copies the 64 bits between two registers of any of the
+types `I64`, `REF` and `PTR`; the destination's type decides what the word is
+from then on. It is a reinterpretation and not a conversion, which is the
+narrowest thing that serves: it does not widen what `MOVE` accepts, so a type
+change is still always spelled out. The liveness pass sees it as a use of the
+source and a definition of the destination, so a `REF` source stays in a stack
+map for as long as that register is live and the `I64` it was cast to never
+enters one: **a bitcast from `REF` to `I64` never makes the computed value a
+reference**, and the reverse makes a reference only by naming a value the
+engine has built as one. The library still emits no barrier and still has no
+`gc_store`; a `BITCAST` writes a register, never a heap word.
+
 ## The IR is never interpreted
 
 The library has no evaluator (AD-9: each language owns its interpreter, and the

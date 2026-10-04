@@ -235,6 +235,7 @@ static void emit_op(GRJIT_Emit * e, const GRJIT_Op * op, size_t block) {
   switch (op->kind) {
     case GRJIT_OP_CONST:
     case GRJIT_OP_MOVE:
+    case GRJIT_OP_BITCAST:
       load_operand(e, GRJIT_RAX, &op->a);
       store_result(e, op->dst, GRJIT_RAX);
       break;

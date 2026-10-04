@@ -79,3 +79,15 @@ TEST(Print, ASmallBufferGetsATruncatedTerminatedTextAndTheFullLength) {
 }
 
 GRJIT_TEST_MAIN()
+
+TEST(Print, ABitcastPrintsItsNameAndSource) {
+  B b("bc", 0);
+  GRJIT_VReg r = b.param(GRJIT_TYPE_REF);
+  GRJIT_VReg i = b.reg(GRJIT_TYPE_I64);
+  b.at(b.block());
+  b.bitcast(i, r);
+  b.ret(V(i));
+  Fn f(b.finish());
+  std::string text = print(f);
+  EXPECT_NE(text.find("  v1 = bitcast v0\n"), std::string::npos) << text;
+}

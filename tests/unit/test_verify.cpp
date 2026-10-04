@@ -455,3 +455,87 @@ TEST(Verify, ACallToNowhereAndMissingOperandsAreInvalid) {
 }
 
 GRJIT_TEST_MAIN()
+
+TEST(Verify, ABitcastBetweenAnyTwoOfTheThreeTypesPasses) {
+  const GRJIT_Type types[] = {GRJIT_TYPE_I64, GRJIT_TYPE_REF, GRJIT_TYPE_PTR};
+  for (GRJIT_Type from : types) {
+    for (GRJIT_Type to : types) {
+      auto r = check([&](B & b) {
+        GRJIT_VReg s = b.param(from);
+        GRJIT_VReg d = b.reg(to);
+        b.at(b.block());
+        b.bitcast(d, s);
+        b.ret();
+      });
+      EXPECT_EQ(r.first, GRJIT_OK) << from << "->" << to << ": " << r.second;
+    }
+  }
+}
+
+TEST(Verify, MoveStillRefusesATypeChangeWhereBitcastAcceptsIt) {
+  auto mv = check([](B & b) {
+    GRJIT_VReg s = b.param(GRJIT_TYPE_REF);
+    GRJIT_VReg d = b.reg(GRJIT_TYPE_I64);
+    b.at(b.block());
+    b.mov(d, V(s));
+    b.ret();
+  });
+  EXPECT_EQ(mv.first, GRJIT_ERR_INVALID);
+  auto bc = check([](B & b) {
+    GRJIT_VReg s = b.param(GRJIT_TYPE_REF);
+    GRJIT_VReg d = b.reg(GRJIT_TYPE_I64);
+    b.at(b.block());
+    b.bitcast(d, s);
+    b.ret();
+  });
+  EXPECT_EQ(bc.first, GRJIT_OK) << bc.second;
+}
+
+TEST(Verify, ABitcastNeedsARegisterSourceThatExistsAndIsAssigned) {
+  auto missing_src = check([](B & b) {
+    GRJIT_VReg d = b.reg(GRJIT_TYPE_I64);
+    b.at(b.block());
+    b.bitcast(d, 77);
+    b.ret();
+  });
+  EXPECT_EQ(missing_src.first, GRJIT_ERR_INVALID);
+  auto missing_dst = check([](B & b) {
+    GRJIT_VReg s = b.param(GRJIT_TYPE_REF);
+    b.at(b.block());
+    b.bitcast(77, s);
+    b.ret();
+  });
+  EXPECT_EQ(missing_dst.first, GRJIT_ERR_INVALID);
+  auto unassigned = check([](B & b) {
+    GRJIT_VReg s = b.reg(GRJIT_TYPE_REF);
+    GRJIT_VReg d = b.reg(GRJIT_TYPE_I64);
+    b.at(b.block());
+    b.bitcast(d, s);
+    b.ret();
+  });
+  EXPECT_EQ(unassigned.first, GRJIT_ERR_INVALID);
+  EXPECT_NE(unassigned.second.find("v0"), std::string::npos) << unassigned.second;
+}
+
+TEST(Verify, ARegisterComputedByBitcastIsTypedByItsDestinationNotItsSource) {
+  // A REF bitcast to I64 can be added to; the I64 bitcast to REF cannot.
+  auto ok = check([](B & b) {
+    GRJIT_VReg s = b.param(GRJIT_TYPE_REF);
+    GRJIT_VReg i = b.reg(GRJIT_TYPE_I64);
+    b.at(b.block());
+    b.bitcast(i, s);
+    b.bin(GRJIT_OP_ADD, i, V(i), I(1));
+    b.ret(V(i));
+  });
+  EXPECT_EQ(ok.first, GRJIT_OK) << ok.second;
+  auto bad = check([](B & b) {
+    GRJIT_VReg s = b.param(GRJIT_TYPE_I64);
+    GRJIT_VReg r = b.reg(GRJIT_TYPE_REF);
+    GRJIT_VReg d = b.reg(GRJIT_TYPE_I64);
+    b.at(b.block());
+    b.bitcast(r, s);
+    b.bin(GRJIT_OP_ADD, d, V(r), I(1)); // r is a REF now
+    b.ret(V(d));
+  });
+  EXPECT_EQ(bad.first, GRJIT_ERR_INVALID);
+}

@@ -103,7 +103,7 @@ struct Gen {
         GRJIT_OP_AND, GRJIT_OP_OR, GRJIT_OP_XOR, GRJIT_OP_SHL, GRJIT_OP_SHR,
         GRJIT_OP_SAR};
     static const uint32_t widths[] = {8, 16, 32, 64};
-    switch (pick(18)) {
+    switch (pick(20)) {
       case 0: case 1: case 2: case 3: {
         GRJIT_OpKind k = bins[pick(9)];
         bool shift = k == GRJIT_OP_SHL || k == GRJIT_OP_SHR || k == GRJIT_OP_SAR;
@@ -156,6 +156,12 @@ struct Gen {
         }
         break;
       }
+      case 18:
+        b.bitcast(dreg(), rreg());
+        break;
+      case 19:
+        b.bitcast(rreg(), dreg());
+        break;
       case 16:
         b.poll({2, pick(100)}, state());
         break;

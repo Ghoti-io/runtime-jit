@@ -71,7 +71,7 @@ static const char * type_name(GRJIT_Type t) {
 static const char * op_name(GRJIT_OpKind k) {
   static const char * const names[] = {"const", "move", "add", "sub", "mul",
       "and", "or", "xor", "shl", "shr", "sar", "neg", "not", "cmp", "load",
-      "load_s", "store", "call", "poll", "guard", "br", "br_if", "ret"};
+      "load_s", "store", "call", "poll", "guard", "br", "br_if", "ret", "bitcast"};
   return (unsigned)k < (unsigned)GRJIT_OP_COUNT ? names[k] : "?";
 }
 
@@ -145,6 +145,7 @@ static void put_op(Out * o, const GRJIT_Function * f, const GRJIT_Op * op) {
       put(o, "const %" PRId64, op->a.imm);
       break;
     case GRJIT_OP_MOVE:
+    case GRJIT_OP_BITCAST:
     case GRJIT_OP_NEG:
     case GRJIT_OP_NOT:
       put(o, "%s ", op_name(op->kind));

@@ -157,6 +157,8 @@ typedef enum GRJIT_OpKind {
   GRJIT_OP_BR,     ///< Jump to `target`.
   GRJIT_OP_BR_IF,  ///< Jump to `target` if `a` is non-zero, else `target_else`.
   GRJIT_OP_RET,    ///< Return `a`, or nothing.
+  GRJIT_OP_BITCAST, ///< `dst = a`, reinterpreted: a word copied between two
+                    ///< registers of any of the types `I64`, `REF`, `PTR`.
   GRJIT_OP_COUNT   ///< Not an operation; closes the enum.
 } GRJIT_OpKind;
 

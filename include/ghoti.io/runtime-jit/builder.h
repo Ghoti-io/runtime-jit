@@ -148,6 +148,18 @@ GRJIT_API GRJIT_Result grjit_builder_move(
     GRJIT_Builder * builder, GRJIT_VReg dst, GRJIT_Operand src);
 
 /**
+ * @brief `dst = src`, reinterpreted: copies the word between two registers of
+ *   any of the types `I64`, `REF` and `PTR`.
+ *
+ * `MOVE` keeps refusing a change of type; this is the one operation that
+ * changes it. It is not a conversion: the 64 bits are the same. A bitcast from
+ * a `REF` to an `I64` never makes the computed value a reference, and the
+ * destination's type is what decides whether a stack map names it.
+ */
+GRJIT_API GRJIT_Result grjit_builder_bitcast(
+    GRJIT_Builder * builder, GRJIT_VReg dst, GRJIT_VReg src);
+
+/**
  * @brief `dst = a op b` for ADD, SUB, MUL, AND, OR, XOR, SHL, SHR and SAR.
  *
  * @return ::GRJIT_ERR_INVALID for another kind.

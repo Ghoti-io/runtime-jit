@@ -483,3 +483,77 @@ TEST(Compile, TheCodeCarriesItsLayoutAndAddressAndIsOneMapping) {
 }
 
 GRJIT_TEST_MAIN()
+
+TEST(Compile, ABitcastComputesOnATaggedValueAndTagsTheResult) {
+  GRJIT_REQUIRE_BACKEND();
+  JitWorld w;
+  // A tagged small integer (n << 4 | 1) in, n + 5 tagged out: the shape of a
+  // baseline JIT's integer add.
+  B b("tagged");
+  GRJIT_VReg x = b.param(GRJIT_TYPE_REF);
+  GRJIT_VReg raw = b.reg(GRJIT_TYPE_I64), n = b.reg(GRJIT_TYPE_I64);
+  GRJIT_VReg out = b.reg(GRJIT_TYPE_REF);
+  b.at(b.block());
+  b.bitcast(raw, x);
+  b.bin(GRJIT_OP_SAR, n, V(raw), I(4));
+  b.bin(GRJIT_OP_ADD, n, V(n), I(5));
+  b.bin(GRJIT_OP_SHL, n, V(n), I(4));
+  b.bin(GRJIT_OP_OR, n, V(n), I(1));
+  b.bitcast(out, n);
+  b.ret(V(out));
+  Fn f(b.finish());
+  Compiled c(f, w.pages());
+  ASSERT_TRUE(c);
+  for (int64_t v : {int64_t{0}, int64_t{1}, int64_t{-1}, int64_t{123456789}, int64_t{-987654321}}) {
+    uint64_t in = (static_cast<uint64_t>(v) << 4) | 1u;
+    uint64_t want = (static_cast<uint64_t>(v + 5) << 4) | 1u;
+    EXPECT_EQ(c.run(w.ctx, {in}).out[0], want) << v;
+  }
+}
+
+TEST(Compile, ABitcastToPtrAndBackKeepsEveryBit) {
+  GRJIT_REQUIRE_BACKEND();
+  JitWorld w;
+  B b("roundtrip");
+  GRJIT_VReg x = b.param(GRJIT_TYPE_I64);
+  GRJIT_VReg p = b.reg(GRJIT_TYPE_PTR), r = b.reg(GRJIT_TYPE_REF), d = b.reg(GRJIT_TYPE_I64);
+  b.at(b.block());
+  b.bitcast(p, x);
+  b.bitcast(r, p);
+  b.bitcast(d, r);
+  b.ret(V(d));
+  Fn f(b.finish());
+  Compiled c(f, w.pages());
+  ASSERT_TRUE(c);
+  for (int64_t v : kEdges) {
+    EXPECT_EQ(c.run(w.ctx, {static_cast<uint64_t>(v)}).out[0], static_cast<uint64_t>(v));
+  }
+}
+
+TEST(Compile, ARefBitcastToI64IsNotInTheStackMapButItsRefSourceIsWhileLive) {
+  GRJIT_REQUIRE_BACKEND();
+  JitWorld w;
+  // The REF parameter is named by the call's frame state, so it is live at the
+  // site; the I64 computed from it is not a reference and is never mapped.
+  B b("maps", 2);
+  GRJIT_VReg x = b.param(GRJIT_TYPE_REF);
+  GRJIT_VReg raw = b.reg(GRJIT_TYPE_I64), out = b.reg(GRJIT_TYPE_I64);
+  b.at(b.block());
+  b.bitcast(raw, x);
+  b.call_gc(out, reinterpret_cast<const void *>(helper_record), {V(raw)}, {1, 2},
+      {grjit_frame_slot_vreg(x), grjit_frame_slot_vreg(raw)});
+  b.ret(V(out));
+  Fn f(b.finish());
+  Compiled c(f, w.pages());
+  ASSERT_TRUE(c);
+  const GRCORE_CodeMeta * meta = grjit_code_meta(c.code);
+  ASSERT_EQ(meta->site_count, 1u);
+  const GRCORE_CodeSite & s = meta->sites[0];
+  ASSERT_EQ(s.live_count, 1u);
+  EXPECT_EQ(s.live[0].slot_kind, GRCORE_SLOT_VALUE);
+  ASSERT_EQ(s.frame_state_count, 2u);
+  EXPECT_EQ(s.frame_state[0].slot_kind, GRCORE_SLOT_VALUE);
+  EXPECT_EQ(s.frame_state[1].slot_kind, GRCORE_SLOT_RAW);
+  EXPECT_NE(s.live[0].value, s.frame_state[1].value);
+  EXPECT_EQ(s.live[0].value, s.frame_state[0].value);
+}

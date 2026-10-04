@@ -334,6 +334,17 @@ GRJIT_Result grjit_builder_move(
   return append(builder, &op, NULL, 0, NULL, NULL, 0);
 }
 
+GRJIT_Result grjit_builder_bitcast(
+    GRJIT_Builder * builder, GRJIT_VReg dst, GRJIT_VReg src) {
+  if (builder == NULL) {
+    return GRJIT_ERR_INVALID;
+  }
+  GRJIT_Op op = blank(GRJIT_OP_BITCAST);
+  op.dst = dst;
+  op.a = grjit_operand_vreg(src);
+  return append(builder, &op, NULL, 0, NULL, NULL, 0);
+}
+
 GRJIT_Result grjit_builder_binary(GRJIT_Builder * builder, GRJIT_OpKind kind,
     GRJIT_VReg dst, GRJIT_Operand a, GRJIT_Operand b) {
   if (builder == NULL || kind < GRJIT_OP_ADD || kind > GRJIT_OP_SAR) {
