@@ -1,0 +1,60 @@
+# The part of every job that is the same in every job.
+#
+# This library resolves its dependencies through pkg-config and nothing else -
+# there is deliberately no sibling-checkout fallback, because a second
+# resolution path that only in-tree builds exercise is one that silently rots
+# (CONVENTIONS.md section 1). So cutil and runtime-core are built and
+# installed into one prefix inside the workspace first, in dependency order,
+# exactly the way ../bootstrap.sh does it locally, and every job then builds
+# against that prefix the way a consumer would.
+#
+name: Set up the build
+description: Install the toolchain and dependencies, and build cutil and runtime-core into the workspace prefix.
+
+inputs:
+  packages:
+    description: Apt packages this job needs beyond the common set.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install build dependencies
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential pkg-config libgtest-dev python3 \
+          ${{ inputs.packages }}
+
+    # Unpinned on purpose: the suite is developed as a whole and a library is
+    # expected to build against its dependencies' tips. Pin `ref:` here if that
+    # ever stops being true.
+    - name: Check out cutil
+      uses: actions/checkout@v4
+      with:
+        repository: Ghoti-io/CUtil
+        path: cutil
+
+    - name: Check out runtime-core
+      uses: actions/checkout@v4
+      with:
+        repository: Ghoti-io/runtime-core
+        path: runtime-core
+
+    - name: Build and install cutil
+      shell: bash
+      working-directory: cutil
+      run: |
+        make -j"$(nproc)" PREFIX="$PREFIX"
+        make install PREFIX="$PREFIX"
+
+    # runtime-core depends on cutil, so it goes second and finds it through the
+    # PKG_CONFIG_PATH the workflow sets.
+    - name: Build and install runtime-core
+      shell: bash
+      working-directory: runtime-core
+      run: |
+        make -j"$(nproc)" PREFIX="$PREFIX"
+        make install PREFIX="$PREFIX"

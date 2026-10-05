@@ -1,0 +1,358 @@
+# Continuous integration for ghoti.io-runtime-jit.
+#
+# Everything here is a target the Makefile already has, run the way the
+# project documents it (AD-16: codegen gets compress-style CI once it has a
+# body, which it has: both compilers, ASan+UBSan, TSan, Valgrind, a coverage
+# floor and MSYS2 Windows). The point of the file is that they are all run, on
+# every change, rather than when somebody remembers.
+#
+# The layout follows ../runtime-heap's workflow, which follows ../runtime-core's
+# and ../compress's:
+# the project is checked out into a subdirectory so that its dependencies can
+# be checked out beside it rather than inside it, and all of them are
+# installed into one prefix in the workspace, exactly the way ../bootstrap.sh
+# does it locally. runtime-jit depends on cutil and runtime-core (and nothing
+# else, AD-2), so those are what the setup action builds. The steps common to
+# every job are in .github/actions/setup.
+#
+# This file could not be run where it was written: there is no GitHub runner
+# here. It was checked offline - valid YAML, every make target it names exists
+# and the cheap ones were run locally - and the first push is its first run.
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A branch that is pushed twice in quick succession does not need the first
+# run finished. Pull requests are cancelled; pushes to master are not, so that
+# every commit on the branch keeps its own result.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PREFIX: ${{ github.workspace }}/.local
+  PKG_CONFIG_PATH: ${{ github.workspace }}/.local/share/pkgconfig
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # The everyday gate: it builds, the symbols are namespaced, the tests pass,
+  # the examples still compile, and what `make install` leaves behind can
+  # actually be consumed.
+  #
+  # Both compilers, because -Werror is only as good as the warnings the
+  # compiler in use happens to emit, and the two disagree about which ones
+  # those are. Neither is pinned: whatever the runner image ships is a third
+  # opinion on top of the GCC 14 the suite is developed against, and a warning
+  # only one of them emits is still a warning worth reading. If that ever
+  # becomes noise rather than signal, pin a version here rather than dropping
+  # the job.
+  # ---------------------------------------------------------------------------
+  test:
+    name: Build and test (${{ matrix.cc }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cc: gcc
+            cxx: g++
+            packages: ""
+          - cc: clang
+            cxx: clang++
+            packages: clang
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: runtime-jit
+
+      - uses: ./runtime-jit/.github/actions/setup
+        with:
+          packages: ${{ matrix.packages }}
+
+      - name: Build
+        working-directory: runtime-jit
+        run: make -j"$(nproc)" CC=${{ matrix.cc }} CXX=${{ matrix.cxx }} PREFIX="$PREFIX"
+
+      # `make test` depends on this, but running it as its own step reports a
+      # namespace regression as a namespace regression rather than as a test
+      # failure at the bottom of a long log.
+      - name: Symbol namespace gate
+        working-directory: runtime-jit
+        run: make check-symbols CC=${{ matrix.cc }} CXX=${{ matrix.cxx }} PREFIX="$PREFIX"
+
+      # The stable/free labels, the include and NEEDED edges (AD-2), the flag
+      # stamps and strict aliasing as gates, then the self-test that runs each
+      # gate against a planted defect and a control. `make test` depends on
+      # them; naming them here reports a layering regression as one.
+      - name: Layering gates and their self-test
+        working-directory: runtime-jit
+        run: make check-stamps check-aliasing check-labels check-edges check-gates CC=${{ matrix.cc }} CXX=${{ matrix.cxx }} PREFIX="$PREFIX"
+
+      - name: Tests
+        working-directory: runtime-jit
+        run: make test -j"$(nproc)" CC=${{ matrix.cc }} CXX=${{ matrix.cxx }} PREFIX="$PREFIX"
+
+      # AD-26: the harness runs on every change and prints its calibration, so
+      # a figure recorded later can be read against the machine it came from.
+      - name: Benchmark harness
+        working-directory: runtime-jit
+        run: make bench CC=${{ matrix.cc }} CXX=${{ matrix.cxx }} PREFIX="$PREFIX"
+
+      - name: Examples
+        working-directory: runtime-jit
+        run: make examples CC=${{ matrix.cc }} CXX=${{ matrix.cxx }} PREFIX="$PREFIX"
+
+      # The tests reach the library through include/ and a static archive
+      # linked with --whole-archive. A consumer reaches it through pkg-config,
+      # the installed headers and the shared library, and nothing else here
+      # exercises that path - which is where CONVENTIONS.md section 1 records
+      # three defects that every in-tree build was blind to.
+      - name: Install
+        working-directory: runtime-jit
+        run: make install CC=${{ matrix.cc }} CXX=${{ matrix.cxx }} PREFIX="$PREFIX"
+
+      - name: A consumer can use what was installed
+        working-directory: runtime-jit
+        run: CC=${{ matrix.cc }} CXX=${{ matrix.cxx }} tools/check-install.sh "$PREFIX"
+
+  # ---------------------------------------------------------------------------
+  # ASan and UBSan, in their own build directory so the objects are never
+  # shared with the plain build.
+  # ---------------------------------------------------------------------------
+  sanitizers:
+    name: ASan + UBSan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: runtime-jit
+
+      - uses: ./runtime-jit/.github/actions/setup
+
+      - name: Tests under ASan and UBSan
+        working-directory: runtime-jit
+        run: make test-asan -j"$(nproc)" PREFIX="$PREFIX"
+
+  # ---------------------------------------------------------------------------
+  # ThreadSanitizer, in a third build directory: it cannot share objects with
+  # the ASan build because the two sanitizers cannot be combined.
+  #
+  # Code is compiled on one thread and may be entered from another, and
+  # destroying it unmaps pages a thread could still be running (the design
+  # records the rule). ASan sees a use-after-free only on a run where the
+  # timing produced one, and Valgrind's memcheck does not look for races at
+  # all.
+  # ---------------------------------------------------------------------------
+  thread-sanitizer:
+    name: ThreadSanitizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: runtime-jit
+
+      - uses: ./runtime-jit/.github/actions/setup
+
+      - name: Tests under ThreadSanitizer
+        working-directory: runtime-jit
+        run: make test-tsan -j"$(nproc)" PREFIX="$PREFIX"
+
+  # ---------------------------------------------------------------------------
+  # Valgrind finds what the sanitizers do not: uninitialised reads that happen
+  # to be harmless, and leaks in code the sanitizers' interceptors do not see.
+  # The -quiet variant is the one that treats a leak as a failure.
+  # ---------------------------------------------------------------------------
+  valgrind:
+    name: Valgrind
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: runtime-jit
+
+      - uses: ./runtime-jit/.github/actions/setup
+        with:
+          packages: valgrind
+
+      - name: Build
+        working-directory: runtime-jit
+        run: make -j"$(nproc)" PREFIX="$PREFIX"
+
+      - name: Tests under Valgrind
+        working-directory: runtime-jit
+        run: make test-valgrind-quiet PREFIX="$PREFIX"
+
+  # ---------------------------------------------------------------------------
+  # The gates are seen to fail. An instrument that has never been seen to find
+  # a defect may be measuring nothing, so these build the backends with a
+  # planted defect each (SHR and SAR swapped; every stack-map slot eight bytes
+  # off; a live reference left out; and, in the Windows flavour, a callee-saved
+  # register used, no shadow space, an unwind table never registered) and
+  # require the differential, the read-back or the Win64 structural tests to
+  # fail on it, and to pass on the control. `check-gates` does the same for
+  # the layering gates. `make test` runs both; naming them here reports a gate
+  # that has stopped failing as that, not as a test failure.
+  #
+  # The arm64 backend and the Windows backend's run under wine are not here:
+  # they need qemu and wine, which a library may not reach for. They are run
+  # by tools/m1-prerelease.sh in the workspace.
+  # ---------------------------------------------------------------------------
+  gates:
+    name: Gates seen to fail
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: runtime-jit
+
+      - uses: ./runtime-jit/.github/actions/setup
+
+      - name: Build
+        working-directory: runtime-jit
+        run: make -j"$(nproc)" PREFIX="$PREFIX"
+
+      - name: Layering gates, planted defects
+        working-directory: runtime-jit
+        run: make check-gates PREFIX="$PREFIX"
+
+      - name: Backend defects, planted
+        working-directory: runtime-jit
+        run: make check-planted PREFIX="$PREFIX"
+
+  # ---------------------------------------------------------------------------
+  # A floor, so that coverage can only be argued upward. Raise it when the
+  # number rises; do not lower it to make a branch pass.
+  #
+  # It is a ratchet, not a target: the report counts every line of src/,
+  # including platform branches a Linux runner cannot execute.
+  # ---------------------------------------------------------------------------
+  coverage:
+    name: Coverage floor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: runtime-jit
+
+      - uses: ./runtime-jit/.github/actions/setup
+
+      - name: Line coverage
+        working-directory: runtime-jit
+        run: make coverage -j"$(nproc)" COVERAGE_MIN=80 PREFIX="$PREFIX"
+
+  # ---------------------------------------------------------------------------
+  # Windows, natively, under MSYS2.
+  #
+  # This job exists so that the Windows arms are built and run, not guessed
+  # at: every other job here is ubuntu-latest, so nothing else would stop a
+  # commit from breaking the port silently. The Windows x86-64 backend is the
+  # Microsoft calling convention with an outgoing area, unwind information
+  # registered with RtlAddFunctionTable, stack probes and VirtualAlloc-backed
+  # code memory; it has run under wine (tools/xwin/m1-run.sh in the workspace)
+  # and never on a Windows machine, so this job's first run is the first time
+  # it is built and run natively. If the Win64 disassembly tests need an
+  # objdump that reads x86-64, the MINGW64 binutils is one.
+  #
+  # Notes on the shape, each of which is a thing that does not work otherwise:
+  #
+  # - `shell: msys2 {0}` on every step. The default shell on a Windows runner
+  #   is PowerShell, and these recipes are POSIX shell.
+  # - MSYS `make` and `diffutils`, not the MinGW ones. The recipes are POSIX
+  #   shell, and every flag stamp uses `cmp`; without diffutils `cmp` is absent
+  #   and the stamps never compare equal, so everything rebuilds every time.
+  # - `binutils` comes with the gcc package; check-edges reads a DLL's imports
+  #   with `objdump -p`, since there is no readelf-style NEEDED list on PE.
+  # - `pkgconf` from the MINGW64 prefix rather than MSYS's own pkg-config,
+  #   which cannot see MINGW64's .pc files - gtest included.
+  # - PREFIX converted with `cygpath`. github.workspace is a Windows path
+  #   (D:\a\...), and make, pkg-config and the recipes all want a POSIX one, so
+  #   it is converted once here rather than in each recipe.
+  # ---------------------------------------------------------------------------
+  windows:
+    name: Windows (MSYS2 MINGW64)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: runtime-jit
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            make
+            diffutils
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-gtest
+            mingw-w64-x86_64-python
+
+      - name: Resolve the prefix as a POSIX path
+        run: |
+          prefix="$(cygpath -u '${{ github.workspace }}')/.local"
+          echo "PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$prefix/share/pkgconfig" >> "$GITHUB_ENV"
+
+      # Unpinned, for the same reason the Linux setup action leaves them
+      # unpinned: a library is expected to build against its dependencies' tips.
+      - uses: actions/checkout@v4
+        with:
+          repository: Ghoti-io/CUtil
+          path: cutil
+
+      - uses: actions/checkout@v4
+        with:
+          repository: Ghoti-io/runtime-core
+          path: runtime-core
+
+      - name: Build and install cutil
+        working-directory: cutil
+        run: |
+          make -j"$(nproc)" PREFIX="$PREFIX"
+          make install PREFIX="$PREFIX"
+
+      - name: Build and install runtime-core
+        working-directory: runtime-core
+        run: |
+          make -j"$(nproc)" PREFIX="$PREFIX"
+          make install PREFIX="$PREFIX"
+
+      - name: Build
+        working-directory: runtime-jit
+        run: make -j"$(nproc)" PREFIX="$PREFIX"
+
+      - name: Symbol namespace gate
+        working-directory: runtime-jit
+        run: make check-symbols PREFIX="$PREFIX"
+
+      - name: Tests
+        working-directory: runtime-jit
+        run: make test -j"$(nproc)" PREFIX="$PREFIX"
+
+      - name: Examples
+        working-directory: runtime-jit
+        run: make examples PREFIX="$PREFIX"
+
+      # The same argument as on Linux: the tests reach the library through
+      # include/ and an archive, a consumer reaches it through pkg-config, the
+      # installed headers and the DLL. On Windows the DLL also has to be found
+      # at run time, which is a different mechanism from an rpath and so is
+      # worth exercising here specifically.
+      - name: Install
+        working-directory: runtime-jit
+        run: make install PREFIX="$PREFIX"
+
+      - name: A consumer can use what was installed
+        working-directory: runtime-jit
+        run: tools/check-install.sh "$PREFIX"
