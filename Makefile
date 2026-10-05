@@ -487,56 +487,7 @@ endif
 
 check-symbols: $(APP_DIR)/$(TARGET) ## Fail if any exported symbol lacks the version namespace
 ifeq ($(OS_NAME), Linux)
-	@leaked=$$(nm -D --defined-only $(APP_DIR)/$(TARGET) \
-		| awk '$$2 ~ /^[TDBR]$$/ {print $$3}' \
-		| grep -v '^$(LIBVER_SYMBOL)_' | grep -v '^_' || true); \
-	if [ -n "$$leaked" ]; then \
-		printf '### Exported symbols missing the $(LIBVER_SYMBOL)_ namespace ###\n%s\n' "$$leaked" >&2; \
-		exit 1; \
-	fi
-	@unexported=$$(find include -name '*.h' -exec awk '/^#if DOXYGEN/{d=1} d==0 && !/GRJIT_API/ && /^[A-Za-z_][A-Za-z0-9_ ]*\**[[:space:]]*grjit_[a-z0-9_]+[[:space:]]*\(/{print FILENAME": "$$0} /^#endif/{d=0}' {} + \
-		| grep -vE 'typedef|static inline' || true); \
-	if [ -n "$$unexported" ]; then \
-		printf '### Public declarations without GRJIT_API ###\n%s\n' "$$unexported" >&2; \
-		exit 1; \
-	fi
-	@missing=$$(grep -h 'GRJIT_API' include/ghoti.io/runtime-jit/*.h \
-		| grep -oE 'grjit_[a-z0-9_]+\(' | tr -d '(' | sort -u \
-		| while read -r f; do \
-			nm -D --defined-only $(APP_DIR)/$(TARGET) | awk '{print $$3}' \
-				| grep -qx "$(LIBVER_SYMBOL)_$$f" || echo "$$f"; \
-		done); \
-	if [ -n "$$missing" ]; then \
-		printf '### Declared GRJIT_API functions the shared library does not export ###\n%s\n' "$$missing" >&2; \
-		printf '(a definition whose translation unit never saw its declaration is hidden by -fvisibility=hidden, and the tests link the archive, so they cannot see it)\n' >&2; \
-		exit 1; \
-	fi
-	@split=$$(nm -D --undefined-only $(APP_DIR)/$(TARGET) \
-		| awk '{print $$2}' | grep '^$(LIBVER_SYMBOL)_' || true); \
-	if [ -n "$$split" ]; then \
-		printf '### Renamed but undefined - a split symbol ###\n%s\n' "$$split" >&2; \
-		exit 1; \
-	fi
-	@nomacros=$$(find include src -name '*.h' \
-		! -name 'libver.h' ! -name 'libver_gen.h' ! -name 'namespace.h' ! -name 'macros.h' \
-		-exec grep -L '#include <ghoti.io/runtime-jit/macros.h>' {} + || true); \
-	if [ -n "$$nomacros" ]; then \
-		printf '### Headers that do not include macros.h ###\n%s\n' "$$nomacros" >&2; \
-		exit 1; \
-	fi
-	@badguards=$$(find include src -name '*.h' -exec awk 'FNR==1{d=0} !d && /^#ifndef/{print $$2; d=1}' {} + \
-		| awk '$$1 !~ /^GHOTI_IO_GRJIT_/ {print $$1}' || true); \
-	if [ -n "$$badguards" ]; then \
-		printf '### Include guards with the wrong prefix ###\n%s\n' "$$badguards" >&2; \
-		exit 1; \
-	fi
-	@dupguards=$$(find include src -name '*.h' -exec awk 'FNR==1{d=0} !d && /^#ifndef/{print $$2; d=1}' {} + \
-		| sort | uniq -d || true); \
-	if [ -n "$$dupguards" ]; then \
-		printf '### Headers sharing an include guard ###\n%s\n' "$$dupguards" >&2; \
-		exit 1; \
-	fi
-	@printf 'Every exported symbol carries the %s_ namespace.\n' "$(LIBVER_SYMBOL)"
+	@tools/check-symbols.sh $(APP_DIR)/$(TARGET) $(LIBVER_SYMBOL) .
 else
 	@printf 'check-symbols: skipped (Linux only)\n'
 endif

@@ -194,6 +194,72 @@ else
   fail "could not build the extended-name fixture"
 fi
 
+printf 'check-stamps (fixtures)\n'
+S="$HERE/check-stamps.py"
+expect_pass 'stamps/control' python3 "$S" "$FIX/stamps/control.mk"
+expect_fail 'stamps/planted-no-stamp' 'names no flag stamp' \
+  python3 "$S" "$FIX/stamps/planted-no-stamp.mk"
+expect_fail 'stamps/planted-unrecorded-flag' 'EXTRA_CFLAGS' \
+  python3 "$S" "$FIX/stamps/planted-unrecorded-flag.mk"
+expect_fail 'stamps/planted-link-unrecorded' 'LINK_EXTRA' \
+  python3 "$S" "$FIX/stamps/planted-link-unrecorded.mk"
+expect_fail 'stamps/planted-no-printf' 'does not printf' \
+  python3 "$S" "$FIX/stamps/planted-no-printf.mk"
+expect_fail 'stamps/planted-no-stamps' 'no flag stamps at all' \
+  python3 "$S" "$FIX/stamps/planted-no-stamps.mk"
+expect_fail 'stamps/planted-no-compile' 'no compile rules' \
+  python3 "$S" "$FIX/stamps/planted-no-compile.mk"
+expect_fail 'stamps/planted-no-link' 'no link lines' \
+  python3 "$S" "$FIX/stamps/planted-no-link.mk"
+
+# check-symbols reads a built shared object's dynamic symbol table, which is
+# nm -D and so Linux only (the Makefile skips it elsewhere too).
+if [ "$(uname -s)" = Linux ]; then
+  printf 'check-symbols\n'
+  Y="$HERE/check-symbols.sh"
+  tok=ghotiio_runtime_jit_0
+  sym="$work/sym"
+  mkdir -p "$sym"
+  printf 'int %s_grjit_ctx_make(void) { return 1; }\n' "$tok" > "$sym/good.c"
+  printf 'int grjit_leaked(void) { return 1; }\n' > "$sym/bad.c"
+  printf 'int %s_grjit_ctx_make(void) { return 1; }\nint %s_grjit_missing(void);\nint %s_grjit_user(void) { return %s_grjit_missing(); }\n' \
+    "$tok" "$tok" "$tok" "$tok" > "$sym/split.c"
+  printf 'int %s_grjit_other(void) { return 1; }\n' "$tok" > "$sym/other.c"
+  printf 'static int hidden(void) { return 1; }\n' > "$sym/empty.c"
+  built=1
+  {
+    $CC -shared -fPIC -o "$sym/good.so" "$sym/good.c" &&
+    $CC -shared -fPIC -o "$sym/bad.so" "$sym/bad.c" &&
+    $CC -shared -fPIC -o "$sym/split.so" "$sym/split.c" &&
+    $CC -shared -fPIC -o "$sym/other.so" "$sym/other.c" &&
+    $CC -shared -fPIC -o "$sym/empty.so" "$sym/empty.c"
+  } >"$sym/build.log" 2>&1 || built=0
+  if [ "$built" -eq 0 ]; then
+    fail "could not build the symbol fixtures:
+$(cat "$sym/build.log")"
+  else
+    expect_pass 'symbols/control' "$Y" "$sym/good.so" "$tok" "$FIX/symbols/control"
+    expect_fail 'symbols/planted-unnamespaced-export' 'grjit_leaked' \
+      "$Y" "$sym/bad.so" "$tok" "$FIX/symbols/control"
+    expect_fail 'symbols/planted-split-symbol' 'split symbol' \
+      "$Y" "$sym/split.so" "$tok" "$FIX/symbols/control"
+    expect_fail 'symbols/planted-api-not-exported' 'Declared GRJIT_API functions' \
+      "$Y" "$sym/other.so" "$tok" "$FIX/symbols/control"
+    expect_fail 'symbols/planted-no-api' 'grjit_ctx_make' \
+      "$Y" "$sym/good.so" "$tok" "$FIX/symbols/planted-no-api"
+    expect_fail 'symbols/planted-no-macros' 'ctx_internal.h' \
+      "$Y" "$sym/good.so" "$tok" "$FIX/symbols/planted-no-macros"
+    expect_fail 'symbols/planted-bad-guard' 'MY_OWN_GUARD_H' \
+      "$Y" "$sym/good.so" "$tok" "$FIX/symbols/planted-bad-guard"
+    expect_fail 'symbols/planted-dup-guard' 'sharing an include guard' \
+      "$Y" "$sym/good.so" "$tok" "$FIX/symbols/planted-dup-guard"
+    expect_fail 'symbols/exports-nothing' 'measuring nothing' \
+      "$Y" "$sym/empty.so" "$tok" "$FIX/symbols/control"
+    expect_fail 'symbols/no-library' 'measuring nothing' \
+      "$Y" "$sym/absent.so" "$tok" "$FIX/symbols/control"
+  fi
+fi
+
 if [ "$failures" -ne 0 ]; then
   printf 'check-gates: %d of %d checks failed\n' "$failures" "$checks" >&2
   exit 1
