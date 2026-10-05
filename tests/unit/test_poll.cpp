@@ -50,7 +50,7 @@ uint64_t body_helper() {
   return 0;
 }
 
-const GRCORE_Key kKey = {"poll", GRCORE_CARDINALITY_MANY, GRCORE_PHASE_NONE, nullptr, nullptr, nullptr, nullptr, nullptr};
+const GRCORE_Key kKey = GRCORE_KEY_INIT("poll", GRCORE_CARDINALITY_MANY, GRCORE_PHASE_NONE, nullptr, nullptr, nullptr, nullptr, nullptr);
 
 /* sum(n): a counting loop with a poll on every iteration. */
 GRJIT_Function * loop_with_poll() {

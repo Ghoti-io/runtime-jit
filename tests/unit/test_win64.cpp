@@ -1019,8 +1019,8 @@ uint64_t six_sum(uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e, uin
   return a + b + c + d + e + f;
 }
 
-const GRCORE_Key kSentinelKey = {"w64", GRCORE_CARDINALITY_MANY, GRCORE_PHASE_NONE, nullptr,
-    nullptr, nullptr, nullptr, nullptr};
+const GRCORE_Key kSentinelKey = GRCORE_KEY_INIT("w64", GRCORE_CARDINALITY_MANY, GRCORE_PHASE_NONE, nullptr,
+    nullptr, nullptr, nullptr, nullptr);
 
 /* f(x): poll; t = six_sum(x, x, x, x, x, x); guard(x != 0); return t + 1. */
 GRJIT_Function * sentinel_function() {
