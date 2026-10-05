@@ -762,6 +762,17 @@ PLANT_DEFECTS := 1:testDifferential 2:testReadback 3:testReadback \
 	4:testDifferential:Differential.GeneratedFunctionsRunTheSameWhenArm64CodeIsSimulatedAndEvaluated \
 	5:testWin64:Win64Registers.* 6:testWin64:Win64Shape.* 7:testWin64:Win64Memory.*
 
+# The controls the script runs are built by this make, as prerequisites, and
+# not by the script's own sub-make. Under `make -j test` the sibling goals
+# (TEST_EXECUTABLES among them) rebuild and relink the very same files in the
+# ordinary tree, and a make started from a recipe shares no job table with its
+# parent: the two linked one executable at once, or the script ran a control
+# the parent was still writing, and the control "did not pass". With them as
+# prerequisites one make builds each file and the script's make finds them
+# current. The planted trees are directories of their own, built only by the
+# script, one at a time.
+PLANT_CONTROLS := $(sort $(addprefix $(APP_DIR)/,$(addsuffix $(EXE_EXTENSION),$(foreach d,$(PLANT_DEFECTS),$(word 2,$(subst :, ,$(d)))))))
+
 # Defects 5 to 7 are in the Windows x86-64 flavour of the emitter, which is
 # emitted on every host, so testWin64's structural tests (what is encoded, the
 # bytes of the prologue, where the unwind table is written and when it is
@@ -775,7 +786,7 @@ PLANT_DEFECTS := 1:testDifferential 2:testReadback 3:testReadback \
 # none of which a Windows build has: it says so and stops, by name, as
 # check-symbols does, and the Windows catch of 5 to 7 is the workspace's.
 ifeq ($(OS_NAME), Linux)
-check-planted: $(APP_DIR)/$(STATIC_TARGET) ## Prove the differential and the read-back fail on a planted backend defect
+check-planted: $(APP_DIR)/$(STATIC_TARGET) $(PLANT_CONTROLS) ## Prove the differential and the read-back fail on a planted backend defect
 	@tools/check-planted.sh "$(MAKE)" "$(PLANT_DEFECTS)" "$(LIB_INSTALL_PATH)/$(SUITE)" "$(APP_DIR)" "$(BUILD_DIR)"
 else
 check-planted: ## Skipped off Linux: the planted trees are built by a shell script
