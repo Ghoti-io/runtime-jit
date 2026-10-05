@@ -205,8 +205,8 @@ against that layout, so a second instruction set is a matter of encoding.
 sp`, then the frame is allocated (`sub sp`, in one or two instructions) so that
 `sp` is a multiple of 16 and is never moved again, so it is aligned at every
 call. The frame base of the metadata is `x29`. Slots are at the offsets x86-64
-uses: context at `-8`, `out` at `-16`, `args` at `-24`, register `v` at `-8 * (v
-+ 4)`. `[x29]` is the caller's frame pointer and `[x29 + 8]` the return address,
+uses: context at `-8`, `out` at `-16`, `args` at `-24`, register `v` at
+`-8 * (v + 4)`. `[x29]` is the caller's frame pointer and `[x29 + 8]` the return address,
 exactly the pair `[rbp]` and `[rbp + 8]` are, which is what a native helper
 (`lang-tang`'s poll helper, the read-back test) follows to walk to its caller.
 Scratch registers are the caller-saved `x0`-`x17` only, so **no reference is
