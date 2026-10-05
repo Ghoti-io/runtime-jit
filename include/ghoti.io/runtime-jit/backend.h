@@ -84,7 +84,10 @@ typedef uint32_t (*GRJIT_EntryHook)(void * context);
  *  call, not a long-lived object. */
 typedef struct GRJIT_CompileOptions {
   const GRCORE_PageProvider * pages; ///< Required: where the code's pages come
-                                     ///< from, with a `protect`.
+                                     ///< from, with a `protect`. A provider
+                                     ///< states its own size (runtime-core's
+                                     ///< `b/page.h`), and one that is not
+                                     ///< valid is ::GRJIT_ERR_INVALID.
   const GRJIT_Allocator * allocator; ///< NULL for the default.
   const GRJIT_Limits * limits;       ///< NULL for the defaults.
   GRJIT_EntryHook entry_hook;        ///< NULL for none.
@@ -99,8 +102,10 @@ GRJIT_API bool grjit_backend_available(void);
  *
  * An unverified function is refused with ::GRJIT_ERR_INVALID (a function over
  * a cap, ::GRJIT_ERR_LIMIT). A frame over `max_frame_bytes` or code over
- * `max_code_bytes` is ::GRJIT_ERR_LIMIT. A page provider with no `protect` is
- * ::GRJIT_ERR_UNSUPPORTED and one whose `protect` fails, or (Windows x86-64) a
+ * `max_code_bytes` is ::GRJIT_ERR_LIMIT. A page provider that is not valid
+ * (`grcore_page_provider_valid`) is ::GRJIT_ERR_INVALID; one with no
+ * `protect`, or whose size ends before it, is ::GRJIT_ERR_UNSUPPORTED; and one
+ * whose `protect` fails, or (Windows x86-64) a
  * system that refuses the unwind registration, is ::GRJIT_ERR_IO. The
  * emitted metadata is validated before this returns; a failure is
  * ::GRJIT_ERR_INTERNAL. On any failure everything made is freed and the page

@@ -39,7 +39,16 @@ against the validator before `grjit_compile` returns (a failure is
 A `protect` member on the page provider (also `runtime-core`) is how code is
 made executable. The rejected alternative is this library calling `mprotect`
 itself: it would map memory the context's meter never sees, which AD-13 and
-AD-20 forbid, and would put the Windows branch in two libraries.
+AD-20 forbid, and would put the Windows branch in two libraries. A provider states its own
+`size` (runtime-core's `b/page.h`, which has the rule), and `protect` is the
+member after the first generation: `grjit_compile` refuses with `ERR_INVALID` a
+provider that is not valid, treats one whose size ends before `protect` as
+having none (`ERR_UNSUPPORTED`, with nothing mapped), and never reads past the
+size. `test_page_size.cpp` has an older-layout provider as a heap block exactly
+as large as its size, an armed `protect` beyond the stated size, and a full-size
+control for each case. `GRJIT_CompileOptions` and the limits are not given a
+size: this library's headers are `free` (AD-14), so a consumer is built against
+the same release.
 
 ## Non-SSA registers now, SSA when a pass wants it
 

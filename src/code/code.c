@@ -235,7 +235,7 @@ void grjit_emitted_free(GRJIT_Emitted * emitted) {
 GRJIT_Result grjit_compile(const GRJIT_CompileOptions * options,
     const GRJIT_Function * function, GRJIT_Code ** out_code) {
   if (options == NULL || function == NULL || out_code == NULL ||
-      options->pages == NULL) {
+      !grcore_page_provider_valid(options->pages)) {
     return GRJIT_ERR_INVALID;
   }
 #if !GRJIT_HAVE_BACKEND
@@ -246,7 +246,9 @@ GRJIT_Result grjit_compile(const GRJIT_CompileOptions * options,
   if (r != GRJIT_OK) {
     return r;
   }
-  if (options->pages->protect == NULL) {
+  /* A provider whose size ends before `protect` has none. */
+  if (!GRCORE_PAGE_PROVIDER_HAS(options->pages, protect) ||
+      options->pages->protect == NULL) {
     return GRJIT_ERR_UNSUPPORTED;
   }
   GRJIT_Emitted emitted;

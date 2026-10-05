@@ -90,7 +90,8 @@ struct TrackingAllocator {
  * every protect, or have no protect at all. `live` counts mappings not yet
  * unmapped, which is the leak check for code memory. */
 struct FakePages {
-  GRCORE_PageProvider vtable{};
+  GRCORE_PageProvider vtable =
+      GRCORE_PAGE_PROVIDER_INIT(nullptr, 0, nullptr, nullptr, nullptr);
   const GRCORE_PageProvider * base;
   long maps = 0;
   long fail_map_at = 0;

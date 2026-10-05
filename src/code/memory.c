@@ -161,7 +161,8 @@ GRJIT_Result grjit_memory_create(const GRCORE_PageProvider * pages,
     GRJIT_Arch arch, const uint8_t * bytes, size_t length,
     const GRJIT_Prologue * prologue, void ** out_mapping,
     size_t * out_mapped_size, void ** out_unwind_table) {
-  if (pages == NULL || pages->protect == NULL) {
+  if (!grcore_page_provider_valid(pages) ||
+      !GRCORE_PAGE_PROVIDER_HAS(pages, protect) || pages->protect == NULL) {
     return GRJIT_ERR_UNSUPPORTED;
   }
   size_t page = pages->page_size;
