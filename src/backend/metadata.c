@@ -45,6 +45,7 @@ static GRCORE_CodeLocation slot_location(GRJIT_VReg v, GRJIT_Type type) {
   l.kind = GRCORE_LOC_FRAME_SLOT;
   l.slot_kind = type == GRJIT_TYPE_REF ? GRCORE_SLOT_VALUE : GRCORE_SLOT_RAW;
   l.value = grjit_emit_slot(v);
+  l.representation = GRCORE_REPR_BITS;
   return l;
 }
 
@@ -160,10 +161,12 @@ GRJIT_Result grjit_metadata_build(const GRJIT_Function * f,
         l.kind = GRCORE_LOC_CONSTANT;
         l.slot_kind = GRCORE_SLOT_RAW;
         l.value = slot->constant;
+        l.representation = GRCORE_REPR_BITS;
       } else {
         l.kind = GRCORE_LOC_DEAD;
         l.slot_kind = GRCORE_SLOT_RAW;
         l.value = 0;
+        l.representation = GRCORE_REPR_BITS;
       }
       out->locations[loc_at + k] = l;
     }
