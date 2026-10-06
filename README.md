@@ -110,7 +110,7 @@ running a program that includes only the umbrella header.
 
 ## Status
 
-Scaffolded. The IR, the verifier, the printer, the x86-64 and arm64 baseline
+The IR, the verifier, the printer, the x86-64 and arm64 baseline
 backends (the Windows one with its unwind registration) and their assemblers, the metadata, W^X code memory, the gates, the examples and the
 benchmark harness are in, and so are the parts that need an engine: wiring it
 into `lang-tang` (story 15), tier-up, compiled-code reference counting and the
