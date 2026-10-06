@@ -89,6 +89,14 @@ static void transfer(Ctx * c, const GRJIT_Op * op, uint64_t * live) {
   grjit_op_visit_uses(c->f, op, add_use, c);
 }
 
+/* How many sites an operation makes. A call to another compiled function is
+ * three: the push of the callee's frame, the call itself, and the exit before
+ * it (backend/backend_internal.h). Every other operation with a frame state
+ * is one. */
+size_t grjit_liveness_site_count(const GRJIT_Op * op) {
+  return op->kind == GRJIT_OP_CALL_SLOT || op->kind == GRJIT_OP_CALL_PTR ? 3u : 1u;
+}
+
 GRJIT_Result grjit_liveness_compute(const GRJIT_Function * f,
     const GRJIT_Allocator * a, size_t max_entries, GRJIT_LiveSites * out) {
   memset(out, 0, sizeof *out);
@@ -97,7 +105,7 @@ GRJIT_Result grjit_liveness_compute(const GRJIT_Function * f,
   for (size_t b = 0; b < f->block_count; b++) {
     for (size_t i = 0; i < f->blocks[b].count; i++) {
       if (grjit_op_has_state(&f->blocks[b].ops[i])) {
-        site_total++;
+        site_total += grjit_liveness_site_count(&f->blocks[b].ops[i]);
       }
     }
   }
@@ -139,8 +147,9 @@ GRJIT_Result grjit_liveness_compute(const GRJIT_Function * f,
   if (words == 0) {
     words = 1;
   }
-  /* live_in per block, then two scratch sets and one per-site set. */
-  uint64_t * live_in = a->calloc_fn(a->ctx, f->block_count * words + 3 * words,
+  /* live_in per block, then the scratch sets: the running set, the site's, the
+   * frame state's and the one before the operation. */
+  uint64_t * live_in = a->calloc_fn(a->ctx, f->block_count * words + 4 * words,
       sizeof *live_in);
   GRJIT_SiteLive * sites = a->calloc_fn(a->ctx, site_total, sizeof *sites);
   GRJIT_VReg * pool = NULL;
@@ -154,6 +163,7 @@ GRJIT_Result grjit_liveness_compute(const GRJIT_Function * f,
   uint64_t * cur = scratch;
   uint64_t * site_set = scratch + words;
   uint64_t * state_set = scratch + 2 * words;
+  uint64_t * before_set = scratch + 3 * words;
   Ctx c = {f, index, NULL};
 
   bool changed = true;
@@ -202,7 +212,7 @@ GRJIT_Result grjit_liveness_compute(const GRJIT_Function * f,
       size_t block_sites = 0;
       for (size_t i = 0; i < b->count; i++) {
         if (grjit_op_has_state(&b->ops[i])) {
-          block_sites++;
+          block_sites += grjit_liveness_site_count(&b->ops[i]);
         }
       }
       size_t slot = at + block_sites;
@@ -226,57 +236,77 @@ GRJIT_Result grjit_liveness_compute(const GRJIT_Function * f,
           }
         }
         if (grjit_op_has_state(op)) {
-          slot--;
-          memset(state_set, 0, words * sizeof *state_set);
-          c.set = state_set;
-          if (op->state != GRJIT_NO_STATE && op->state < f->state_count) {
-            const GRJIT_FrameState * st = &f->states[op->state];
-            for (size_t k = 0; k < st->slot_count; k++) {
-              if (st->slots[k].kind == GRJIT_FRAME_SLOT_VREG) {
-                add_use(&c, st->slots[k].vreg);
+          size_t mult = grjit_liveness_site_count(op);
+          slot -= mult;
+          /* What is live before the operation, for a push: its own uses (the
+           * arguments, the code pointer, both frame states) and what is live
+           * after it, less what it assigns. */
+          if (mult == 3) {
+            memcpy(before_set, cur, words * sizeof *before_set);
+            transfer(&c, op, before_set);
+          }
+          for (size_t k = 0; k < mult; k++) {
+            memset(state_set, 0, words * sizeof *state_set);
+            c.set = state_set;
+            /* Variant 0 is the only one of an ordinary site; for a guest call
+             * 0 is the push, 1 the call and 2 the exit. The frame state each
+             * names: the exit's is `exit_state`, every other site's `state`. */
+            uint32_t which = (mult == 3 && k == 2) ? op->exit_state : op->state;
+            if (which != GRJIT_NO_STATE && which < f->state_count) {
+              const GRJIT_FrameState * st = &f->states[which];
+              for (size_t q = 0; q < st->slot_count; q++) {
+                if (st->slots[q].kind == GRJIT_FRAME_SLOT_VREG) {
+                  add_use(&c, st->slots[q].vreg);
+                }
               }
             }
-          }
-          if (op->kind == GRJIT_OP_GUARD) {
-            memcpy(site_set, state_set, words * sizeof *site_set);
-          } else {
-            /* The call's own result is not yet assigned at the return
-             * address, so it leaves what is live after the call; but a frame
-             * state that names it names the value it held before, which is
-             * still in its slot and must stay in the map. */
-            memcpy(site_set, cur, words * sizeof *site_set);
-            GRJIT_VReg def = grjit_op_def(op);
-            if (def != GRJIT_NO_VREG && def < f->vreg_count &&
-                index[def] != UINT32_MAX) {
-              clear_bit(site_set, index[def]);
-            }
-            for (size_t w = 0; w < words; w++) {
-              site_set[w] |= state_set[w];
-            }
-          }
-          if (pass == 0) {
-            for (size_t w = 0; w < words; w++) {
-              pool_size += (size_t)__builtin_popcountll(site_set[w]);
-            }
-            if (pool_size > max_entries) {
-              a->free_fn(a->ctx, index);
-              a->free_fn(a->ctx, live_in);
-              a->free_fn(a->ctx, sites);
-              return GRJIT_ERR_LIMIT;
-            }
-          } else {
-            sites[slot].block = (GRJIT_BlockId)bi;
-            sites[slot].op_index = i;
-            sites[slot].vregs = pool + fill;
-            size_t n = 0;
-            for (size_t w = 0; w < words; w++) {
-              for (uint64_t bits = site_set[w]; bits != 0; bits &= bits - 1) {
-                pool[fill++] =
-                    (GRJIT_VReg)bit_vreg[w * 64 + (size_t)__builtin_ctzll(bits)];
-                n++;
+            if (op->kind == GRJIT_OP_GUARD || (mult == 3 && k == 2)) {
+              /* An exit leaves the frame: only what its state names. */
+              memcpy(site_set, state_set, words * sizeof *site_set);
+            } else if (mult == 3 && k == 0) {
+              memcpy(site_set, before_set, words * sizeof *site_set);
+              for (size_t w = 0; w < words; w++) {
+                site_set[w] |= state_set[w];
+              }
+            } else {
+              /* The call's own result is not yet assigned at the return
+               * address, so it leaves what is live after the call; but a frame
+               * state that names it names the value it held before, which is
+               * still in its slot and must stay in the map. */
+              memcpy(site_set, cur, words * sizeof *site_set);
+              GRJIT_VReg def = grjit_op_def(op);
+              if (def != GRJIT_NO_VREG && def < f->vreg_count &&
+                  index[def] != UINT32_MAX) {
+                clear_bit(site_set, index[def]);
+              }
+              for (size_t w = 0; w < words; w++) {
+                site_set[w] |= state_set[w];
               }
             }
-            sites[slot].count = n;
+            if (pass == 0) {
+              for (size_t w = 0; w < words; w++) {
+                pool_size += (size_t)__builtin_popcountll(site_set[w]);
+              }
+              if (pool_size > max_entries) {
+                a->free_fn(a->ctx, index);
+                a->free_fn(a->ctx, live_in);
+                a->free_fn(a->ctx, sites);
+                return GRJIT_ERR_LIMIT;
+              }
+            } else {
+              sites[slot + k].block = (GRJIT_BlockId)bi;
+              sites[slot + k].op_index = i;
+              sites[slot + k].vregs = pool + fill;
+              size_t n = 0;
+              for (size_t w = 0; w < words; w++) {
+                for (uint64_t bits = site_set[w]; bits != 0; bits &= bits - 1) {
+                  pool[fill++] =
+                      (GRJIT_VReg)bit_vreg[w * 64 + (size_t)__builtin_ctzll(bits)];
+                  n++;
+                }
+              }
+              sites[slot + k].count = n;
+            }
           }
         }
         transfer(&c, op, cur);

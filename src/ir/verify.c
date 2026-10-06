@@ -111,13 +111,13 @@ static GRJIT_Result check_dst(Verify * v, const GRJIT_Op * op,
   return GRJIT_OK;
 }
 
-static GRJIT_Result check_state(
-    Verify * v, const GRJIT_Op * op, GRJIT_BlockId block, size_t index) {
-  if (op->state == GRJIT_NO_STATE || op->state >= v->f->state_count) {
+static GRJIT_Result check_state_at(Verify * v, uint32_t which,
+    GRJIT_BlockId block, size_t index) {
+  if (which == GRJIT_NO_STATE || which >= v->f->state_count) {
     return refuse(v, GRJIT_ERR_INVALID,
         "block b%u op %zu: a site without a frame state", block, index);
   }
-  const GRJIT_FrameState * s = &v->f->states[op->state];
+  const GRJIT_FrameState * s = &v->f->states[which];
   if (s->slot_count > v->limits.max_frame_state_slots) {
     return refuse(v, GRJIT_ERR_LIMIT,
         "block b%u op %zu: frame state has %zu slots, the limit is %zu", block,
@@ -144,6 +144,11 @@ static GRJIT_Result check_state(
     }
   }
   return GRJIT_OK;
+}
+
+static GRJIT_Result check_state(
+    Verify * v, const GRJIT_Op * op, GRJIT_BlockId block, size_t index) {
+  return check_state_at(v, op->state, block, index);
 }
 
 static bool gc_site_kind(GRCORE_CodeSiteKind k) {
@@ -312,6 +317,79 @@ static GRJIT_Result check_op(
       }
       return GRJIT_OK;
     }
+    case GRJIT_OP_CALL_SLOT:
+    case GRJIT_OP_CALL_PTR: {
+      const bool slot = op->kind == GRJIT_OP_CALL_SLOT;
+      const GRJIT_CallHooks * h = &v->f->hooks;
+      if (!v->f->callable) {
+        return refuse(v, GRJIT_ERR_INVALID,
+            "block b%u op %zu: a call to another compiled function in a "
+            "function that is not callable",
+            block, index);
+      }
+      if (h->push == NULL || h->pop == NULL || (slot && h->compile == NULL)) {
+        return refuse(v, GRJIT_ERR_INVALID,
+            "block b%u op %zu: this call needs the push%s and pop hooks of a "
+            "callable function",
+            block, index, slot ? ", compile" : "");
+      }
+      size_t max_args = v->limits.max_guest_call_arguments < GRJIT_BUILDER_MAX_ARGS
+                            ? v->limits.max_guest_call_arguments
+                            : GRJIT_BUILDER_MAX_ARGS;
+      if (op->arg_count > max_args) {
+        return refuse(v, GRJIT_ERR_LIMIT,
+            "block b%u op %zu: call has %zu arguments, at most %zu are "
+            "allowed",
+            block, index, op->arg_count, max_args);
+      }
+      if (slot) {
+        if (op->address == 0 || op->a.kind != GRJIT_OPERAND_NONE) {
+          return refuse(v, GRJIT_ERR_INVALID,
+              "block b%u op %zu: a call through a slot needs the address of "
+              "the slot's entry word and no code pointer",
+              block, index);
+        }
+      } else if (op->address != 0) {
+        return refuse(v, GRJIT_ERR_INVALID,
+            "block b%u op %zu: a call through a code pointer has no slot",
+            block, index);
+      } else {
+        if (op->a.kind == GRJIT_OPERAND_VREG) {
+          if (!vreg_ok(v, op->a.vreg) || type_of(v, op->a.vreg) != GRJIT_TYPE_PTR) {
+            return refuse(v, GRJIT_ERR_INVALID,
+                "block b%u op %zu: the code pointer must be a ptr register or "
+                "an immediate",
+                block, index);
+          }
+        } else if (op->a.kind != GRJIT_OPERAND_IMM || op->a.imm == 0) {
+          return refuse(v, GRJIT_ERR_INVALID,
+              "block b%u op %zu: the code pointer is missing or null", block,
+              index);
+        }
+      }
+      for (size_t i = 0; i < op->arg_count; i++) {
+        const GRJIT_Operand * o = &op->args[i];
+        if (o->kind == GRJIT_OPERAND_VREG) {
+          if (!vreg_ok(v, o->vreg)) {
+            return refuse(v, GRJIT_ERR_INVALID,
+                "block b%u op %zu: argument %zu names v%u, which the "
+                "function does not have",
+                block, index, i, o->vreg);
+          }
+        } else if (o->kind != GRJIT_OPERAND_IMM) {
+          return refuse(v, GRJIT_ERR_INVALID,
+              "block b%u op %zu: argument %zu is missing", block, index, i);
+        }
+      }
+      if (op->dst != GRJIT_NO_VREG &&
+          (r = check_dst(v, op, false, block, index)) != GRJIT_OK) {
+        return r;
+      }
+      if ((r = check_state_at(v, op->state, block, index)) != GRJIT_OK) {
+        return r;
+      }
+      return check_state_at(v, op->exit_state, block, index);
+    }
     case GRJIT_OP_POLL:
       if (v->f->poll_helper == NULL) {
         return refuse(v, GRJIT_ERR_INVALID,
@@ -365,6 +443,19 @@ static GRJIT_Result check_structure(Verify * v) {
   }
   if (f->param_count > f->vreg_count) {
     return refuse(v, GRJIT_ERR_INVALID, "more parameters than registers");
+  }
+  if (f->callable) {
+    if (f->hooks.deopt == NULL) {
+      return refuse(v, GRJIT_ERR_INVALID,
+          "a callable function needs the deopt hook: a guard, a poll or a "
+          "call in it can leave through a chain");
+    }
+    if (f->param_count > v->limits.max_guest_call_arguments ||
+        f->param_count > GRJIT_BUILDER_MAX_ARGS) {
+      return refuse(v, GRJIT_ERR_LIMIT,
+          "a callable function has %zu parameters, at most %zu are allowed",
+          f->param_count, v->limits.max_guest_call_arguments);
+    }
   }
   for (size_t r = 0; r < f->vreg_count; r++) {
     const GRJIT_VRegInfo * info = &f->vregs[r];

@@ -33,6 +33,7 @@
 #define GRJIT_DEFAULT_VREGS 65536u
 #define GRJIT_DEFAULT_OPERATIONS 262144u
 #define GRJIT_DEFAULT_CALL_ARGUMENTS 6u
+#define GRJIT_DEFAULT_GUEST_CALL_ARGUMENTS 16u
 #define GRJIT_DEFAULT_FRAME_STATE_SLOTS 4096u
 #define GRJIT_DEFAULT_FRAME_BYTES (1u << 20)
 #define GRJIT_DEFAULT_CODE_BYTES (16u << 20)
@@ -55,6 +56,7 @@ void grjit_limits_default(GRJIT_Limits * limits) {
   limits->max_frame_bytes = GRJIT_DEFAULT_FRAME_BYTES;
   limits->max_code_bytes = GRJIT_DEFAULT_CODE_BYTES;
   limits->max_site_entries = GRJIT_DEFAULT_SITE_ENTRIES;
+  limits->max_guest_call_arguments = GRJIT_DEFAULT_GUEST_CALL_ARGUMENTS;
 }
 
 static size_t clamp_max(size_t value, size_t ceiling) {
@@ -92,5 +94,9 @@ void grjit_limits_resolve(const GRJIT_Limits * in, GRJIT_Limits * out) {
   }
   if (in->max_site_entries != 0) {
     out->max_site_entries = in->max_site_entries;
+  }
+  if (in->max_guest_call_arguments != 0) {
+    out->max_guest_call_arguments =
+        clamp_max(in->max_guest_call_arguments, GRJIT_BUILDER_MAX_ARGS);
   }
 }

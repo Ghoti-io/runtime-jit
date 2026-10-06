@@ -99,6 +99,14 @@ GRJIT_PollHelper grjit_function_poll_helper(const GRJIT_Function * function) {
   return function == NULL ? NULL : function->poll_helper;
 }
 
+bool grjit_function_callable(const GRJIT_Function * function) {
+  return function != NULL && function->callable;
+}
+
+const GRJIT_CallHooks * grjit_function_call_hooks(const GRJIT_Function * function) {
+  return function != NULL && function->callable ? &function->hooks : NULL;
+}
+
 size_t grjit_function_op_count(const GRJIT_Function * function) {
   return function == NULL ? 0 : function->op_count;
 }
@@ -142,6 +150,7 @@ bool grjit_op_is_terminator(GRJIT_OpKind kind) {
 
 bool grjit_op_has_state(const GRJIT_Op * op) {
   return op->kind == GRJIT_OP_POLL || op->kind == GRJIT_OP_GUARD ||
+         op->kind == GRJIT_OP_CALL_SLOT || op->kind == GRJIT_OP_CALL_PTR ||
          (op->kind == GRJIT_OP_CALL && op->attr == GRJIT_CALL_GC_POINT);
 }
 
@@ -163,17 +172,30 @@ void grjit_op_visit_uses(const GRJIT_Function * function, const GRJIT_Op * op,
         visit_operand(&op->args[i], visit, user);
       }
       break;
+    case GRJIT_OP_CALL_SLOT:
+    case GRJIT_OP_CALL_PTR:
+      visit_operand(&op->a, visit, user); /* the code pointer of a CALL_PTR */
+      for (size_t i = 0; i < op->arg_count; i++) {
+        visit_operand(&op->args[i], visit, user);
+      }
+      break;
     default:
       visit_operand(&op->a, visit, user);
       visit_operand(&op->b, visit, user);
       break;
   }
-  if (grjit_op_has_state(op) && op->state != GRJIT_NO_STATE &&
-      op->state < function->state_count) {
-    const GRJIT_FrameState * s = &function->states[op->state];
-    for (size_t i = 0; i < s->slot_count; i++) {
-      if (s->slots[i].kind == GRJIT_FRAME_SLOT_VREG) {
-        visit(user, s->slots[i].vreg);
+  if (grjit_op_has_state(op)) {
+    /* A guest call has two states; every other site has one. */
+    uint32_t which[2] = {op->state, op->exit_state};
+    for (size_t w = 0; w < 2; w++) {
+      if (which[w] == GRJIT_NO_STATE || which[w] >= function->state_count) {
+        continue;
+      }
+      const GRJIT_FrameState * s = &function->states[which[w]];
+      for (size_t i = 0; i < s->slot_count; i++) {
+        if (s->slots[i].kind == GRJIT_FRAME_SLOT_VREG) {
+          visit(user, s->slots[i].vreg);
+        }
       }
     }
   }

@@ -221,12 +221,15 @@ GRJIT_Result grjit_builder_set_poll_helper(
   return GRJIT_OK;
 }
 
-/* Appends `*op` to the current block, with its arguments and frame state
- * copied. Everything that can fail is done before anything is committed. */
-static GRJIT_Result append(GRJIT_Builder * b, const GRJIT_Op * op,
+/* Appends `*op` to the current block, with its arguments and its frame states
+ * copied: `state` (with `slots`) and, for a guest call, the second state the
+ * call exits through (`state2` with `slots2`; otherwise NULL). Everything that
+ * can fail is done before anything is committed. */
+static GRJIT_Result append_ex(GRJIT_Builder * b, const GRJIT_Op * op,
     const GRJIT_Operand * args, size_t arg_count,
     const GRJIT_FrameState * state, const GRJIT_FrameSlot * slots,
-    size_t slot_count) {
+    size_t slot_count, const GRJIT_FrameState * state2,
+    const GRJIT_FrameSlot * slots2, size_t slot_count2) {
   GRJIT_Function * f = b->function;
   if (!b->has_current) {
     return GRJIT_ERR_INVALID;
@@ -234,21 +237,29 @@ static GRJIT_Result append(GRJIT_Builder * b, const GRJIT_Op * op,
   if (f->op_count >= b->limits.max_operations) {
     return GRJIT_ERR_LIMIT;
   }
-  if (arg_count > b->limits.max_call_arguments ||
-      arg_count > GRJIT_BUILDER_MAX_ARGS) {
+  /* A helper call carries at most `max_call_arguments`; a call to another
+   * compiled function, whose arguments the internal convention puts on the
+   * stack past the sixth, is capped by its own limit. */
+  bool guest_call = op->kind == GRJIT_OP_CALL_SLOT || op->kind == GRJIT_OP_CALL_PTR;
+  size_t arg_cap = guest_call ? b->limits.max_guest_call_arguments
+                              : b->limits.max_call_arguments;
+  if (arg_count > arg_cap || arg_count > GRJIT_BUILDER_MAX_ARGS) {
     return GRJIT_ERR_LIMIT;
   }
-  if (slot_count > b->limits.max_frame_state_slots) {
+  if (slot_count > b->limits.max_frame_state_slots ||
+      slot_count2 > b->limits.max_frame_state_slots) {
     return GRJIT_ERR_LIMIT;
   }
   if ((arg_count != 0 && args == NULL) ||
-      (state != NULL && slot_count != 0 && slots == NULL)) {
+      (state != NULL && slot_count != 0 && slots == NULL) ||
+      (state2 != NULL && slot_count2 != 0 && slots2 == NULL)) {
     return GRJIT_ERR_INVALID;
   }
   const GRJIT_Allocator * a = f->allocator;
   GRJIT_BlockInfo * blk = &f->blocks[b->current];
   GRJIT_Operand * arg_copy = NULL;
   GRJIT_FrameSlot * slot_copy = NULL;
+  GRJIT_FrameSlot * slot_copy2 = NULL;
   if (arg_count != 0) {
     arg_copy = a->malloc_fn(a->ctx, arg_count * sizeof *arg_copy);
     if (arg_copy == NULL) {
@@ -264,22 +275,33 @@ static GRJIT_Result append(GRJIT_Builder * b, const GRJIT_Op * op,
     }
     memcpy(slot_copy, slots, slot_count * sizeof *slot_copy);
   }
+  if (state2 != NULL && slot_count2 != 0) {
+    slot_copy2 = a->malloc_fn(a->ctx, slot_count2 * sizeof *slot_copy2);
+    if (slot_copy2 == NULL) {
+      a->free_fn(a->ctx, arg_copy);
+      a->free_fn(a->ctx, slot_copy);
+      return GRJIT_ERR_OOM;
+    }
+    memcpy(slot_copy2, slots2, slot_count2 * sizeof *slot_copy2);
+  }
+  size_t new_states = (state != NULL ? 1u : 0u) + (state2 != NULL ? 1u : 0u);
   GRJIT_Op * ops = grow(a, blk->ops, &blk->capacity, blk->count + 1,
       sizeof *blk->ops);
   if (ops != NULL) {
     blk->ops = ops;
   }
   GRJIT_FrameState * states = f->states;
-  if (ops != NULL && state != NULL) {
-    states = grow(a, f->states, &f->state_capacity, f->state_count + 1,
-        sizeof *f->states);
+  if (ops != NULL && new_states != 0) {
+    states = grow(a, f->states, &f->state_capacity,
+        f->state_count + new_states, sizeof *f->states);
     if (states != NULL) {
       f->states = states;
     }
   }
-  if (ops == NULL || (state != NULL && states == NULL)) {
+  if (ops == NULL || (new_states != 0 && states == NULL)) {
     a->free_fn(a->ctx, arg_copy);
     a->free_fn(a->ctx, slot_copy);
+    a->free_fn(a->ctx, slot_copy2);
     return GRJIT_ERR_OOM;
   }
   GRJIT_Op * dst = &blk->ops[blk->count];
@@ -296,9 +318,26 @@ static GRJIT_Result append(GRJIT_Builder * b, const GRJIT_Op * op,
   } else {
     dst->state = GRJIT_NO_STATE;
   }
+  if (state2 != NULL) {
+    GRJIT_FrameState * s = &f->states[f->state_count];
+    s->identity = state2->identity;
+    s->slot_count = slot_count2;
+    s->slots = slot_copy2;
+    dst->exit_state = (uint32_t)f->state_count;
+    f->state_count++;
+  } else {
+    dst->exit_state = GRJIT_NO_STATE;
+  }
   blk->count++;
   f->op_count++;
   return GRJIT_OK;
+}
+
+static GRJIT_Result append(GRJIT_Builder * b, const GRJIT_Op * op,
+    const GRJIT_Operand * args, size_t arg_count,
+    const GRJIT_FrameState * state, const GRJIT_FrameSlot * slots,
+    size_t slot_count) {
+  return append_ex(b, op, args, arg_count, state, slots, slot_count, NULL, NULL, 0);
 }
 
 static GRJIT_Op blank(GRJIT_OpKind kind) {
@@ -309,6 +348,7 @@ static GRJIT_Op blank(GRJIT_OpKind kind) {
   op.a = grjit_operand_none();
   op.b = grjit_operand_none();
   op.state = GRJIT_NO_STATE;
+  op.exit_state = GRJIT_NO_STATE;
   return op;
 }
 
@@ -425,6 +465,64 @@ GRJIT_Result grjit_builder_call(GRJIT_Builder * builder, GRJIT_VReg dst,
   bool has_state = attr == GRJIT_CALL_GC_POINT;
   return append(builder, &op, args, arg_count, has_state ? &state : NULL,
       state_slots, has_state ? state_count : 0);
+}
+
+GRJIT_Result grjit_builder_set_callable(
+    GRJIT_Builder * builder, const GRJIT_CallHooks * hooks) {
+  if (builder == NULL || hooks == NULL) {
+    return GRJIT_ERR_INVALID;
+  }
+  builder->function->callable = true;
+  builder->function->hooks = *hooks;
+  return GRJIT_OK;
+}
+
+GRJIT_Result grjit_builder_call_slot(GRJIT_Builder * builder, GRJIT_VReg dst,
+    uint64_t slot_address, uint64_t callee, const GRJIT_Operand * args,
+    size_t arg_count, GRCORE_PollIdentity identity,
+    const GRJIT_FrameSlot * state_slots, size_t state_count,
+    GRCORE_PollIdentity exit_identity, const GRJIT_FrameSlot * exit_slots,
+    size_t exit_count) {
+  if (builder == NULL) {
+    return GRJIT_ERR_INVALID;
+  }
+  GRJIT_Op op = blank(GRJIT_OP_CALL_SLOT);
+  op.dst = dst;
+  op.address = slot_address;
+  op.callee = callee;
+  op.attr = GRJIT_CALL_GC_POINT;
+  op.site_kind = GRCORE_SITE_GC_POINT_CALL;
+  GRJIT_FrameState state, exit_state;
+  memset(&state, 0, sizeof state);
+  memset(&exit_state, 0, sizeof exit_state);
+  state.identity = identity;
+  exit_state.identity = exit_identity;
+  return append_ex(builder, &op, args, arg_count, &state, state_slots,
+      state_count, &exit_state, exit_slots, exit_count);
+}
+
+GRJIT_Result grjit_builder_call_ptr(GRJIT_Builder * builder, GRJIT_VReg dst,
+    GRJIT_Operand target, uint64_t callee, const GRJIT_Operand * args,
+    size_t arg_count, GRCORE_PollIdentity identity,
+    const GRJIT_FrameSlot * state_slots, size_t state_count,
+    GRCORE_PollIdentity exit_identity, const GRJIT_FrameSlot * exit_slots,
+    size_t exit_count) {
+  if (builder == NULL) {
+    return GRJIT_ERR_INVALID;
+  }
+  GRJIT_Op op = blank(GRJIT_OP_CALL_PTR);
+  op.dst = dst;
+  op.a = target;
+  op.callee = callee;
+  op.attr = GRJIT_CALL_GC_POINT;
+  op.site_kind = GRCORE_SITE_GC_POINT_CALL;
+  GRJIT_FrameState state, exit_state;
+  memset(&state, 0, sizeof state);
+  memset(&exit_state, 0, sizeof exit_state);
+  state.identity = identity;
+  exit_state.identity = exit_identity;
+  return append_ex(builder, &op, args, arg_count, &state, state_slots,
+      state_count, &exit_state, exit_slots, exit_count);
 }
 
 GRJIT_Result grjit_builder_poll(GRJIT_Builder * builder,

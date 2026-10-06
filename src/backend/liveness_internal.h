@@ -48,6 +48,11 @@ typedef struct GRJIT_SiteLive {
   size_t count;              ///< How many.
 } GRJIT_SiteLive;
 
+/** How many entries of the table an operation with a frame state makes: three
+ *  for a call to another compiled function (the push of the callee's guest
+ *  frame, the call, and the exit before it, in that order), one otherwise. */
+size_t grjit_liveness_site_count(const GRJIT_Op * op);
+
 /** Every site of a function, in block then operation order. */
 typedef struct GRJIT_LiveSites {
   const GRJIT_Allocator * allocator;

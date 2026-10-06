@@ -239,6 +239,28 @@ struct B {
                   state.data(), state.size()),
         GRJIT_OK);
   }
+  void callable(const GRJIT_CallHooks & hooks) {
+    EXPECT_EQ(grjit_builder_set_callable(b, &hooks), GRJIT_OK);
+  }
+  /* A call through an entry slot; the result goes in `d` or nowhere. */
+  void call_slot(GRJIT_VReg d, const void * slot_entry, uint64_t callee,
+      std::vector<GRJIT_Operand> args, GRCORE_PollIdentity id,
+      std::vector<GRJIT_FrameSlot> state, GRCORE_PollIdentity exit_id,
+      std::vector<GRJIT_FrameSlot> exit_state) {
+    EXPECT_EQ(grjit_builder_call_slot(b, d, reinterpret_cast<uintptr_t>(slot_entry),
+                  callee, args.data(), args.size(), id, state.data(),
+                  state.size(), exit_id, exit_state.data(), exit_state.size()),
+        GRJIT_OK);
+  }
+  void call_ptr(GRJIT_VReg d, GRJIT_Operand target, uint64_t callee,
+      std::vector<GRJIT_Operand> args, GRCORE_PollIdentity id,
+      std::vector<GRJIT_FrameSlot> state, GRCORE_PollIdentity exit_id,
+      std::vector<GRJIT_FrameSlot> exit_state) {
+    EXPECT_EQ(grjit_builder_call_ptr(b, d, target, callee, args.data(),
+                  args.size(), id, state.data(), state.size(), exit_id,
+                  exit_state.data(), exit_state.size()),
+        GRJIT_OK);
+  }
   void poll(GRCORE_PollIdentity id, std::vector<GRJIT_FrameSlot> state = {}) {
     EXPECT_EQ(grjit_builder_poll(b, id, state.data(), state.size()), GRJIT_OK);
   }

@@ -312,6 +312,9 @@ static void emit_op(GRJIT_Emit * e, const GRJIT_Op * op, size_t block) {
       grjit_asm_mov_ri(a, GRJIT_RAX, GRJIT_EXIT_RETURNED);
       grjit_emit_epilogue(e);
       break;
+    case GRJIT_OP_CALL_SLOT:
+    case GRJIT_OP_CALL_PTR:
+      /* Refused before emission (grjit_emit_for), so never reached. */
     case GRJIT_OP_COUNT:
       e->c.error = GRJIT_ERR_INTERNAL;
       break;

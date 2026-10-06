@@ -135,6 +135,22 @@ GRJIT_API GRJIT_Result grjit_builder_block(
 GRJIT_API GRJIT_Result grjit_builder_set_block(
     GRJIT_Builder * builder, GRJIT_BlockId block);
 
+/**
+ * @brief Makes the function *callable* (AD-28): other compiled functions can
+ *   call it directly, and it can call them.
+ *
+ * A callable function has, besides the entry of ::grjit_code_entry, an
+ * *internal entry* (::grjit_code_internal_entry) that uses the internal calling
+ * convention, and the entry adapts to it. Without this a function is compiled
+ * exactly as before and may not contain `CALL_SLOT` or `CALL_PTR`. `hooks` is
+ * copied; its `deopt` is required, and its other members as the function's
+ * operations need (the verifier says which).
+ *
+ * @return ::GRJIT_OK, or ::GRJIT_ERR_INVALID for NULL.
+ */
+GRJIT_API GRJIT_Result grjit_builder_set_callable(
+    GRJIT_Builder * builder, const GRJIT_CallHooks * hooks);
+
 /** @brief Declares the poll slow-path helper that `POLL` calls. */
 GRJIT_API GRJIT_Result grjit_builder_set_poll_helper(
     GRJIT_Builder * builder, GRJIT_PollHelper helper);
@@ -215,6 +231,52 @@ GRJIT_API GRJIT_Result grjit_builder_call(GRJIT_Builder * builder,
     GRCORE_CodeSiteKind site_kind, const GRJIT_Operand * args,
     size_t arg_count, GRCORE_PollIdentity identity,
     const GRJIT_FrameSlot * state_slots, size_t state_count);
+
+/**
+ * @brief Calls a compiled function through its entry slot.
+ *
+ * Only in a callable function. The call loads the slot's entry word: compiled
+ * code is called directly; an empty slot asks the `compile` hook; a refused
+ * one exits. See ::GRJIT_CallHooks for the order and what each hook does.
+ *
+ * @param dst The result register of any type, or ::GRJIT_NO_VREG for none.
+ * @param slot_address The address of a `GRCORE_EntrySlot`'s `entry` word
+ *   (`&slot->entry`), which does not move for the life of the context.
+ * @param callee The engine's token for the callee, passed to the hooks.
+ * @param args The arguments, copied; at most
+ *   `GRJIT_Limits::max_guest_call_arguments`.
+ * @param identity The poll identity of `state`: where the guest frame is while
+ *   the callee runs.
+ * @param state_slots That frame state (copied), `state_count` of them.
+ * @param exit_identity The poll identity of the exit state.
+ * @param exit_slots The frame state of an exit before the call (copied).
+ * @return ::GRJIT_OK, ::GRJIT_ERR_INVALID, ::GRJIT_ERR_LIMIT or
+ *   ::GRJIT_ERR_OOM.
+ */
+GRJIT_API GRJIT_Result grjit_builder_call_slot(GRJIT_Builder * builder,
+    GRJIT_VReg dst, uint64_t slot_address, uint64_t callee,
+    const GRJIT_Operand * args, size_t arg_count, GRCORE_PollIdentity identity,
+    const GRJIT_FrameSlot * state_slots, size_t state_count,
+    GRCORE_PollIdentity exit_identity, const GRJIT_FrameSlot * exit_slots,
+    size_t exit_count);
+
+/**
+ * @brief Calls a compiled function through a code pointer.
+ *
+ * Only in a callable function. `target` is a register (a `ptr`) or an immediate
+ * holding the *internal entry* of registered compiled code
+ * (::grjit_code_internal_entry). There is no slot and no compile-at-call: the
+ * call checks at run time that the target is the internal entry of code that is
+ * registered in the context (`grcore_code_lookup`), and exits through the exit
+ * state if it is not, so an address that is not compiled code is never
+ * entered. The rest is as ::grjit_builder_call_slot.
+ */
+GRJIT_API GRJIT_Result grjit_builder_call_ptr(GRJIT_Builder * builder,
+    GRJIT_VReg dst, GRJIT_Operand target, uint64_t callee,
+    const GRJIT_Operand * args, size_t arg_count, GRCORE_PollIdentity identity,
+    const GRJIT_FrameSlot * state_slots, size_t state_count,
+    GRCORE_PollIdentity exit_identity, const GRJIT_FrameSlot * exit_slots,
+    size_t exit_count);
 
 /** @brief A poll, with its frame state (copied). */
 GRJIT_API GRJIT_Result grjit_builder_poll(GRJIT_Builder * builder,

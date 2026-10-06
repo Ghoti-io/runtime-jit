@@ -49,7 +49,8 @@ extern "C" {
  * nothing. The backend passes at most 6 integer arguments to a helper, so a
  * call with more is a limit error from the verifier whatever
  * `max_call_arguments` says; the builder holds up to 16 so that the verifier
- * can be shown the refusal.
+ * can be shown the refusal. A call to another compiled function has its own cap,
+ * `max_guest_call_arguments`.
  */
 typedef struct GRJIT_Limits {
   size_t max_blocks;           ///< Basic blocks in a function. Default 4096.
@@ -67,6 +68,11 @@ typedef struct GRJIT_Limits {
                                ///< working memory. The code and frame caps do
                                ///< not bound it: sites times live registers
                                ///< can be many times either.
+  size_t max_guest_call_arguments; ///< Arguments of a call to another compiled
+                               ///< function (`CALL_SLOT`, `CALL_PTR`), which
+                               ///< the internal convention passes in six
+                               ///< registers and then on the stack. Default
+                               ///< and ceiling 16.
 } GRJIT_Limits;
 
 /**

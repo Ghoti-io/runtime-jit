@@ -56,6 +56,16 @@
  * heap go through an engine-supplied helper `CALL` (the engine's `gc_store`),
  * and this library never emits a barrier (AD-11).
  *
+ * **Calls between compiled functions** (`CALL_SLOT`, `CALL_PTR`; AD-28) exist
+ * only in a *callable* function (::grjit_builder_set_callable), which has an
+ * internal entry that other compiled functions call directly. Such a call
+ * carries two frame states: `state`, the guest frame as it stands while the
+ * callee runs (the interpreter will resume the caller there once the callee
+ * returns, with the result still to be pushed), which a stack map and a rebuild
+ * of the chain use; and `exit_state`, the guest frame as it stands before the
+ * call, which an exit at the call site uses and from which the interpreter makes
+ * the call itself. The call's result is any of the three types.
+ *
  * A *frame state* is a poll identity `(function, bytecode offset)` plus, for
  * each of the function's `interp_slot_count` interpreter slots, a register, a
  * 64-bit constant or "dead". It is attached to each `POLL`, to each call that
@@ -164,6 +174,11 @@ typedef enum GRJIT_OpKind {
                     ///< only), so it must not be held across a GC point as a
                     ///< reference. A `REF` register may hold a non-pointer tagged
                     ///< word, which a reader of stack maps must tolerate.
+  GRJIT_OP_CALL_SLOT, ///< Call the compiled function whose entry slot is at
+                      ///< `address` (a `GRCORE_EntrySlot`'s entry word), with
+                      ///< `args`, `callee`, and two frame states (see below).
+  GRJIT_OP_CALL_PTR,  ///< The same through the code pointer `a`: the internal
+                      ///< entry of registered compiled code. No slot.
   GRJIT_OP_COUNT   ///< Not an operation; closes the enum.
 } GRJIT_OpKind;
 
@@ -268,7 +283,62 @@ typedef struct GRJIT_Op {
   const GRJIT_Operand * args; ///< The arguments.
   uint32_t state;             ///< Index of the frame state, or
                               ///< ::GRJIT_NO_STATE.
+  uint64_t callee;            ///< For `CALL_SLOT` and `CALL_PTR`: the engine's
+                              ///< token for the callee, which the push and
+                              ///< compile hooks receive.
+  uint32_t exit_state;        ///< For `CALL_SLOT` and `CALL_PTR`: the frame
+                              ///< state of an exit *before* the call, or
+                              ///< ::GRJIT_NO_STATE.
 } GRJIT_Op;
+
+/**
+ * @brief The engine's hooks around a call to another compiled function, and
+ *   for the deoptimization of a chain (AD-28).
+ *
+ * All four are C functions called through the C ABI with the context pointer
+ * the code was called with, from compiled code. None of them calls the
+ * interpreter; the interpreter never runs as a C callee of compiled code.
+ *
+ * - `push` runs **before** every call, after the callee is known to be
+ *   compiled. It pushes the callee's guest frame for `callee` with the
+ *   arguments in its locals, counts guest depth and memory as the interpreter's
+ *   own push does, and extends the reservation by the callee's maximum (AD-27).
+ *   It is the frame-push GC point: it may collect and may move the guest stack.
+ *   `args` points to `arg_count` words in the caller's frame, which are in the
+ *   call site's stack map, so a moving collector has updated them by the time
+ *   the hook reads them, and the hook must read them after any collection it
+ *   triggers. A non-zero return refuses the push: nothing is left pushed, and the
+ *   call site exits through its exit state, where the interpreter makes the call
+ *   itself and reaches the same verdict (a depth limit) it would have.
+ * - `pop` runs after the callee returned normally, and pops its guest frame and
+ *   gives back the reservation it extended. It cannot refuse: the call is
+ *   complete, and no frame state describes "complete but not popped". It must not
+ *   reach a GC point.
+ * - `compile` runs when a call through an entry slot finds the slot empty. It
+ *   compiles the callee and installs it in the slot and returns zero, or marks
+ *   the slot refused (`grcore_entry_slot_refuse`) and returns non-zero, which
+ *   makes the call site exit and every later call through the slot exit at the
+ *   cost of one compare. It is not a GC point, and must not retire code a frame
+ *   returns into (it installs; it does not replace).
+ * - `deopt` runs when compiled code leaves by an exit: a guard that failed, a
+ *   poll helper that returned non-zero (`cause`), a call site's exit, a native
+ *   stack that would run out. It rebuilds every compiled frame of the chain
+ *   into its guest frame (`grcore_compiled_rebuild`), which is the one place the
+ *   rebuild happens; compiled code then returns `DEOPTED` through each frame
+ *   without touching anything. `cause` is zero, or the poll helper's non-zero
+ *   result. It must not fail; if it cannot rebuild, the process is in an
+ *   unrecoverable state and the hook stops it.
+ *
+ * `compile` may be NULL for a function with no `CALL_SLOT`, `push` and `pop`
+ * for one with no calls; `deopt` is required.
+ */
+typedef struct GRJIT_CallHooks {
+  uint32_t (*push)(void * context, uint64_t callee, const uint64_t * args,
+      uint64_t arg_count);
+  void (*pop)(void * context);
+  uint32_t (*compile)(void * context, uint64_t callee);
+  void (*deopt)(void * context, uint64_t cause);
+} GRJIT_CallHooks;
 
 /** @brief A function. Opaque; built by ::GRJIT_Builder. */
 typedef struct GRJIT_Function GRJIT_Function;
@@ -315,6 +385,12 @@ GRJIT_API const GRJIT_FrameState * grjit_function_frame_state(
     const GRJIT_Function * function, uint32_t index);
 /** @brief The poll helper the function declared; NULL for none. */
 GRJIT_API GRJIT_PollHelper grjit_function_poll_helper(
+    const GRJIT_Function * function);
+/** @brief Whether the function is callable by other compiled functions: it was
+ *  built with ::grjit_builder_set_callable. */
+GRJIT_API bool grjit_function_callable(const GRJIT_Function * function);
+/** @brief The call hooks of a callable function; NULL for one that is not. */
+GRJIT_API const GRJIT_CallHooks * grjit_function_call_hooks(
     const GRJIT_Function * function);
 /** @brief The number of operations in all blocks. */
 GRJIT_API size_t grjit_function_op_count(const GRJIT_Function * function);
