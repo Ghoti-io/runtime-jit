@@ -112,7 +112,9 @@ running a program that includes only the umbrella header.
 
 Scaffolded. The IR, the verifier, the printer, the x86-64 and arm64 baseline
 backends (the Windows one with its unwind registration) and their assemblers, the metadata, W^X code memory, the gates, the examples and the
-benchmark harness are in. Not here: wiring it into an engine, tier-up and
-compiled-code reference counting, rebuilding interpreter frames from compiled
-ones, Windows arm64 and macOS. `documentation/design.md` says why each is where
+benchmark harness are in, and so are the parts that need an engine: wiring it
+into `lang-tang` (story 15), tier-up, compiled-code reference counting and the
+rebuilding of interpreter frames from compiled ones at a poll and at a guard
+exit (the last is the engine's, done with `runtime-core`'s `a/deopt.h`). Not
+here: Windows arm64 and macOS. `documentation/design.md` says why each is where
 it is.
