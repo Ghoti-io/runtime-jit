@@ -108,10 +108,18 @@ typedef struct GRJIT_SiteRec {
  *  - the frame is `rbp`-linked as a/compiled.h requires.
  *
  * The frame of a callable function has, below the vreg slots, the *arguments
- * area* (one slot for each argument of its widest call: the push hook reads
- * the arguments there, and a moving collector updates them, which is why the
- * area is in the stack map of a push site) and one slot that holds the entry
- * address a call loaded across the push. */
+ * area* (one slot for each argument of its widest call or tail call: the push
+ * or tail hook reads the arguments there, and a moving collector updates them,
+ * which is why the area is in the stack map of that site) and one slot that
+ * holds the entry address a call loaded across the hook.
+ *
+ * A function with a tail call may have *pad* slots between its vreg slots and
+ * the area, so that the area ends at or below the lowest address a tail call's
+ * frame replacement writes (see emit.c, emit_tail_call): the area is the
+ * staging place for the callee's arguments, and a callee with more stack
+ * arguments than the function has reaches below the function's own incoming
+ * area. The area macros take the pad as part of the register count
+ * (GRJIT_SHAPE_REGS). */
 #define GRJIT_STATUS_RETURNED 0u
 #define GRJIT_STATUS_DEOPTED 1u
 /** The engine's `deopt` hook refused the rebuild; `rax` is its answer. */
@@ -131,11 +139,27 @@ typedef struct GRJIT_SiteRec {
 /** How a callable function's frame is shaped. */
 typedef struct GRJIT_CallableShape {
   size_t args_area;    ///< Slots in the arguments area: the widest call.
-  bool has_calls;      ///< Whether it calls compiled code at all.
-  size_t extra_slots;  ///< Slots below the vreg slots: area, plus one for the
-                       ///< saved entry when it has calls.
+  bool has_calls;      ///< Whether it calls compiled code at all (a tail call
+                       ///< included).
+  size_t pad;          ///< Slots between the vreg slots and the arguments area
+                       ///< that a tail call to a callee with more stack
+                       ///< arguments needs: zero for every function without one.
+  size_t extra_slots;  ///< Slots below the vreg slots: pad, area, plus one for
+                       ///< the saved entry when it has calls.
   uint32_t incoming_bytes; ///< Bytes of stack arguments its callers push.
 } GRJIT_CallableShape;
+
+/** The bytes of stack arguments the internal convention puts above the
+ *  return address for `n` arguments: the ones past the sixth, in whole 16-byte
+ *  units so the stack stays aligned. */
+static inline uint32_t grjit_stack_arg_bytes(size_t n) {
+  size_t stack_args = n > GRJIT_INTERNAL_REG_ARGS ? n - GRJIT_INTERNAL_REG_ARGS : 0;
+  return (uint32_t)((stack_args * 8 + 15) / 16 * 16);
+}
+
+/** The register count the area macros below are given: the function's own and
+ *  the shape's padding, which sits between them and the area. */
+#define GRJIT_SHAPE_REGS(f, shape) ((f)->vreg_count + (shape).pad)
 
 /** Whether `target` is the internal entry of compiled code registered in the
  *  context (src/code/target.c): the check a call through a code pointer makes.

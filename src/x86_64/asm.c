@@ -389,6 +389,13 @@ void grjit_asm_call_r(GRJIT_Asm * a, GRJIT_Reg r) {
   modrm_rr(a, 2, r);
 }
 
+void grjit_asm_jmp_r(GRJIT_Asm * a, GRJIT_Reg r) {
+  note(a, r);
+  rex(a, false, 0, r, false);
+  byte(a, 0xFF);
+  modrm_rr(a, 4, r);
+}
+
 void grjit_asm_ret(GRJIT_Asm * a) {
   byte(a, 0xC3);
 }

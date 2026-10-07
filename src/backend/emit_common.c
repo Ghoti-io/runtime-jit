@@ -62,22 +62,32 @@ void grjit_callable_shape(const GRJIT_Function * f, GRJIT_CallableShape * out) {
   if (!f->callable) {
     return;
   }
+  /* Whole 16-byte units, so the stack stays 16-aligned across the call. */
+  out->incoming_bytes = grjit_stack_arg_bytes(f->param_count);
   for (size_t b = 0; b < f->block_count; b++) {
     for (size_t i = 0; i < f->blocks[b].count; i++) {
       const GRJIT_Op * op = &f->blocks[b].ops[i];
-      if (op->kind == GRJIT_OP_CALL_SLOT || op->kind == GRJIT_OP_CALL_PTR) {
+      bool tail = op->kind == GRJIT_OP_TAIL_CALL_SLOT || op->kind == GRJIT_OP_TAIL_CALL_PTR;
+      if (op->kind == GRJIT_OP_CALL_SLOT || op->kind == GRJIT_OP_CALL_PTR || tail) {
         out->has_calls = true;
         if (op->arg_count > out->args_area) {
           out->args_area = op->arg_count;
         }
       }
+      if (tail) {
+        /* The replacement writes down to `ra' = ra + in_A - in_T` (emit.c), and
+         * the area, which holds the sources, must end at or below it: the area
+         * ends `pad + vreg_count + 3` slots below the frame base and `ra'` is
+         * `8 + in_A - in_T` above it. */
+        int64_t in_t = grjit_stack_arg_bytes(op->arg_count);
+        int64_t want = (in_t - (int64_t)out->incoming_bytes) / 8 - ((int64_t)f->vreg_count + 4);
+        if (want > 0 && (size_t)want > out->pad) {
+          out->pad = (size_t)want;
+        }
+      }
     }
   }
-  out->extra_slots = out->args_area + (out->has_calls ? 1u : 0u);
-  size_t stack_args =
-      f->param_count > GRJIT_INTERNAL_REG_ARGS ? f->param_count - GRJIT_INTERNAL_REG_ARGS : 0;
-  /* Whole 16-byte units, so the stack stays 16-aligned across the call. */
-  out->incoming_bytes = (uint32_t)((stack_args * 8 + 15) / 16 * 16);
+  out->extra_slots = out->pad + out->args_area + (out->has_calls ? 1u : 0u);
 }
 
 void grjit_emit_add_site(GRJIT_EmitCommon * c, uint32_t offset,

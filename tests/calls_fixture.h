@@ -75,7 +75,9 @@ enum class K {
   PROBE,     // record local a (and the native stack pointer, compiled)
   REFSLOT,   // refuse fn's entry slot, as if it could not be compiled
   DERIVE,    // d (a PTR) = the address a (a REF) holds plus imm: a derived pointer
-  LOAD       // d = the 64-bit word at the address in a (a PTR or REF)
+  LOAD,      // d = the 64-bit word at the address in a (a PTR or REF)
+  TAILCALL,  // return fn(args...): replaces this frame, through fn's entry slot
+  TAILCALLP  // the same through the code pointer in local a
 };
 
 struct Ins {
@@ -92,6 +94,13 @@ struct Func {
   int nparams = 0;
   std::vector<GRJIT_Type> type; // one per local, parameters first
   std::vector<Ins> code;
+  /* The frame owns a budget scope or an engine call record: a tail call from it
+   * is refused by the engine's hook, goes through an exit, and the interpreter
+   * makes it as a call whose result this frame returns (AD-28). */
+  bool owns_scope = false;
+  /* Immediate operands of call arguments (and of a tail call's code pointer): a
+   * negative `-1 - k` in an argument list is `imms[k]`. */
+  std::vector<int64_t> imms;
   int locals() const { return static_cast<int>(type.size()); }
 };
 
@@ -108,6 +117,11 @@ struct P {
     return static_cast<int>(f.type.size()) - 1;
   }
   int here() const { return static_cast<int>(f.code.size()); }
+  /* An immediate, for a call's argument list or a tail call's code pointer. */
+  int imm(int64_t v) {
+    f.imms.push_back(v);
+    return -static_cast<int>(f.imms.size());
+  }
   Ins & add(K k) {
     f.code.emplace_back();
     f.code.back().k = k;
@@ -125,6 +139,12 @@ struct P {
   }
   void callp(int d, int ptr, int fn, std::vector<int> args) {
     auto & i = add(K::CALLP); i.d = d; i.a = ptr; i.fn = fn; i.args = std::move(args);
+  }
+  void tailcall(int fn, std::vector<int> args) {
+    auto & i = add(K::TAILCALL); i.fn = fn; i.args = std::move(args);
+  }
+  void tailcallp(int ptr, int fn, std::vector<int> args) {
+    auto & i = add(K::TAILCALLP); i.a = ptr; i.fn = fn; i.args = std::move(args);
   }
   void ret(int a) { auto & i = add(K::RET); i.a = a; }
   void guard(int a) { auto & i = add(K::GUARD); i.a = a; }
@@ -231,6 +251,13 @@ struct Stats {
   std::vector<u64> probed;       // values PROBE saw
   std::vector<uintptr_t> sps;    // the native stack pointer at each compiled PROBE
   std::vector<uintptr_t> bases;  // the compiled frame base at each compiled PROBE
+  std::vector<uintptr_t> saved;  // the word at the probing frame's base: its caller's base
+  std::vector<uintptr_t> rets;   // and the word above it: its return address
+  std::vector<size_t> frames;    // guest frames on the stack at each PROBE
+  std::vector<uint64_t> depths;  // the context's guest depth at each PROBE
+  std::vector<size_t> caps;      // the reservation's capacity at each PROBE
+  long tails = 0;                // the tail hook's calls
+  long tail_refusals = 0;        // ... that it refused
 };
 
 /* An engine whose I64 locals are held boxed in its guest frames (the converting
@@ -282,6 +309,15 @@ class Engine {
   uint32_t refuse_rebuild_with = 0; // the deopt hook refuses without rebuilding
   long refuse_push_at = 0;        // the Nth push is refused (an exit at the call site)
   long push_calls = 0;
+  long refuse_tail_at = 0;        // the Nth tail hook call is refused (an exit)
+  long tail_calls = 0;
+  bool tail_keeps_frame = false;  // planted: the tail hook pushes and does not replace
+  bool tail_keeps_extension = false; // planted: it does not give back the caller's extension
+  /* The interpreter has no derived pointers: a raw pointer it holds (a PTR slot,
+   * as a rebuild leaves one) would be stale after a moving collection it makes. A
+   * test whose programs derive pointers and whose interpreter finishes a run
+   * sets this, and a collection the interpreter makes does not move anything. */
+  bool interpreter_never_moves = false;
 
   explicit Engine(uint64_t guest_depth = GRCORE_UNLIMITED,
       uint64_t native_bytes = GRCORE_UNLIMITED, bool conv = false,
@@ -331,6 +367,7 @@ class Engine {
 
   // ---- hooks (C ABI) ----
   static uint32_t h_push(void *, uint64_t, const uint64_t *, uint64_t);
+  static uint32_t h_tail(void *, uint64_t, const uint64_t *, uint64_t);
   static void h_pop(void *);
   static uint32_t h_compile(void *, uint64_t);
   static uint32_t h_deopt(void *, uint64_t);
@@ -532,6 +569,7 @@ inline GRJIT_Function * Engine::build_ir(int fn) {
   hooks.pop = Engine::h_pop;
   hooks.compile = Engine::h_compile;
   hooks.deopt = Engine::h_deopt;
+  hooks.tail = Engine::h_tail;
   b.callable(hooks);
   EXPECT_EQ(grjit_builder_set_token(b.b, static_cast<u64>(fn)), GRJIT_OK);
   b.poll_helper(Engine::h_poll);
@@ -554,7 +592,7 @@ inline GRJIT_Function * Engine::build_ir(int fn) {
     if (in.k == K::BRZ || in.k == K::BR) {
       leaders.insert(in.t);
       leaders.insert(pc + 1);
-    } else if (in.k == K::RET) {
+    } else if (in.k == K::RET || in.k == K::TAILCALL || in.k == K::TAILCALLP) {
       leaders.insert(pc + 1);
     }
   }
@@ -572,10 +610,13 @@ inline GRJIT_Function * Engine::build_ir(int fn) {
     }
     return s;
   };
+  auto operand = [&](int a) {
+    return a < 0 ? I(F.imms[static_cast<size_t>(-1 - a)]) : V(static_cast<GRJIT_VReg>(a));
+  };
   auto operands = [&](const std::vector<int> & args) {
     std::vector<GRJIT_Operand> v;
     for (int a : args) {
-      v.push_back(V(static_cast<GRJIT_VReg>(a)));
+      v.push_back(operand(a));
     }
     return v;
   };
@@ -615,6 +656,15 @@ inline GRJIT_Function * Engine::build_ir(int fn) {
         b.call_ptr(in.d, V(in.a), static_cast<u64>(in.fn), operands(in.args), id, state(pc), id,
             state(pc));
         break;
+      case K::TAILCALL:
+        b.tail_call_slot(&slots[in.fn]->entry, static_cast<u64>(in.fn), operands(in.args), id,
+            state(pc));
+        terminated = true;
+        break;
+      case K::TAILCALLP:
+        b.tail_call_ptr(operand(in.a), static_cast<u64>(in.fn), operands(in.args), id, state(pc));
+        terminated = true;
+        break;
       case K::GUARD: b.guard(V(in.a), id, state(pc)); break;
       case K::POLL: b.poll(id, state(pc)); break;
       case K::NEW:
@@ -653,6 +703,11 @@ inline bool Engine::compile_fn(int fn) {
     return true;
   }
   GRJIT_Function * f = build_ir(fn);
+  char why[256] = {0};
+  GRJIT_Result verified = grjit_function_verify(f, nullptr, why, sizeof why);
+  if (verified != GRJIT_OK) {
+    ADD_FAILURE() << "verifying " << funcs[fn].name << ": " << why;
+  }
   GRJIT_CompileOptions o{};
   o.pages = pages();
   GRJIT_Code * code = nullptr;
@@ -754,6 +809,75 @@ inline uint32_t Engine::h_push(void *, uint64_t callee, const uint64_t * args, u
   return 0;
 }
 
+/* The tail hook (AD-28): replaces the top guest frame, the caller's, with the
+ * callee's, and its reservation extension, as one step. Everything that can fail
+ * or collect is done before the guest stack is touched, so a refusal leaves
+ * everything as it was; the pop and push after it cannot fail. */
+inline uint32_t Engine::h_tail(void *, uint64_t callee, const uint64_t * args, uint64_t n) {
+  Engine & e = *g_engine;
+  e.st.tails++;
+  if (e.torture) {
+    e.collect(); // a GC point: the arguments are read afterwards
+  }
+  GRCORE_FrameRef top = grcore_stack_top(e.stack);
+  GRCORE_PollIdentity id;
+  grcore_stack_identity(e.stack, top, &id);
+  bool refuse = e.funcs[id.function].owns_scope ||
+                (e.refuse_tail_at != 0 && ++e.tail_calls == e.refuse_tail_at);
+  if (refuse) {
+    e.st.tail_refusals++;
+    return 1;
+  }
+  size_t ext = e.C(callee).max_converting;
+  size_t cut = static_cast<size_t>(e.short_by) < ext ? static_cast<size_t>(e.short_by) : ext;
+  ext -= cut;
+  bool refuse_alloc = e.refuse_extend_with != nullptr && ++e.extend_calls == e.refuse_extend_at;
+  if (refuse_alloc) {
+    e.refuse_extend_with->calls = 0;
+    e.refuse_extend_with->fail_at = 1;
+  }
+  GRCORE_Result r = grcore_deopt_reservation_extend(e.ctx, e.reservation, ext);
+  if (refuse_alloc) {
+    e.refuse_extend_with->fail_at = 0;
+  }
+  if (r != GRCORE_OK) {
+    e.st.extend_result = r;
+    e.st.tail_refusals++;
+    return 1;
+  }
+  // Room for the callee's frame in place of the caller's: the growth, if any.
+  size_t have = 0;
+  EXPECT_EQ(grcore_stack_slot_count(e.stack, top, &have), GRCORE_OK);
+  size_t want = 1 + static_cast<size_t>(e.funcs[callee].locals());
+  if (want > have && grcore_stack_reserve(e.stack, 8 * (want - have)) != GRCORE_OK) {
+    grcore_deopt_reservation_retract(e.reservation, ext);
+    e.st.tail_refusals++;
+    return 1;
+  }
+  // Committed: nothing below can fail or collect.
+  if (e.tail_keeps_frame) {
+    // Planted: the caller's frame stays, as a call would leave it. The depth
+    // budget, which it does not respect, may refuse it: an exit, as any refusal.
+    if (!e.push_frame(static_cast<int>(callee), args, n, true)) {
+      grcore_deopt_reservation_retract(e.reservation, ext);
+      e.st.tail_refusals++;
+      return 1;
+    }
+    e.extensions.push_back(ext);
+    return 0;
+  }
+  if (!e.extensions.empty() && !e.tail_keeps_extension) {
+    grcore_deopt_reservation_retract(e.reservation, e.extensions.back());
+    e.extensions.back() = ext;
+  } else {
+    e.extensions.push_back(ext); // planted: the caller's is not given back
+  }
+  EXPECT_EQ(grcore_stack_pop(e.stack), GRCORE_OK);
+  e.st.pops++;
+  EXPECT_TRUE(e.push_frame(static_cast<int>(callee), args, n, true));
+  return 0;
+}
+
 inline void Engine::h_pop(void *) {
   Engine & e = *g_engine;
   e.pop_frame();
@@ -798,7 +922,8 @@ inline uint32_t Engine::h_deopt(void *, uint64_t cause) {
       e.st.last_innermost_fn = fn;
       if (pc < e.funcs[fn].code.size()) {
         K k = e.funcs[fn].code[pc].k;
-        e.st.last_was_call_exit = k == K::CALL || k == K::CALLP;
+        e.st.last_was_call_exit =
+            k == K::CALL || k == K::CALLP || k == K::TAILCALL || k == K::TAILCALLP;
       }
     }
   }
@@ -870,6 +995,14 @@ __attribute__((noinline)) inline uint64_t Engine::h_probe(uint64_t v) {
   /* This function keeps a frame pointer, so its caller's frame base is the word
    * at its own: the compiled frame that called it. */
   e.st.bases.push_back(*reinterpret_cast<const uintptr_t *>(__builtin_frame_address(0)));
+  {
+    const uintptr_t * base = *reinterpret_cast<const uintptr_t * const *>(__builtin_frame_address(0));
+    e.st.saved.push_back(base[0]);
+    e.st.rets.push_back(base[1]);
+  }
+  e.st.frames.push_back(grcore_stack_frame_count(e.stack));
+  e.st.depths.push_back(grcore_context_guest_depth(e.ctx));
+  e.st.caps.push_back(grcore_deopt_reservation_capacity(e.reservation));
   if (e.on_probe) {
     e.on_probe(e);
   }
@@ -882,6 +1015,14 @@ __attribute__((noinline)) inline uint64_t Engine::h_probe(uint64_t v) {
  * frame count falls to `base_frames`. The interpreter never runs as a C callee of
  * compiled code: this is only called with no compiled frame on the native stack. */
 inline void Engine::interpret(Outcome & out) {
+  struct Restore {
+    Heap & h;
+    bool was;
+    ~Restore() { h.moving = was; }
+  } restore{heap, heap.moving};
+  if (interpreter_never_moves) {
+    heap.moving = false;
+  }
   for (;;) {
     size_t count = grcore_stack_frame_count(stack);
     if (count <= base_frames) {
@@ -942,8 +1083,30 @@ inline void Engine::interpret(Outcome & out) {
         u64 args[16];
         size_t n = in.args.size();
         for (size_t i = 0; i < n; i++) {
-          args[i] = L(in.args[i]);
+          args[i] = in.args[i] < 0 ? static_cast<u64>(F.imms[static_cast<size_t>(-1 - in.args[i])])
+                                  : L(in.args[i]);
         }
+        if (!push_frame(in.fn, args, n, false)) {
+          out.limit = true;
+          out.limit_depth = grcore_stack_frame_count(stack) - base_frames;
+          return;
+        }
+        break;
+      }
+      case K::TAILCALL:
+      case K::TAILCALLP: {
+        u64 args[16];
+        size_t n = in.args.size();
+        for (size_t i = 0; i < n; i++) {
+          args[i] = in.args[i] < 0 ? static_cast<u64>(F.imms[static_cast<size_t>(-1 - in.args[i])])
+                                  : L(in.args[i]);
+        }
+        if (!F.owns_scope) {
+          // A tail call replaces the frame, at the same guest depth.
+          pop_frame();
+        }
+        // From a frame that owns a scope it is a call, and the callee's result
+        // is returned from this frame when it comes back (the RET below).
         if (!push_frame(in.fn, args, n, false)) {
           out.limit = true;
           out.limit_depth = grcore_stack_frame_count(stack) - base_frames;
@@ -953,28 +1116,34 @@ inline void Engine::interpret(Outcome & out) {
       }
       case K::RET: {
         u64 v = L(in.a);
-        pop_frame();
-        if (grcore_stack_frame_count(stack) <= base_frames) {
-          out.finished = true;
-          out.value = v;
-          return;
+        for (;;) {
+          pop_frame();
+          if (grcore_stack_frame_count(stack) <= base_frames) {
+            out.finished = true;
+            out.value = v;
+            return;
+          }
+          GRCORE_FrameRef caller = grcore_stack_top(stack);
+          GRCORE_PollIdentity cid;
+          grcore_stack_identity(stack, caller, &cid);
+          uint64_t * CS = grcore_stack_slots(stack, caller);
+          int cpc = static_cast<int>(CS[0]);
+          const Ins & CI = funcs[cid.function].code[cpc];
+          if ((CI.k == K::TAILCALL || CI.k == K::TAILCALLP) && funcs[cid.function].owns_scope) {
+            continue; // the caller made its tail call as a call: it returns this
+          }
+          if (CI.k != K::CALL && CI.k != K::CALLP) {
+            // The caller was waiting at a call when the callee returned into the
+            // interpreter, so its frame must have been rebuilt to that call.
+            ADD_FAILURE() << "a caller's frame was not rebuilt: " << funcs[cid.function].name
+                          << " is at pc " << cpc;
+            out.failed = true;
+            return;
+          }
+          wr(CS, static_cast<int>(cid.function), CI.d, v);
+          CS[0] = cpc + 1;
+          break;
         }
-        GRCORE_FrameRef caller = grcore_stack_top(stack);
-        GRCORE_PollIdentity cid;
-        grcore_stack_identity(stack, caller, &cid);
-        uint64_t * CS = grcore_stack_slots(stack, caller);
-        int cpc = static_cast<int>(CS[0]);
-        const Ins & CI = funcs[cid.function].code[cpc];
-        if (CI.k != K::CALL && CI.k != K::CALLP) {
-          // The caller was waiting at a call when the callee returned into the
-          // interpreter, so its frame must have been rebuilt to that call.
-          ADD_FAILURE() << "a caller's frame was not rebuilt: " << funcs[cid.function].name
-                        << " is at pc " << cpc;
-          out.failed = true;
-          return;
-        }
-        wr(CS, static_cast<int>(cid.function), CI.d, v);
-        CS[0] = cpc + 1;
         break;
       }
     }

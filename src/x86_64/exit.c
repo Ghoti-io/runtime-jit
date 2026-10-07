@@ -115,7 +115,11 @@ void grjit_emit_call_slow_stub(GRJIT_Emit * e, const GRJIT_Pending * p) {
 
 void grjit_emit_call_exit_stub(GRJIT_Emit * e, const GRJIT_Pending * p) {
   GRJIT_Asm * a = &e->as;
-  const GRJIT_FrameState * state = &e->c.f->states[p->op->exit_state];
+  /* A tail call has the one frame state, which is both what its hook's site
+   * and its exit describe: the guest frame is still the caller's. */
+  const uint32_t exit_state =
+      p->op->exit_state != GRJIT_NO_STATE ? p->op->exit_state : p->op->state;
+  const GRJIT_FrameState * state = &e->c.f->states[exit_state];
   grjit_asm_bind(a, p->entry);
   GRJIT_Label ret = grjit_asm_label(a);
   grjit_asm_mov_ri(a, GRJIT_RSI, 0);
@@ -124,7 +128,7 @@ void grjit_emit_call_exit_stub(GRJIT_Emit * e, const GRJIT_Pending * p) {
   /* The exit is a site like a guard's, at the return address of the hook call:
    * the walk starts here, in this frame, in the state before the call. */
   grjit_emit_add_site(&e->c, (uint32_t)grjit_asm_size(a), GRCORE_SITE_GUARD,
-      state->identity, p->live_index, p->op->exit_state);
+      state->identity, p->live_index, exit_state);
   grjit_asm_mov_ri(a, GRJIT_RAX, 0);
   grjit_asm_jmp(a, e->ret_deopted);
 }

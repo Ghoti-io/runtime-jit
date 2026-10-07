@@ -163,6 +163,7 @@
 #define grjit_asm_init GHOTIIO_RUNTIME_JIT(grjit_asm_init)
 #define grjit_asm_jcc GHOTIIO_RUNTIME_JIT(grjit_asm_jcc)
 #define grjit_asm_jmp GHOTIIO_RUNTIME_JIT(grjit_asm_jmp)
+#define grjit_asm_jmp_r GHOTIIO_RUNTIME_JIT(grjit_asm_jmp_r)
 #define grjit_asm_label GHOTIIO_RUNTIME_JIT(grjit_asm_label)
 #define grjit_asm_label_offset GHOTIIO_RUNTIME_JIT(grjit_asm_label_offset)
 #define grjit_asm_lea GHOTIIO_RUNTIME_JIT(grjit_asm_lea)

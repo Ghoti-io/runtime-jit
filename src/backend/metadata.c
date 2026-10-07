@@ -207,7 +207,7 @@ GRJIT_Result grjit_metadata_build(const GRJIT_Function * f,
           GRCORE_CodeLocation l;
           l.kind = GRCORE_LOC_FRAME_SLOT;
           l.slot_kind = GRCORE_SLOT_VALUE;
-          l.value = GRJIT_ARGS_SLOT(f->vreg_count, shape.args_area, k);
+          l.value = GRJIT_ARGS_SLOT(GRJIT_SHAPE_REGS(f, shape), shape.args_area, k);
           l.representation = GRCORE_REPR_BITS;
           out->locations[loc_at + refs++] = l;
         }
@@ -218,7 +218,7 @@ GRJIT_Result grjit_metadata_build(const GRJIT_Function * f,
         const GRJIT_Operand * o = &r->op->args[k];
         if (o->kind == GRJIT_OPERAND_VREG && f->vregs[o->vreg].derived) {
           GRCORE_DerivedPointer * d = &out->derived[der_at + ders++];
-          d->slot = GRJIT_ARGS_SLOT(f->vreg_count, shape.args_area, k);
+          d->slot = GRJIT_ARGS_SLOT(GRJIT_SHAPE_REGS(f, shape), shape.args_area, k);
           d->base_slot = grjit_emit_slot(f->vregs[o->vreg].base);
           d->delta = f->vregs[o->vreg].delta;
         }

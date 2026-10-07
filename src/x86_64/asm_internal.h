@@ -178,6 +178,9 @@ void grjit_asm_pop(GRJIT_Asm * a, GRJIT_Reg r);
 void grjit_asm_sub_rsp(GRJIT_Asm * a, uint32_t bytes);
 void grjit_asm_add_rsp(GRJIT_Asm * a, uint32_t bytes);
 void grjit_asm_call_r(GRJIT_Asm * a, GRJIT_Reg r);
+/** `jmp r64`: an indirect jump, for a tail call, which enters the callee with
+ *  the stack and frame register already set as a call would leave them. */
+void grjit_asm_jmp_r(GRJIT_Asm * a, GRJIT_Reg r);
 void grjit_asm_ret(GRJIT_Asm * a);
 /** `ret imm16`: returns and pops `bytes` more (the callee pops its own stack
  *  arguments in the internal convention). */

@@ -140,6 +140,8 @@ std::vector<Case> cases() {
       {"add rsp, 32", [](A a) { grjit_asm_add_rsp(a, 32); }, {0x48, 0x83, 0xC4, 0x20}, "add rsp,0x20"},
       {"call rax", [](A a) { grjit_asm_call_r(a, GRJIT_RAX); }, {0xFF, 0xD0}, "call rax"},
       {"call r11", [](A a) { grjit_asm_call_r(a, GRJIT_R11); }, {0x41, 0xFF, 0xD3}, "call r11"},
+      {"jmp rax", [](A a) { grjit_asm_jmp_r(a, GRJIT_RAX); }, {0xFF, 0xE0}, "jmp rax"},
+      {"jmp r11", [](A a) { grjit_asm_jmp_r(a, GRJIT_R11); }, {0x41, 0xFF, 0xE3}, "jmp r11"},
       {"ret", [](A a) { grjit_asm_ret(a); }, {0xC3}, "ret"},
       {"leave", [](A a) { grjit_asm_leave(a); }, {0xC9}, "leave"},
       {"ud2", [](A a) { grjit_asm_ud2(a); }, {0x0F, 0x0B}, "ud2"},

@@ -371,9 +371,7 @@ TEST(TailIr, ATailCallMakesTwoSitesTheHookWithItsArgumentsAndTheExitWithOnlyItsS
   EXPECT_EQ(s.at(1), (std::vector<GRJIT_VReg>{keep}));
 }
 
-TEST(TailIr, NoBackendEmitsATailCallBeforeTheOneThatHasThem) {
-  // Replaced by the emission tests of test_tail.cpp when the x86-64 emitter
-  // lands: until then every target refuses before a byte is emitted.
+TEST(TailIr, OnlyTheX86_64SysVBackendEmitsATailCallAndTheOthersRefuseBeforeAByte) {
   B b("caller", 2);
   GRJIT_CallHooks h = all_hooks();
   GRJIT_VReg x = b.param(GRJIT_TYPE_I64);
@@ -381,11 +379,16 @@ TEST(TailIr, NoBackendEmitsATailCallBeforeTheOneThatHasThem) {
   b.at(b.block());
   b.tail_call_slot(&g_entry_word, 1, {V(x)}, kId, st2(x));
   Fn f(b.finish());
-  for (GRJIT_Arch arch : {GRJIT_ARCH_X86_64, GRJIT_ARCH_ARM64, GRJIT_ARCH_X86_64_WIN64}) {
-    GRJIT_Emitted e;
+  GRJIT_Emitted e;
+  EXPECT_EQ(grjit_emit_for(GRJIT_ARCH_X86_64, f, grjit_allocator_default(), nullptr, nullptr, 0x40, &e),
+      GRJIT_OK);
+  EXPECT_GT(e.size, 0u);
+  grjit_emitted_free(&e);
+  for (GRJIT_Arch arch : {GRJIT_ARCH_ARM64, GRJIT_ARCH_X86_64_WIN64}) {
     EXPECT_EQ(grjit_emit_for(arch, f, grjit_allocator_default(), nullptr, nullptr, 0x40, &e),
         GRJIT_ERR_UNSUPPORTED);
     EXPECT_EQ(e.size, 0u);
+    EXPECT_EQ(e.bytes, nullptr);
   }
 }
 
