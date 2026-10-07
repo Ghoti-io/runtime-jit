@@ -433,12 +433,26 @@ void grjit_a64_sub_imm(GRJIT_A64Asm * a, GRJIT_A64Reg rd, GRJIT_A64Reg rn,
       ((uint32_t)rn << 5) | (uint32_t)rd);
 }
 
+/* `add`/`sub` with an extended register (`uxtx`, so the whole of `rm`): the form in which `sp`
+ * may be the destination or the source, which the shifted-register form cannot name (its
+ * register 31 is the zero register). */
+void grjit_a64_add_uxtx(GRJIT_A64Asm * a, GRJIT_A64Reg rd, GRJIT_A64Reg rn, GRJIT_A64Reg rm) {
+  grjit_a64_word(a, 0x8B206000u | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | (uint32_t)rd);
+}
+
+void grjit_a64_sub_uxtx(GRJIT_A64Asm * a, GRJIT_A64Reg rd, GRJIT_A64Reg rn, GRJIT_A64Reg rm) {
+  grjit_a64_word(a, 0xCB206000u | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | (uint32_t)rd);
+}
+
 /* An `sp` adjustment is the high part (a 12-bit immediate shifted by 12) and
  * the low part, each a multiple of 16 when `bytes` is, so `sp` stays aligned
- * between the two instructions. */
+ * between the two instructions. From 16 MiB up the immediates cannot hold it: the amount goes
+ * in x17 and `sp` moves in one instruction, so the target has no frame it refuses that
+ * x86-64 compiles. */
 void grjit_a64_sub_sp(GRJIT_A64Asm * a, uint32_t bytes) {
   if (bytes >= (UINT32_C(1) << 24)) {
-    fail(a, GRJIT_A64_LIMIT);
+    grjit_a64_mov_ri(a, GRJIT_A64_X17, bytes);
+    grjit_a64_sub_uxtx(a, GRJIT_A64_SP, GRJIT_A64_SP, GRJIT_A64_X17);
     return;
   }
   if (bytes >> 12) {
@@ -451,7 +465,8 @@ void grjit_a64_sub_sp(GRJIT_A64Asm * a, uint32_t bytes) {
 
 void grjit_a64_add_sp(GRJIT_A64Asm * a, uint32_t bytes) {
   if (bytes >= (UINT32_C(1) << 24)) {
-    fail(a, GRJIT_A64_LIMIT);
+    grjit_a64_mov_ri(a, GRJIT_A64_X17, bytes);
+    grjit_a64_add_uxtx(a, GRJIT_A64_SP, GRJIT_A64_SP, GRJIT_A64_X17);
     return;
   }
   if (bytes >> 12) {

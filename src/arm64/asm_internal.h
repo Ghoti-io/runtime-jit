@@ -181,8 +181,12 @@ void grjit_a64_add_imm(GRJIT_A64Asm * a, GRJIT_A64Reg rd, GRJIT_A64Reg rn,
     uint32_t imm12, bool shift12);
 void grjit_a64_sub_imm(GRJIT_A64Asm * a, GRJIT_A64Reg rd, GRJIT_A64Reg rn,
     uint32_t imm12, bool shift12);
-/** `sp -= bytes` / `sp += bytes` for a multiple of 16 below 16 MiB, in at most
- *  two instructions. Over that is ::GRJIT_A64_LIMIT. */
+/** `add`/`sub` of an extended register (`uxtx`): the form that can name `sp`. */
+void grjit_a64_add_uxtx(GRJIT_A64Asm * a, GRJIT_A64Reg rd, GRJIT_A64Reg rn, GRJIT_A64Reg rm);
+void grjit_a64_sub_uxtx(GRJIT_A64Asm * a, GRJIT_A64Reg rd, GRJIT_A64Reg rn, GRJIT_A64Reg rm);
+/** `sp -= bytes` / `sp += bytes` for a multiple of 16: at most two instructions below
+ *  16 MiB, and from there up `x17` holds the amount (three to six words, one of them the
+ *  adjustment), so there is no size it refuses. */
 void grjit_a64_sub_sp(GRJIT_A64Asm * a, uint32_t bytes);
 void grjit_a64_add_sp(GRJIT_A64Asm * a, uint32_t bytes);
 

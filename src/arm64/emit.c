@@ -185,13 +185,17 @@ static void emit_call(GRJIT_A64Emit * e, const GRJIT_Op * op) {
 /* ---- Calls between compiled functions, tail calls and natives (AD-28) -------------------- */
 
 /* `rd = base + offset` for any offset a frame can have: one instruction when it fits an
- * immediate, two when it needs the shifted high part. `base` is `sp` or `x29`. */
+ * immediate, two when it needs the shifted high part, and from 16 MiB up `x17` holds the
+ * magnitude and one extended-register instruction applies it (the native-stack check of a
+ * native that declares up to the 1 GiB the limits allow, and a frame up to the same ceiling,
+ * are as legal here as on x86-64). `base` is `sp` or `x29`; `rd` may be `sp`. */
 static void lea(GRJIT_A64Emit * e, GRJIT_A64Reg rd, GRJIT_A64Reg base, int64_t offset) {
   A * a = &e->as;
   const bool neg = offset < 0;
   const uint64_t mag = neg ? (uint64_t)(-offset) : (uint64_t)offset;
   if (mag >= (UINT64_C(1) << 24)) {
-    e->c.error = GRJIT_ERR_LIMIT;
+    grjit_a64_mov_ri(a, GRJIT_A64_X17, mag);
+    (neg ? grjit_a64_sub_uxtx : grjit_a64_add_uxtx)(a, rd, base, GRJIT_A64_X17);
     return;
   }
   GRJIT_A64Reg from = base;

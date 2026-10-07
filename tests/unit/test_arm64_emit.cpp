@@ -306,7 +306,7 @@ TEST(Arm64Frame, AFrameAtTheDefaultCapRunsAndOneOverIsALimit) {
   EXPECT_EQ(too_big.e.bytes, nullptr);
 }
 
-TEST(Arm64Frame, ARaisedFrameCapPastWhatOneSubtractionPairEncodesIsALimitNotATruncation) {
+TEST(Arm64Frame, ARaisedFrameCapPastWhatOneSubtractionPairEncodesIsHeldInX17AndNeverTruncatedOrRefused) {
   GRJIT_Limits limits{};
   limits.max_vregs = 3000000;
   limits.max_frame_bytes = 1u << 29;
@@ -320,8 +320,38 @@ TEST(Arm64Frame, ARaisedFrameCapPastWhatOneSubtractionPairEncodesIsALimitNotATru
   b.ret(V(last));
   Fn f(b.finish());
   Emitted em(f, &limits);
-  EXPECT_EQ(em.result, GRJIT_ERR_LIMIT);
-  EXPECT_EQ(em.e.bytes, nullptr);
+  ASSERT_TRUE(em.ok()) << "x86-64 compiles this frame, so does arm64: " << grjit_result_string(em.result);
+  const uint64_t frame = em.e.meta.meta.frame_bytes;
+  EXPECT_GT(frame, uint64_t{1} << 24);
+  // The prologue: stp, mov x29, sp, then the amount in x17 (movz, movk) and one `sub sp, sp, x17`.
+  ASSERT_GE(em.words(), 6u);
+  EXPECT_EQ(em.word(0), 0xA9BF7BFDu);
+  EXPECT_EQ(em.word(1), 0x910003FDu);
+  size_t sub = 0;
+  for (size_t i = 2; i < em.words() && sub == 0; i++) {
+    if (em.word(i) == 0xCB3163FFu) { // sub sp, sp, x17
+      sub = i;
+    }
+  }
+  ASSERT_NE(sub, 0u) << "sp moves by x17, once";
+  uint64_t value = 0;
+  size_t movs = 0;
+  for (size_t i = sub; i-- > 2;) {
+    const uint32_t w = em.word(i);
+    if ((w & 0xFF80001Fu) != 0xD2800011u && (w & 0xFF80001Fu) != 0xF2800011u) { // movz/movk x17
+      break;
+    }
+    movs++;
+    const unsigned hw = (w >> 21) & 3;
+    const uint64_t imm16 = (w >> 5) & 0xFFFF;
+    value |= imm16 << (16 * hw);
+    if ((w & 0xFF800000u) == 0xD2800000u) {
+      break;
+    }
+  }
+  EXPECT_GE(movs, 1u);
+  EXPECT_EQ(value, frame) << "the amount in x17 is the whole frame";
+  EXPECT_EQ(frame % 16, 0u);
 }
 
 /* ---- Branches --------------------------------------------------------------------- */

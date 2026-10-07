@@ -133,6 +133,18 @@ std::vector<Case> cases() {
       {"add sp, sp, #4095, lsl #12", [](A a) { grjit_a64_add_imm(a, GRJIT_A64_SP, GRJIT_A64_SP, 4095, true); },
           {0xFF, 0xFF, 0x7F, 0x91},
           "add sp, sp, #0xfff, lsl #12"},
+      {"add_uxtx sp, sp, x17", [](A a) { grjit_a64_add_uxtx(a, GRJIT_A64_SP, GRJIT_A64_SP, GRJIT_A64_X17); },
+          {0xFF, 0x63, 0x31, 0x8B},
+          "add sp, sp, x17"},
+      {"sub_uxtx sp, sp, x17", [](A a) { grjit_a64_sub_uxtx(a, GRJIT_A64_SP, GRJIT_A64_SP, GRJIT_A64_X17); },
+          {0xFF, 0x63, 0x31, 0xCB},
+          "sub sp, sp, x17"},
+      {"add_uxtx x16, x29, x17", [](A a) { grjit_a64_add_uxtx(a, GRJIT_A64_X16, GRJIT_A64_FP, GRJIT_A64_X17); },
+          {0xB0, 0x63, 0x31, 0x8B},
+          "add x16, x29, x17, uxtx"},
+      {"sub_uxtx x16, sp, x17", [](A a) { grjit_a64_sub_uxtx(a, GRJIT_A64_X16, GRJIT_A64_SP, GRJIT_A64_X17); },
+          {0xF0, 0x63, 0x31, 0xCB},
+          "sub x16, sp, x17"},
       {"sub_sp 32", [](A a) { grjit_a64_sub_sp(a, 32); },
           {0xFF, 0x83, 0x00, 0xD1},
           "sub sp, sp, #0x20"},
@@ -585,7 +597,7 @@ TEST(AsmArm64, AnImmediateTakesAsManyInstructionsAsItHasPiecesThatDifferFromTheS
   }
 }
 
-TEST(AsmArm64, SubSpIsAMultipleOfSixteenAtEveryStepAndRefusesWhatItCannotEncode) {
+TEST(AsmArm64, SubSpAndAddSpAreAMultipleOfSixteenAtEveryStepAndHaveNoSizeTheyRefuse) {
   for (uint32_t bytes : {16u, 32u, 4080u, 4096u, 4112u, 65536u, 1u << 20, (1u << 20) + 16, (1u << 24) - 16}) {
     Asm as;
     grjit_a64_sub_sp(&as.a, bytes);
@@ -600,10 +612,32 @@ TEST(AsmArm64, SubSpIsAMultipleOfSixteenAtEveryStepAndRefusesWhatItCannotEncode)
     }
     EXPECT_EQ(total, bytes);
   }
-  Asm too_big;
-  grjit_a64_sub_sp(&too_big.a, 1u << 24);
-  EXPECT_EQ(grjit_a64_status(&too_big.a), GRJIT_A64_LIMIT);
-  EXPECT_EQ(too_big.words(), 0u);
+  // From 16 MiB the amount is in x17 and sp moves once, so it is never misaligned and never refused.
+  for (uint32_t bytes : {1u << 24, (1u << 24) + 16, 1u << 26, 1u << 29, 1u << 30, (1u << 30) + 4096}) {
+    for (int add = 0; add < 2; add++) {
+      Asm as;
+      (add ? grjit_a64_add_sp : grjit_a64_sub_sp)(&as.a, bytes);
+      EXPECT_EQ(grjit_a64_status(&as.a), GRJIT_A64_OK) << bytes;
+      ASSERT_GE(as.words(), 2u);
+      const uint32_t last = as.word(as.words() - 1);
+      EXPECT_EQ(last, (add ? 0x8B3163FFu : 0xCB3163FFu)) << "the last word moves sp by x17, once";
+      // The words before it build the amount in x17 (movz then movk's) and nothing else.
+      uint64_t value = 0;
+      for (size_t i = 0; i + 1 < as.words(); i++) {
+        const uint32_t w = as.word(i);
+        ASSERT_EQ(w & 0x1F, 17u) << "writes only x17";
+        const unsigned hw = (w >> 21) & 3;
+        const uint64_t imm16 = (w >> 5) & 0xFFFF;
+        if ((w & 0xFF800000u) == 0xD2800000u) {
+          value = imm16 << (16 * hw);
+        } else {
+          ASSERT_EQ(w & 0xFF800000u, 0xF2800000u) << "movz or movk";
+          value = (value & ~(UINT64_C(0xFFFF) << (16 * hw))) | (imm16 << (16 * hw));
+        }
+      }
+      EXPECT_EQ(value, bytes);
+    }
+  }
 }
 
 TEST(AsmArm64, AMemoryOffsetThatFitsNoImmediateGoesThroughX17AndNeverTruncates) {

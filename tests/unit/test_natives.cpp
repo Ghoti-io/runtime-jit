@@ -23,6 +23,7 @@
 #include "../../src/code/code_internal.h"
 
 #include <array>
+#include <cstring>
 #include <map>
 #include <random>
 #include <set>
@@ -684,6 +685,59 @@ TEST(Natives, TheNativeStackIsCheckedAtTheCallSiteForTheStackArgumentsAndTheNati
     }
   }
   EXPECT_FALSE(g_bad_hook_ctx) << "the deopt hook is handed the context the code was called with";
+}
+
+TEST(Natives, ANativeThatDeclaresSixteenMebibytesOrMoreIsCheckedToTheByteOnEveryTargetUpToTheLimitsCeiling) {
+  JitWorld w;
+  g_hook_ctx = w.ctx;
+  g_bad_hook_ctx = false;
+  GRJIT_Limits limits;
+  grjit_limits_default(&limits);
+  limits.max_native_stack_bytes = size_t{1} << 30; // the ceiling natives.h documents
+  NativeTab t(&limits);
+  uintptr_t * limit = reinterpret_cast<uintptr_t *>(
+      reinterpret_cast<char *>(w.ctx) + grcore_jit_layout()->native_limit_offset);
+  // Around the point where an arm64 immediate stops holding the offset (2^24) and well past it.
+  for (uint32_t declared : {(1u << 24) - 1, 1u << 24, (1u << 24) + 100, 1u << 26, 1u << 29, 1u << 30}) {
+    for (int with_status = 0; with_status < 2; with_status++)
+    for (size_t n : {size_t{0}, size_t{6}, size_t{9}}) {
+      SCOPED_TRACE(declared);
+      SCOPED_TRACE(with_status);
+      SCOPED_TRACE(n);
+      std::vector<GRJIT_Type> types(n, TI);
+      uint32_t id = t.add(align_stub(with_status != 0), types, kNoResult, with_status != 0 ? GRJIT_NATIVE_STATUS : 0,
+          declared);
+      Bare bare(t, id, types, kNoResult, with_status != 0);
+      Compiled c(bare.f, w.pages());
+      ASSERT_TRUE(c) << "a native's declared use is a limit of the descriptor, not of the target: "
+                     << static_cast<int>(c.result);
+      std::vector<uint64_t> args(n, 1);
+      *limit = 0;
+      grjit_test_entry_count = 0;
+      ASSERT_EQ(c.run(w.ctx, args).exit, uint32_t{GRJIT_EXIT_RETURNED});
+      ASSERT_EQ(grjit_test_entry_count, 1u);
+      const uintptr_t entry = grjit_test_entry_rsp[0];
+      ASSERT_GT(entry, uintptr_t{declared} + 4096) << "the arithmetic below does not wrap";
+      const uintptr_t lowest = entry + kNativeEntrySpBias - declared;
+      for (long delta : {-1L, 0L, 1L}) {
+        *limit = static_cast<uintptr_t>(static_cast<long>(lowest) + delta);
+        g_deopts = 0;
+        grjit_test_entry_count = 0;
+        auto run = c.run(w.ctx, args);
+        if (delta <= 0) {
+          EXPECT_EQ(run.exit, uint32_t{GRJIT_EXIT_RETURNED}) << "limit " << delta;
+          EXPECT_EQ(grjit_test_entry_count, 1u);
+          EXPECT_EQ(g_deopts, 0);
+        } else {
+          EXPECT_EQ(run.exit, uint32_t{GRJIT_EXIT_DEOPT}) << "one byte past what fits is an exit";
+          EXPECT_EQ(grjit_test_entry_count, 0u) << "the native is not called";
+          EXPECT_EQ(g_deopts, 1);
+        }
+      }
+      *limit = 0;
+    }
+  }
+  EXPECT_FALSE(g_bad_hook_ctx);
 }
 
 /* ===== The engine's side, played by the fixture ===================================== */
@@ -2895,6 +2949,44 @@ TEST(Natives, Win64RefusesANativeCallBeforeAByteAndTheOtherTwoEmitItOnAnyHost) {
   EXPECT_EQ(e.bytes, nullptr);
   EXPECT_EQ(alloc.calls, 0) << "and nothing was even asked for";
   EXPECT_TRUE(grjit_backend_calls_available());
+}
+
+/* The same boundary, read in the code, on any host: the arm64 check holds a need of 2^24 or more in x17 (the
+ * immediates stop there) and applies it in one instruction, and nothing is refused that x86-64 emits. */
+TEST(Natives, TheNativeStackCheckOfALargeNeedIsEmittedForBothTargetsAndArm64PutsItInX17FromSixteenMebibytes) {
+  GRJIT_Limits limits;
+  grjit_limits_default(&limits);
+  limits.max_native_stack_bytes = size_t{1} << 30;
+  NativeTab t(&limits);
+  for (uint32_t declared : {(1u << 24) - 16, (1u << 24) - 1, 1u << 24, (1u << 24) + 100, 1u << 26, 1u << 29, 1u << 30}) {
+    SCOPED_TRACE(declared);
+    uint32_t id = t.add(reinterpret_cast<const void *>(sums()[1]), {GRJIT_TYPE_I64}, GRJIT_TYPE_I64, 0, declared);
+    B b("native", 1);
+    GRJIT_VReg x = b.param(GRJIT_TYPE_I64);
+    b.callable(hooks());
+    b.natives(t);
+    b.at(b.block());
+    b.call_native(x, id, {V(x)}, GRCORE_PollIdentity{0, 0}, {grjit_frame_slot_vreg(x)});
+    b.ret(V(x));
+    Fn f(b.finish());
+    for (GRJIT_Arch arch : {GRJIT_ARCH_X86_64, GRJIT_ARCH_ARM64}) {
+      GRJIT_Emitted e;
+      ASSERT_EQ(grjit_emit_for(arch, f, grjit_allocator_default(), nullptr, nullptr, 0x40, &e), GRJIT_OK)
+          << "a native's declared use is a limit of the descriptor, not of the target " << arch;
+      if (arch == GRJIT_ARCH_ARM64) {
+        // One argument is in a register, so the area is empty and the need is the declaration: `sub x16, sp, x17`
+        // from 2^24 up, an immediate form below it.
+        bool uxtx = false;
+        for (size_t i = 0; i + 4 <= e.size; i += 4) {
+          uint32_t w;
+          std::memcpy(&w, e.bytes + i, 4);
+          uxtx = uxtx || w == 0xCB3163F0u;
+        }
+        EXPECT_EQ(uxtx, declared >= (1u << 24)) << "the stack check of a need of " << declared << " bytes";
+      }
+      grjit_emitted_free(&e);
+    }
+  }
 }
 
 #else // not x86-64 Linux

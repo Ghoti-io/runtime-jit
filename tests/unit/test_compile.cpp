@@ -7,6 +7,7 @@
  * Copyright 2026 by Corey Pennycuff
  */
 
+#include <pthread.h>
 #include "test_helpers.h"
 
 #include "../../src/code/code_internal.h"
@@ -484,6 +485,87 @@ TEST(Compile, ATwoMebibyteFrameIsALimitError) {
   Compiled c(f, w.pages(), nullptr, &limits);
   EXPECT_EQ(c.result, GRJIT_ERR_LIMIT);
   EXPECT_EQ(w.blocks_in_use(), 0u);
+}
+
+namespace {
+/* A frame of more than 16 MiB, in a thread of its own with a stack to hold it. */
+struct BigFrame {
+  size_t vregs;
+  bool ok = false;
+  int result = 0;
+  uint64_t value = 0;
+  bool arm64_through_x17 = false; // the arm64 code adjusts sp by x17 (a frame of 2^24 bytes or more)
+  int cross_result[2] = {0, 0};   // grjit_emit_for for x86-64 and arm64, whatever this host is
+};
+
+void * run_big_frame(void * arg) {
+  BigFrame * bf = static_cast<BigFrame *>(arg);
+  JitWorld w;
+  GRJIT_Limits limits{};
+  limits.max_vregs = bf->vregs + 8;
+  limits.max_frame_bytes = size_t{64} << 20;
+  B b("huge", 0, &limits);
+  GRJIT_VReg first = b.reg();
+  GRJIT_VReg last = first;
+  for (size_t i = 1; i < bf->vregs; i++) {
+    last = b.reg();
+  }
+  GRJIT_VReg r = b.reg();
+  b.at(b.block());
+  b.cnst(first, 5);
+  b.cnst(last, 7);
+  b.bin(GRJIT_OP_ADD, r, V(first), V(last));
+  b.ret(V(r));
+  Fn f(b.finish());
+  {
+    const GRJIT_Arch arches[2] = {GRJIT_ARCH_X86_64, GRJIT_ARCH_ARM64};
+    for (int k = 0; k < 2; k++) {
+      GRJIT_Emitted e;
+      bf->cross_result[k] = grjit_emit_for(arches[k], f, grjit_allocator_default(), &limits, nullptr, 0x40, &e);
+      if (k == 1 && bf->cross_result[k] == GRJIT_OK) {
+        for (size_t i = 0; i + 4 <= e.size; i += 4) {
+          uint32_t word;
+          std::memcpy(&word, e.bytes + i, 4);
+          bf->arm64_through_x17 = bf->arm64_through_x17 || word == 0xCB3163FFu; // sub sp, sp, x17
+        }
+      }
+      grjit_emitted_free(&e);
+    }
+  }
+  Compiled c(f, w.pages(), nullptr, &limits);
+  bf->result = c.result;
+  if (c) {
+    bf->value = c.run(w.ctx).out[0];
+    bf->ok = true;
+  }
+  return nullptr;
+}
+} // namespace
+
+TEST(Compile, AFrameOfMoreThanSixteenMebibytesCompilesAndRunsOnEveryTargetAsOneUnderItDoes) {
+  GRJIT_REQUIRE_BACKEND();
+  // 2^24 bytes of frame is 2,097,152 words: three fixed slots and one per register. One word under it and a
+  // few over it, so the arm64 frame adjustment and the slot offsets cross the point where an add/sub
+  // immediate (24 bits) stops holding them.
+  for (size_t vregs : {size_t{2097100}, size_t{2097200}, size_t{2300000}}) {
+    SCOPED_TRACE(vregs);
+    BigFrame bf;
+    bf.vregs = vregs;
+    pthread_attr_t attr;
+    ASSERT_EQ(pthread_attr_init(&attr), 0);
+    ASSERT_EQ(pthread_attr_setstacksize(&attr, size_t{96} << 20), 0);
+    pthread_t th;
+    ASSERT_EQ(pthread_create(&th, &attr, run_big_frame, &bf), 0);
+    ASSERT_EQ(pthread_join(th, nullptr), 0);
+    pthread_attr_destroy(&attr);
+    EXPECT_EQ(bf.cross_result[0], GRJIT_OK) << "x86-64 emits it";
+    EXPECT_EQ(bf.cross_result[1], GRJIT_OK) << "and so does arm64, on any host";
+    // 2^24 bytes of frame is 2,097,152 words less the three fixed ones: the first count is under it.
+    EXPECT_EQ(bf.arm64_through_x17, vregs + 1 + 3 >= (size_t{1} << 21) - 1) << "sp moves through x17 from 2^24 bytes";
+    ASSERT_TRUE(bf.ok) << "a frame is a limit of the cap, not of the target: "
+                       << grjit_result_string(static_cast<GRJIT_Result>(bf.result));
+    EXPECT_EQ(bf.value, 12u);
+  }
 }
 
 TEST(Compile, CodeOverTheByteCapIsALimitErrorAndNothingIsMapped) {
