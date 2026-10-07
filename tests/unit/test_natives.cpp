@@ -1630,7 +1630,11 @@ TEST(Natives, NestedGuestCodeThatClearsTheEntrySlotOfTheOuterFunctionLeavesItsCo
   Nat n = register_natives(e);
   int g = e.reserve(), outer = e.reserve(), top = e.reserve();
   std::vector<long> released_during;
-  e.on_collect = [&](Engine & en) { released_during.push_back(*en.released); };
+  std::vector<size_t> retired_during;
+  e.on_collect = [&](Engine & en) {
+    released_during.push_back(*en.released);
+    retired_during.push_back(grcore_code_retired_count(en.ctx));
+  };
   {
     // G clears `outer`'s slot (retiring the code a frame of the outer run waits in, under this very
     // native), collects, and returns.
@@ -1668,6 +1672,11 @@ TEST(Natives, NestedGuestCodeThatClearsTheEntrySlotOfTheOuterFunctionLeavesItsCo
   for (long r : released_during) {
     EXPECT_EQ(r, 0) << "nothing is released while a JIT record is open and a frame waits in the code";
   }
+  ASSERT_EQ(retired_during.size(), released_during.size());
+  for (size_t r : retired_during) {
+    EXPECT_EQ(r, 2u) << "the slot's reference and the registry's, both retired and held while the frame waits";
+  }
+  EXPECT_EQ(grcore_code_retired_count(e.ctx), 0u) << "and gone once the record left";
   EXPECT_EQ(e.st.deopts, 0);
   EXPECT_EQ(*e.released, 1) << "the retired code is released once the last JIT record has left";
   EXPECT_EQ(e.heap.poisoned_reads, 0);
