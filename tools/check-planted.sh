@@ -26,6 +26,13 @@
 #      and not restored by callable code
 #  10  the native-stack check that leaves out the   -> testCalls
 #      frame it is about to make
+#  11  the last stack argument of a tail call is    -> testTail
+#      not copied to the callee's place
+#  12  the tail hook's site leaves its arguments    -> testTail
+#      area out of the stack map
+#  13  no padding between a frame's registers and   -> testTail
+#      its arguments area (the staging area
+#      overlaps the place the stack arguments go)
 #
 # An entry is `n:test` or `n:test:filter`. With a filter the test binary runs
 # only that gtest (control and planted alike), which is how defect 4 is caught

@@ -170,11 +170,29 @@ M = [
      "src/backend/metadata.c",
      "    der_total += push_derived_args(f, &recs[i]);",
      "    der_total += 0 * push_derived_args(f, &recs[i]);"),
+
+    # Tail calls (story 5).
+    ("a refused tail hook is ignored: the frame is replaced although the guest frame was not", "jit",
+     "src/x86_64/emit.c",
+     "  grjit_asm_jcc(a, GRJIT_COND_NE, exit);\n\n  /* The frame replacement. */",
+     "  (void)exit;\n\n  /* The frame replacement. */"),
+    ("a tail call does not store the walk start before its hook", "jit",
+     "src/x86_64/emit.c",
+     "  GRJIT_Label hook_ret = grjit_asm_label(a);\n  grjit_emit_store_walk_cell(e, hook_ret);",
+     "  GRJIT_Label hook_ret = grjit_asm_label(a);"),
+    ("a tail call leaves the return address where it was, not where the callee's return pops it from", "jit",
+     "src/x86_64/emit.c",
+     "  grjit_asm_store64(a, GRJIT_RBP, ra_new, GRJIT_R11);",
+     "  grjit_asm_store64(a, GRJIT_RBP, 8, GRJIT_R11);"),
+    ("the verifier does not need a tail hook for a tail call", "jit",
+     "src/ir/verify.c",
+     "        if (h->tail == NULL || (slot && h->compile == NULL)) {",
+     "        if (slot && h->compile == NULL) {"),
 ]
 
 # What each library's tests are.
 CORE_TESTS = ['testRebuild', 'testRegistry', 'testCompiled']
-JIT_TESTS = ['testCalls', 'testCall_ir']
+JIT_TESTS = ['testCalls', 'testCall_ir', 'testTail', 'testTail_ir']
 
 # Edits whose verdict is known, for --self-test: (name, expected, file, old, new).
 SELF = [

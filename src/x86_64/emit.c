@@ -419,7 +419,15 @@ static void emit_tail_call(GRJIT_Emit * e, const GRJIT_Op * op) {
   grjit_asm_load64(a, GRJIT_R10, GRJIT_RBP, GRJIT_SLOT_CTX);
   grjit_asm_load64(a, GRJIT_R11, GRJIT_RBP, 8);
   grjit_asm_load64(a, GRJIT_RAX, GRJIT_RBP, 0);
-  for (size_t i = GRJIT_INTERNAL_REG_ARGS; i < n; i++) {
+  size_t copy_to = n;
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 11
+  /* Planted defect 11 (tests only): the last stack argument is not copied, so
+   * the callee reads what the destination held. */
+  if (copy_to > GRJIT_INTERNAL_REG_ARGS) {
+    copy_to--;
+  }
+#endif
+  for (size_t i = GRJIT_INTERNAL_REG_ARGS; i < copy_to; i++) {
     grjit_asm_load64(a, GRJIT_RDI, GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.args_area, i));
     grjit_asm_store64(a, GRJIT_RBP,
         (int32_t)(ra_new + 8 + 8 * (int64_t)(i - GRJIT_INTERNAL_REG_ARGS)), GRJIT_RDI);

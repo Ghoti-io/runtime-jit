@@ -81,6 +81,11 @@ void grjit_callable_shape(const GRJIT_Function * f, GRJIT_CallableShape * out) {
          * `8 + in_A - in_T` above it. */
         int64_t in_t = grjit_stack_arg_bytes(op->arg_count);
         int64_t want = (in_t - (int64_t)out->incoming_bytes) / 8 - ((int64_t)f->vreg_count + 4);
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 13
+        /* Planted defect 13 (tests only): no padding, so the staging area
+         * overlaps the place the stack arguments are copied to. */
+        want = 0;
+#endif
         if (want > 0 && (size_t)want > out->pad) {
           out->pad = (size_t)want;
         }

@@ -56,9 +56,26 @@ static bool rec_is_push(const GRJIT_SiteRec * rec) {
   return rec->op != NULL && rec->kind == GRCORE_SITE_GC_POINT_FRAME_PUSH;
 }
 
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 12
+/* Planted defect 12 (tests only): the site of a tail call's hook leaves its
+ * arguments area out of the stack map, so a collection in the hook leaves the
+ * references it copied stale for the hook to read. */
+static bool rec_omits_area(const GRJIT_SiteRec * rec) {
+  return rec->op->kind == GRJIT_OP_TAIL_CALL_SLOT || rec->op->kind == GRJIT_OP_TAIL_CALL_PTR;
+}
+#else
+static bool rec_omits_area(const GRJIT_SiteRec * rec) {
+  (void)rec;
+  return false;
+}
+#endif
+
 static size_t push_ref_args(const GRJIT_Function * f, const GRJIT_SiteRec * rec) {
   size_t n = 0;
   if (rec->op == NULL || rec->kind != GRCORE_SITE_GC_POINT_FRAME_PUSH) {
+    return 0;
+  }
+  if (rec_omits_area(rec)) {
     return 0;
   }
   for (size_t k = 0; k < rec->op->arg_count; k++) {
@@ -77,7 +94,7 @@ static size_t push_ref_args(const GRJIT_Function * f, const GRJIT_SiteRec * rec)
  * derived pointer. */
 static size_t push_derived_args(const GRJIT_Function * f, const GRJIT_SiteRec * rec) {
   size_t n = 0;
-  if (!rec_is_push(rec)) {
+  if (!rec_is_push(rec) || rec_omits_area(rec)) {
     return 0;
   }
   for (size_t k = 0; k < rec->op->arg_count; k++) {
@@ -200,7 +217,7 @@ GRJIT_Result grjit_metadata_build(const GRJIT_Function * f,
         d->delta = info->delta;
       }
     }
-    if (rec_is_push(r)) {
+    if (rec_is_push(r) && !rec_omits_area(r)) {
       for (size_t k = 0; k < r->op->arg_count; k++) {
         const GRJIT_Operand * o = &r->op->args[k];
         if (o->kind == GRJIT_OPERAND_VREG && f->vregs[o->vreg].type == GRJIT_TYPE_REF) {
@@ -213,7 +230,7 @@ GRJIT_Result grjit_metadata_build(const GRJIT_Function * f,
         }
       }
     }
-    if (rec_is_push(r)) {
+    if (rec_is_push(r) && !rec_omits_area(r)) {
       for (size_t k = 0; k < r->op->arg_count; k++) {
         const GRJIT_Operand * o = &r->op->args[k];
         if (o->kind == GRJIT_OPERAND_VREG && f->vregs[o->vreg].derived) {
