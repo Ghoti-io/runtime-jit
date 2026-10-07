@@ -173,6 +173,7 @@ TEST(Tail, EveryPairOfCallerParametersAndCalleeArgumentsFromZeroToSixteenArrives
         SCOPED_TRACE(testing::Message() << (through_pointer ? "pointer" : "slot") << " params="
                                         << params << " callee args=" << t_args);
         Engine e;
+        e.record_hook_args = true;
         int callee = add_callee(e, t_args);
         ASSERT_TRUE(e.compile_fn(callee));
         int caller = add_tail_caller(e, params, callee, t_args, through_pointer != 0);
@@ -204,6 +205,15 @@ TEST(Tail, EveryPairOfCallerParametersAndCalleeArgumentsFromZeroToSixteenArrives
         EXPECT_EQ(e.st.deopts, 0);
         EXPECT_EQ(e.st.tail_refusals, 0);
         EXPECT_EQ(e.st.tails, 2);
+        // The hook was handed every argument, however many, in order, both times.
+        ASSERT_EQ(e.st.tail_args.size(), 2u);
+        const std::vector<int64_t> handed = tail_args(params, t_args, given_signed);
+        for (const auto & args : e.st.tail_args) {
+          ASSERT_EQ(args.size(), handed.size());
+          for (size_t k = 0; k < args.size(); k++) {
+            EXPECT_EQ(static_cast<int64_t>(args[k]), handed[k]) << "argument " << k;
+          }
+        }
         EXPECT_EQ(e.st.pushes, e.st.pops);
         EXPECT_EQ(o.frames_left, 0u);
         // The interpreter agrees.
@@ -1911,6 +1921,92 @@ TEST(Tail, AReferenceAndADerivedPointerStagedInAFramePaddedForALargerCalleeAreUp
   }
   EXPECT_EQ(e.heap.poisoned_reads, 0);
   EXPECT_GT(e.heap.moved, 10);
+}
+
+/* ---- What the hook is handed is what the callee is entered with ---------------------- */
+
+namespace {
+
+/* big(a, b, c) = 100 a + 10 b + c with forty idle locals (a large frame); small(a,
+ * b, c) probes and then tail-calls big with its three arguments, or calls it and
+ * returns its result; top(a, b, c) calls small. */
+int add_small_big3(Engine & e, bool tail, int * small_out) {
+  int big = e.reserve();
+  {
+    P p("big3", {GRJIT_TYPE_I64, GRJIT_TYPE_I64, GRJIT_TYPE_I64});
+    int acc = p.local(), k = p.local(), t = p.local();
+    for (int i = 0; i < 40; i++) {
+      p.local();
+    }
+    p.cnst(k, 100);
+    p.bin(K::MUL, acc, 0, k);
+    p.cnst(k, 10);
+    p.bin(K::MUL, t, 1, k);
+    p.bin(K::ADD, acc, acc, t);
+    p.bin(K::ADD, acc, acc, 2);
+    p.ret(acc);
+    e.set(big, p.done());
+  }
+  int small = e.reserve();
+  {
+    P p("small3", {GRJIT_TYPE_I64, GRJIT_TYPE_I64, GRJIT_TYPE_I64});
+    int r = p.local();
+    p.probe(0);
+    if (tail) {
+      p.tailcall(big, {0, 1, 2});
+    } else {
+      p.call(r, big, {0, 1, 2});
+      p.ret(r);
+    }
+    e.set(small, p.done());
+  }
+  *small_out = small;
+  P p("top3", {GRJIT_TYPE_I64, GRJIT_TYPE_I64, GRJIT_TYPE_I64});
+  int r = p.local();
+  p.call(r, small, {0, 1, 2});
+  p.ret(r);
+  return e.add(p.done());
+}
+
+} // namespace
+
+TEST(Tail, ACalleeThatCannotStartIsFinishedByTheInterpreterFromTheGuestFrameTheHookMadeWithEveryArgument) {
+  TAIL_ONLY_ON_X86_64_SYSV();
+  // The budget is exactly small's first frame, so big, whose frame is larger, runs
+  // out of native stack in its prologue: its guest frame, made by the hook, is at its
+  // entry, and the interpreter runs it from the arguments the hook put there. Three
+  // arguments are handed over, so a hook given only the first, or the second as the
+  // first, leaves the interpreter with 900 or 700 and not 975. The call-side
+  // equivalent (the push hook) is the same program with a call.
+  for (int tail = 0; tail < 2; tail++) {
+    SCOPED_TRACE(tail ? "tail call" : "call");
+    uint64_t budget = 0;
+    {
+      Engine probe(GRCORE_UNLIMITED, 1 << 20);
+      int small;
+      int top = add_small_big3(probe, tail != 0, &small);
+      Outcome o = probe.run_compiled(top, {9, 7, 5});
+      ASSERT_TRUE(o.finished);
+      EXPECT_EQ(o.value, 975u);
+      ASSERT_FALSE(probe.st.bases.empty());
+      const uintptr_t sp0 = probe.last_native_limit + (1 << 20);
+      const uintptr_t frame = grjit_code_meta(probe.code_of(small).code)->frame_bytes;
+      budget = sp0 - (probe.st.bases.front() - frame);
+    }
+    Engine e(GRCORE_UNLIMITED, budget);
+    e.record_hook_args = true;
+    int small;
+    int top = add_small_big3(e, tail != 0, &small);
+    Outcome o = e.run_compiled(top, {9, 7, 5});
+    ASSERT_TRUE(o.finished);
+    EXPECT_EQ(o.value, 975u) << "the interpreter resumed big with all three arguments";
+    EXPECT_EQ(o.exit, uint32_t{GRJIT_EXIT_DEOPT});
+    EXPECT_EQ(e.st.deopts, 1) << "once, at big's prologue";
+    const auto & seen = tail ? e.st.tail_args : e.st.push_args;
+    ASSERT_FALSE(seen.empty());
+    EXPECT_EQ(seen.back(), (std::vector<u64>{9, 7, 5})) << "the hook was handed every argument, in order";
+    EXPECT_EQ(o.frames_left, 0u);
+  }
 }
 
 GRJIT_TEST_MAIN()

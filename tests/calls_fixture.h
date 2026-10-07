@@ -256,6 +256,11 @@ struct Stats {
   std::vector<size_t> frames;    // guest frames on the stack at each PROBE
   std::vector<uint64_t> depths;  // the context's guest depth at each PROBE
   std::vector<size_t> caps;      // the reservation's capacity at each PROBE
+  /* What the push and tail hooks were handed, when `record_hook_args` is set: the
+   * guest frame a hook makes holds exactly these, and a callee that cannot start
+   * is finished by the interpreter from it. */
+  std::vector<std::vector<u64>> push_args;
+  std::vector<std::vector<u64>> tail_args;
   long tails = 0;                // the tail hook's calls
   long tail_refusals = 0;        // ... that it refused
   long reserve_refusals = 0;     // ... of those, for want of room on the guest stack
@@ -319,6 +324,7 @@ class Engine {
    * test whose programs derive pointers and whose interpreter finishes a run
    * sets this, and a collection the interpreter makes does not move anything. */
   bool interpreter_never_moves = false;
+  bool record_hook_args = false;  // keep what each push and tail hook was handed
 
   explicit Engine(uint64_t guest_depth = GRCORE_UNLIMITED,
       uint64_t native_bytes = GRCORE_UNLIMITED, bool conv = false,
@@ -782,6 +788,9 @@ inline uint32_t Engine::h_push(void *, uint64_t callee, const uint64_t * args, u
   if (e.torture) {
     e.collect(); // the frame-push GC point: the arguments are read afterwards
   }
+  if (e.record_hook_args) {
+    e.st.push_args.emplace_back(args, args + n);
+  }
   if (e.refuse_push_at != 0 && ++e.push_calls == e.refuse_push_at) {
     e.st.refused_pushes++;
     return 1;
@@ -823,6 +832,9 @@ inline uint32_t Engine::h_tail(void *, uint64_t callee, const uint64_t * args, u
   e.st.tails++;
   if (e.torture) {
     e.collect(); // a GC point: the arguments are read afterwards
+  }
+  if (e.record_hook_args) {
+    e.st.tail_args.emplace_back(args, args + n);
   }
   GRCORE_FrameRef top = grcore_stack_top(e.stack);
   GRCORE_PollIdentity id;
