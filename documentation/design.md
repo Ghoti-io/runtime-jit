@@ -1018,9 +1018,17 @@ call done and the result in place), because the native has run and cannot be run
 a stub that built it from the state before the call would have the interpreter make the
 call, and the test that counts what the natives logged sees it run twice (and the harness
 plants exactly that). The hook is called once with `cause = GRJIT_CAUSE_NATIVE | status`
-(bit 32: a poll's cause is 32 bits, so the two cannot meet; the cause carries the status's
-low 32 bits and the test for leaving is on all 64, so a status of `1 << 40` leaves with
-cause `NATIVE | 0`), rebuilds the chain through `grcore_compiled_rebuild`, and every
+(bit 32: a poll's cause is 32 bits, so the two cannot meet; **a status is a 32-bit value**:
+`GRJIT_NativeResult` is `{ uint64_t value; uint32_t status; uint32_t reserved; }`, the call tests
+exactly `edx`, and the cause is `NATIVE | status` with nothing lost. The first version tested all
+of `rdx` and masked the cause to 32 bits, which was wrong twice: under SysV the upper half of
+`rdx` is padding for a 32-bit status, so a native could leave garbage there and exit by mistake,
+and a wide status aliased (`0x100000002` read as `NATIVE | 2`). Declaring the status 64-bit
+instead would have needed a cause wider than the poll's and a descriptor that refuses what it
+cannot carry, for no use: a status is a reason, not a value. The tests have a native written in
+assembly that returns garbage above a zero status (no exit) and above a three (exit, cause
+`NATIVE | 3`), and statuses at bit 16 and bit 31; testing 64 bits or 16 bits each fails one),
+rebuilds the chain through `grcore_compiled_rebuild`, and every
 frame returns `DEOPTED`; the entry returns `GRJIT_EXIT_DEOPT` with the cause in `out[0]`.
 The library names `GRJIT_NATIVE_DEOPT` (leave compiled code; the interpreter continues
 after the call, as for a pause the native left pending or a nested run that left the

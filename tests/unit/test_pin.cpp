@@ -375,8 +375,8 @@ TEST(Pin, TheX86_64CodeOfCallableFunctionsWithCallsToNativesIsByteForByteWhatWas
       static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
   EXPECT_EQ(functions, 4u * 8u * 2u * 4u * 2u);
   EXPECT_TRUE(refused) << "arm64 and Win64 refuse every one of them before a byte";
-  EXPECT_EQ(pin.hash, 0x0b3a441ceb03381full) << pin.bytes << " bytes";
-  EXPECT_EQ(pin.bytes, 355364u);
+  EXPECT_EQ(pin.hash, 0xd2d04cb10df6dce8ull) << pin.bytes << " bytes";
+  EXPECT_EQ(pin.bytes, 355876u);
 }
 
 TEST(Pin, TheArm64CodeOfTheGeneratedFunctionsIsByteForByteWhatWasRecorded) {

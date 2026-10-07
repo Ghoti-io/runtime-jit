@@ -602,6 +602,9 @@ static void emit_native_call(GRJIT_Emit * e, const GRJIT_Op * op) {
     p.op = op;
     p.live_index = live + 2;
     grjit_emit_add_pending(&e->c, &p);
+    /* The status is the 32 bits of edx: the half above is padding a native may leave as it
+     * likes (natives.h), so it is cleared and never read. */
+    grjit_asm_mov32_rr(a, GRJIT_RDX, GRJIT_RDX);
     grjit_asm_test_rr(a, GRJIT_RDX, GRJIT_RDX);
     grjit_asm_jcc(a, GRJIT_COND_NE, leave);
   }

@@ -63,9 +63,12 @@
  * the cause in `out[0]`. The library names ::GRJIT_NATIVE_DEOPT and
  * ::GRJIT_NATIVE_UNWIND for the engine's hook to decide between a full rebuild
  * and a rebuild of the survivors of an unwind, and **never interprets a status
- * beyond "non-zero"**: any other value is the engine's. The cause carries the
- * low 32 bits of the status, so a status is a 32-bit value; the test for
- * leaving is on all 64 bits.
+ * beyond "non-zero"**: any other value is the engine's. **A status is a 32-bit
+ * value**, ::GRJIT_NativeResult says so with a `uint32_t` and the call tests exactly
+ * those 32 bits (`edx`): under SysV the upper half of `rdx` is padding that a native
+ * returning a 32-bit status is free to leave as it likes, so it is never read, and a
+ * status can neither be mistaken for zero nor alias another by a wide value. The cause
+ * is `::GRJIT_CAUSE_NATIVE | status`, with nothing lost.
  */
 
 #ifndef GHOTI_IO_GRJIT_NATIVES_H
@@ -88,22 +91,24 @@ extern "C" {
 
 /** @brief The result of a native with ::GRJIT_NATIVE_STATUS: the value, and the
  *  status (zero is ::GRJIT_NATIVE_OK). Two integer-class words, so on SysV they
- *  come back in `rax` and `rdx`. */
+ *  come back in `rax` and `rdx`; the second holds the 32-bit status in its low half
+ *  and padding above it, which the call ignores. */
 typedef struct GRJIT_NativeResult {
-  uint64_t value;  ///< The result; ignored for a native with no result.
-  uint64_t status; ///< Zero, or the reason compiled code leaves.
+  uint64_t value;    ///< The result; ignored for a native with no result.
+  uint32_t status;   ///< Zero, or the reason compiled code leaves.
+  uint32_t reserved; ///< Padding: never read, whatever it holds.
 } GRJIT_NativeResult;
 
 /** @brief The status that means "continue in compiled code". */
-#define GRJIT_NATIVE_OK UINT64_C(0)
+#define GRJIT_NATIVE_OK UINT32_C(0)
 /** @brief Leave compiled code: the interpreter continues after the call (a
  *  pause the native left pending, or a nested run that left the state to the
  *  interpreter). The hook rebuilds the whole chain. */
-#define GRJIT_NATIVE_DEOPT UINT64_C(1)
+#define GRJIT_NATIVE_DEOPT UINT32_C(1)
 /** @brief A guest unwind is in progress: the hook rebuilds only the survivors
  *  (`grcore_compiled_rebuild`'s `keep_frames`) and pops the rest without
  *  converting them (AD-27). */
-#define GRJIT_NATIVE_UNWIND UINT64_C(2)
+#define GRJIT_NATIVE_UNWIND UINT32_C(2)
 
 /** @brief Bit 32. The `deopt` hook's `cause` for a native's status is
  *  `GRJIT_CAUSE_NATIVE | status`; a poll's cause is 32 bits, so the two never

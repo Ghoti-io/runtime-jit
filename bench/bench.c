@@ -440,7 +440,7 @@ static uint64_t native_inc(void * context, uint64_t x) {
 }
 static GRJIT_NativeResult native_inc_status(void * context, uint64_t x) {
   (void)context;
-  GRJIT_NativeResult r = {x + 1, 0};
+  GRJIT_NativeResult r = {x + 1, 0, 0};
   return r;
 }
 /* The trusted helper a CALL reaches: the same work, no context, no status. */

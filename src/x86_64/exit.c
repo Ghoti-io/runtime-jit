@@ -154,7 +154,7 @@ void grjit_emit_native_exit_stub(GRJIT_Emit * e, const GRJIT_Pending * p) {
 /* The exit a native's non-zero status takes. The native has run and its result
  * is in `dst`, so the state is the one *after* the call: the interpreter
  * continues past it, and the native is never run twice. The status is in `rdx`;
- * the cause is the native bit and its low thirty-two bits, and every frame
+ * the cause is the native bit and the 32-bit status (edx), and every frame
  * returns it (the entry puts it in `out[0]`). The cause is kept in the frame's
  * `out` slot, which a callable frame does not otherwise use, across the hook. */
 void grjit_emit_native_status_stub(GRJIT_Emit * e, const GRJIT_Pending * p) {

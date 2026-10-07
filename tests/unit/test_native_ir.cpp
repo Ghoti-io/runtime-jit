@@ -32,7 +32,7 @@ GRJIT_CallHooks hooks() {
 
 /* The addresses the descriptors name: nothing here calls them. */
 uint64_t n_plain(void *) { return 0; }
-GRJIT_NativeResult n_status(void *) { return {0, 0}; }
+GRJIT_NativeResult n_status(void *) { return {0, 0, 0}; }
 
 const GRCORE_PollIdentity kId{7, 3};
 const GRCORE_PollIdentity kAfter{7, 4};

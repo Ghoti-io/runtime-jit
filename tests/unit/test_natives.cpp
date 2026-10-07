@@ -648,25 +648,25 @@ __attribute__((noinline)) uint64_t nat_nokeep(void * ctx, uint64_t ref) {
 GRJIT_NativeResult nat_status(void * ctx, uint64_t v, uint64_t status) {
   check_ctx(ctx);
   E().trace.push_back(static_cast<int64_t>(v));
-  return {v * 2 + 1, status};
+  return {v * 2 + 1, static_cast<uint32_t>(status), 0};
 }
 GRJIT_NativeResult nat_unwind(void * ctx, uint64_t v) {
   check_ctx(ctx);
   E().trace.push_back(static_cast<int64_t>(v));
-  return {v + 7, GRJIT_NATIVE_UNWIND};
+  return {v + 7, GRJIT_NATIVE_UNWIND, 0};
 }
 GRJIT_NativeResult nat_pause(void * ctx, uint64_t v) {
   check_ctx(ctx);
   E().trace.push_back(static_cast<int64_t>(v));
   E().pause_pending = true;
-  return {v + 3, GRJIT_NATIVE_DEOPT};
+  return {v + 3, GRJIT_NATIVE_DEOPT, 0};
 }
 /* Status natives that allocate and collect: the exit the status takes must find the
  * references the call's site kept. */
 GRJIT_NativeResult nat_status_collect(void * ctx, uint64_t v, uint64_t status) {
   check_ctx(ctx);
   E().collect();
-  return {v * 2 + 1, status};
+  return {v * 2 + 1, static_cast<uint32_t>(status), 0};
 }
 /* Re-entry: a guest function run from inside the native, interpreted or compiled, in its own
  * record. Whatever ends the nested run other than a value is an unwind the caller must see. */
@@ -675,13 +675,13 @@ GRJIT_NativeResult reenter(void * ctx, uint64_t fn, uint64_t arg, bool compiled)
   Engine & e = E();
   FX_NATIVE_SCOPE(scope, e, GRCORE_ACTIVATION_REENTRY);
   if (!scope.ok()) {
-    return {0, GRJIT_NATIVE_UNWIND};
+    return {0, GRJIT_NATIVE_UNWIND, 0};
   }
   Outcome o = e.run_nested(static_cast<int>(fn), {arg}, compiled);
   if (!o.finished) {
-    return {0, GRJIT_NATIVE_UNWIND};
+    return {0, GRJIT_NATIVE_UNWIND, 0};
   }
-  return {o.value, GRJIT_NATIVE_OK};
+  return {o.value, GRJIT_NATIVE_OK, 0};
 }
 GRJIT_NativeResult nat_reenter_interp(void * ctx, uint64_t fn, uint64_t arg) {
   return reenter(ctx, fn, arg, false);
@@ -1035,8 +1035,8 @@ TEST(Natives, AStatusOfZeroContinuesInCompiledCodeAndAnyOtherLeavesThroughTheCha
       {GRJIT_NATIVE_DEOPT, 1, true},
       {GRJIT_NATIVE_UNWIND + 100, 102, true}, // a status the library does not know: the engine's
       {77, 77, true},
-      {(u64{1} << 40) | 9, 9, true},          // the cause keeps the low thirty-two bits
-      {u64{1} << 40, 0, true},                // the test for leaving is on all sixty-four
+      {0x10000, 0x10000, true},               // a status is 32 bits: bit 16 is a status
+      {0x80000000ull, 0x80000000ull, true},   // and so is bit 31
       {0xFFFFFFFFull, 0xFFFFFFFFull, true},
   };
   for (const Case & c : cases) {
@@ -1070,6 +1070,60 @@ TEST(Natives, AStatusOfZeroContinuesInCompiledCodeAndAnyOtherLeavesThroughTheCha
   }
 }
 
+/* Natives written in assembly, which return a status in edx and whatever they like in the upper half of
+ * rdx: the half above a 32-bit status is padding under SysV, and the call must not read it. */
+extern "C" {
+GRJIT_NativeResult grjit_test_status_garbage_zero(void *);
+GRJIT_NativeResult grjit_test_status_garbage_three(void *);
+}
+asm(R"(
+.text
+.globl grjit_test_status_garbage_zero
+.type grjit_test_status_garbage_zero, @function
+grjit_test_status_garbage_zero:
+  movl $7, %eax
+  movabsq $0xDEADBEEF00000000, %rdx
+  ret
+.size grjit_test_status_garbage_zero, .-grjit_test_status_garbage_zero
+.globl grjit_test_status_garbage_three
+.type grjit_test_status_garbage_three, @function
+grjit_test_status_garbage_three:
+  movl $7, %eax
+  movabsq $0xDEADBEEF00000003, %rdx
+  ret
+.size grjit_test_status_garbage_three, .-grjit_test_status_garbage_three
+)");
+
+TEST(Natives, TheStatusIsTheThirtyTwoBitsOfEdxAndGarbageAboveItNeitherLeavesNorChangesTheCause) {
+  for (bool leaves : {false, true}) {
+    SCOPED_TRACE(leaves);
+    Engine e;
+    Nat n = register_natives(e);
+    int st = e.add_native(reinterpret_cast<const void *>(leaves ? grjit_test_status_garbage_three : grjit_test_status_garbage_zero),
+        {}, GRJIT_TYPE_I64, GRJIT_NATIVE_STATUS, 64, "garbage");
+    int f = e.reserve();
+    P p("f", {GRJIT_TYPE_I64});
+    int v = p.local(), w = p.local();
+    p.native(v, st, {});
+    p.native(w, n.log, {v});
+    p.ret(w);
+    e.set(f, p.done());
+    Pair r = run_both(e, f, {0});
+    ASSERT_TRUE(r.i.finished);
+    ASSERT_TRUE(r.c.finished);
+    EXPECT_EQ(r.c.value, r.i.value);
+    EXPECT_EQ(r.c.value, 1007u);
+    EXPECT_EQ(r.tc, r.ti);
+    if (leaves) {
+      EXPECT_EQ(r.c.exit, uint32_t{GRJIT_EXIT_DEOPT});
+      EXPECT_EQ(e.st.last_cause, GRJIT_CAUSE_NATIVE | 3u) << "the status, and nothing of the padding above it";
+    } else {
+      EXPECT_EQ(r.c.exit, uint32_t{GRJIT_EXIT_RETURNED}) << "a status of zero with garbage above is no status";
+      EXPECT_EQ(e.st.deopts, 0);
+    }
+  }
+}
+
 TEST(Natives, TheResultIsInPlaceBeforeTheStatusIsLookedAtSoTheInterpreterContinuesWithItAndAPendingReferenceIsUpdated) {
   // A native that allocates returns a reference and a status: the exit rebuilds the frame with
   // the reference in its destination slot, and a collection the exit's rebuild is preceded by
@@ -1082,7 +1136,7 @@ TEST(Natives, TheResultIsInPlaceBeforeTheStatusIsLookedAtSoTheInterpreterContinu
                                     check_ctx(ctx);
                                     Engine & en = E();
                                     en.collect();
-                                    return {en.heap.alloc(static_cast<int64_t>(v) + 5), s};
+                                    return {en.heap.alloc(static_cast<int64_t>(v) + 5), static_cast<uint32_t>(s), 0};
                                   }),
       {GRJIT_TYPE_I64, GRJIT_TYPE_I64}, GRJIT_TYPE_REF, GRJIT_NATIVE_STATUS, 4096, "status_alloc");
   (void)n;
@@ -1195,7 +1249,7 @@ TEST(Natives, AnUnwindRebuildsOnlyTheSurvivorsAndPopsTheRestWithoutConvertingThe
     Nat n = register_natives(e);
     int st = e.add_native(reinterpret_cast<const void *>(+[](void * ctx, uint64_t v) -> GRJIT_NativeResult {
                             check_ctx(ctx);
-                            return {v, GRJIT_NATIVE_DEOPT};
+                            return {v, GRJIT_NATIVE_DEOPT, 0};
                           }),
         {GRJIT_TYPE_I64}, GRJIT_TYPE_I64, GRJIT_NATIVE_STATUS, 64, "deopt_only");
     int a = add_unwind_chain(e, n, st, true);
@@ -1518,7 +1572,7 @@ TEST(Natives, ATwoLevelCaseRebuildsOnlyTheNestedChainForADeoptStatusAndTheOuterS
     int inner = e.add_native(reinterpret_cast<const void *>(+[](void * ctx, uint64_t v) -> GRJIT_NativeResult {
                                check_ctx(ctx);
                                E().trace.push_back(static_cast<int64_t>(v));
-                               return {v + 20, GRJIT_NATIVE_DEOPT};
+                               return {v + 20, GRJIT_NATIVE_DEOPT, 0};
                              }),
         {GRJIT_TYPE_I64}, GRJIT_TYPE_I64, GRJIT_NATIVE_STATUS, 64, "inner_deopt");
     TwoLevels t = add_two_levels(e, n, inner, true);
