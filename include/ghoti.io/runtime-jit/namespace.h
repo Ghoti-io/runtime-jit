@@ -227,6 +227,8 @@
 #define grjit_builder_set_poll_helper GHOTIIO_RUNTIME_JIT(grjit_builder_set_poll_helper)
 #define grjit_builder_set_token GHOTIIO_RUNTIME_JIT(grjit_builder_set_token)
 #define grjit_builder_store GHOTIIO_RUNTIME_JIT(grjit_builder_store)
+#define grjit_builder_tail_call_ptr GHOTIIO_RUNTIME_JIT(grjit_builder_tail_call_ptr)
+#define grjit_builder_tail_call_slot GHOTIIO_RUNTIME_JIT(grjit_builder_tail_call_slot)
 #define grjit_builder_unary GHOTIIO_RUNTIME_JIT(grjit_builder_unary)
 #define grjit_builder_vreg GHOTIIO_RUNTIME_JIT(grjit_builder_vreg)
 #define grjit_code_address GHOTIIO_RUNTIME_JIT(grjit_code_address)

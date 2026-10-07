@@ -265,6 +265,8 @@ static void emit_op(GRJIT_A64Emit * e, const GRJIT_Op * op, size_t block) {
       break;
     case GRJIT_OP_CALL_SLOT:
     case GRJIT_OP_CALL_PTR:
+    case GRJIT_OP_TAIL_CALL_SLOT:
+    case GRJIT_OP_TAIL_CALL_PTR:
       /* Refused before emission (grjit_emit_for), so never reached. */
     case GRJIT_OP_COUNT:
       e->c.error = GRJIT_ERR_INTERNAL;

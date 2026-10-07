@@ -318,16 +318,32 @@ static GRJIT_Result check_op(
       return GRJIT_OK;
     }
     case GRJIT_OP_CALL_SLOT:
-    case GRJIT_OP_CALL_PTR: {
-      const bool slot = op->kind == GRJIT_OP_CALL_SLOT;
+    case GRJIT_OP_CALL_PTR:
+    case GRJIT_OP_TAIL_CALL_SLOT:
+    case GRJIT_OP_TAIL_CALL_PTR: {
+      const bool slot = op->kind == GRJIT_OP_CALL_SLOT || op->kind == GRJIT_OP_TAIL_CALL_SLOT;
+      const bool tail = op->kind == GRJIT_OP_TAIL_CALL_SLOT || op->kind == GRJIT_OP_TAIL_CALL_PTR;
+      const char * what = tail ? "a tail call" : "a call";
       const GRJIT_CallHooks * h = &v->f->hooks;
       if (!v->f->callable) {
         return refuse(v, GRJIT_ERR_INVALID,
-            "block b%u op %zu: a call to another compiled function in a "
+            "block b%u op %zu: %s to another compiled function in a "
             "function that is not callable",
-            block, index);
+            block, index, what);
       }
-      if (h->push == NULL || h->pop == NULL || (slot && h->compile == NULL)) {
+      if (tail) {
+        if (h->tail == NULL || (slot && h->compile == NULL)) {
+          return refuse(v, GRJIT_ERR_INVALID,
+              "block b%u op %zu: a tail call needs the tail%s hook of a "
+              "callable function",
+              block, index, slot ? " and compile" : "");
+        }
+        if (op->dst != GRJIT_NO_VREG || op->exit_state != GRJIT_NO_STATE) {
+          return refuse(v, GRJIT_ERR_INVALID,
+              "block b%u op %zu: a tail call has no result and one frame state",
+              block, index);
+        }
+      } else if (h->push == NULL || h->pop == NULL || (slot && h->compile == NULL)) {
         return refuse(v, GRJIT_ERR_INVALID,
             "block b%u op %zu: this call needs the push%s and pop hooks of a "
             "callable function",
@@ -338,9 +354,9 @@ static GRJIT_Result check_op(
                             : GRJIT_BUILDER_MAX_ARGS;
       if (op->arg_count > max_args) {
         return refuse(v, GRJIT_ERR_LIMIT,
-            "block b%u op %zu: call has %zu arguments, at most %zu are "
+            "block b%u op %zu: %s has %zu arguments, at most %zu are "
             "allowed",
-            block, index, op->arg_count, max_args);
+            block, index, what, op->arg_count, max_args);
       }
       if (slot) {
         if (op->address == 0 || op->a.kind != GRJIT_OPERAND_NONE) {
@@ -388,7 +404,7 @@ static GRJIT_Result check_op(
       if ((r = check_state_at(v, op->state, block, index)) != GRJIT_OK) {
         return r;
       }
-      return check_state_at(v, op->exit_state, block, index);
+      return tail ? GRJIT_OK : check_state_at(v, op->exit_state, block, index);
     }
     case GRJIT_OP_POLL:
       if (v->f->poll_helper == NULL) {

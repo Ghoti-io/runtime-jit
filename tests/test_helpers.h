@@ -261,6 +261,21 @@ struct B {
                   exit_state.data(), exit_state.size()),
         GRJIT_OK);
   }
+  /* A tail call through an entry slot, or through a code pointer; each ends the
+   * block. */
+  void tail_call_slot(const void * slot_entry, uint64_t callee,
+      std::vector<GRJIT_Operand> args, GRCORE_PollIdentity id,
+      std::vector<GRJIT_FrameSlot> state) {
+    EXPECT_EQ(grjit_builder_tail_call_slot(b, reinterpret_cast<uintptr_t>(slot_entry),
+                  callee, args.data(), args.size(), id, state.data(), state.size()),
+        GRJIT_OK);
+  }
+  void tail_call_ptr(GRJIT_Operand target, uint64_t callee, std::vector<GRJIT_Operand> args,
+      GRCORE_PollIdentity id, std::vector<GRJIT_FrameSlot> state) {
+    EXPECT_EQ(grjit_builder_tail_call_ptr(b, target, callee, args.data(), args.size(), id,
+                  state.data(), state.size()),
+        GRJIT_OK);
+  }
   void poll(GRCORE_PollIdentity id, std::vector<GRJIT_FrameSlot> state = {}) {
     EXPECT_EQ(grjit_builder_poll(b, id, state.data(), state.size()), GRJIT_OK);
   }

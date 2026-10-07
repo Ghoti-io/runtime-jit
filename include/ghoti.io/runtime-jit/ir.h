@@ -66,6 +66,15 @@
  * call, which an exit at the call site uses and from which the interpreter makes
  * the call itself. The call's result is any of the three types.
  *
+ * **Tail calls** (`TAIL_CALL_SLOT`, `TAIL_CALL_PTR`; AD-28) are the same two
+ * ways of naming a callee, in a callable function, as terminators with no
+ * result. The callee replaces the caller: its compiled frame and its guest
+ * frame, in constant native stack and unchanged guest depth. The `tail` hook
+ * does the guest side as one step. A tail call has *one* frame state, the
+ * caller's guest frame as it stands until the hook has replaced it: both the
+ * site of the hook (a frame-push GC point) and an exit before the replacement,
+ * from which the interpreter makes the tail call itself, use it.
+ *
  * A *frame state* is a poll identity `(function, bytecode offset)` plus, for
  * each of the function's `interp_slot_count` interpreter slots, a register, a
  * 64-bit constant or "dead". It is attached to each `POLL`, to each call that
@@ -142,7 +151,8 @@ static inline GRJIT_Operand grjit_operand_imm(int64_t imm) {
   return o;
 }
 
-/** @brief The operations. Terminators are `BR`, `BR_IF` and `RET`. */
+/** @brief The operations. Terminators are `BR`, `BR_IF`, `RET` and the two tail
+ *  calls. */
 typedef enum GRJIT_OpKind {
   GRJIT_OP_CONST,  ///< `dst = a.imm`.
   GRJIT_OP_MOVE,   ///< `dst = a`.
@@ -179,6 +189,11 @@ typedef enum GRJIT_OpKind {
                       ///< `args`, `callee`, and two frame states (see below).
   GRJIT_OP_CALL_PTR,  ///< The same through the code pointer `a`: the internal
                       ///< entry of registered compiled code. No slot.
+  GRJIT_OP_TAIL_CALL_SLOT, ///< A tail call through the entry slot at `address`:
+                      ///< the function's own frame, and its guest frame, are
+                      ///< replaced by the callee's, and control goes to the
+                      ///< callee's internal entry. Ends the block. No result.
+  GRJIT_OP_TAIL_CALL_PTR,  ///< The same through the code pointer `a`.
   GRJIT_OP_COUNT   ///< Not an operation; closes the enum.
 } GRJIT_OpKind;
 
@@ -283,10 +298,11 @@ typedef struct GRJIT_Op {
   const GRJIT_Operand * args; ///< The arguments.
   uint32_t state;             ///< Index of the frame state, or
                               ///< ::GRJIT_NO_STATE.
-  uint64_t callee;            ///< For `CALL_SLOT` and `CALL_PTR`: the engine's
+  uint64_t callee;            ///< For the calls and tail calls: the engine's
                               ///< token for the callee, which the push and
                               ///< compile hooks receive.
-  uint32_t exit_state;        ///< For `CALL_SLOT` and `CALL_PTR`: the frame
+  uint32_t exit_state;        ///< For `CALL_SLOT` and `CALL_PTR` (a tail call
+                              ///< has the one `state`): the frame
                               ///< state of an exit *before* the call, or
                               ///< ::GRJIT_NO_STATE.
 } GRJIT_Op;
@@ -335,9 +351,26 @@ typedef struct GRJIT_Op {
  *   ::GRJIT_EXIT_REBUILD_FAILED with that value in `out[0]`. The engine must treat
  *   it as an internal error: unwind every guest frame the run pushed and report
  *   it, never continue in the interpreter.
+ * - `tail` runs, for a tail call, where `push` runs for a call, and has the same
+ *   signature and the same rules for its arguments (they are in the site's stack
+ *   map, and it reads them after any collection it causes). It replaces the top
+ *   guest frame, the calling function's, with the callee's, as one step, and
+ *   replaces the reservation extension (extend by the callee's maximum, then give
+ *   back the caller's). Guest depth does not change, and memory is counted as the
+ *   interpreter's tail call counts it. Everything that can fail or collect (the
+ *   extension, room on the stack, `grcore_stack_reserve`) is done before the guest
+ *   stack is touched, so a refusal leaves everything as it was; the pop and push
+ *   that follow cannot fail and the hook reaches no GC point after it commits. A
+ *   non-zero return changes nothing and makes the tail site exit through its
+ *   frame state, where the interpreter makes the tail call itself. A tail call
+ *   from a frame that owns a budget scope or an engine call record is refused by
+ *   this hook: the engine knows, the library does not. `pop` is not called for a
+ *   tail call: the pop of the original call, when the callee returns, pops the
+ *   guest frame this hook left on top.
  *
- * `compile` may be NULL for a function with no `CALL_SLOT`, `push` and `pop`
- * for one with no calls; `deopt` is required.
+ * `compile` may be NULL for a function with no `CALL_SLOT` or `TAIL_CALL_SLOT`,
+ * `push` and `pop` for one with no calls, `tail` for one with no tail calls;
+ * `deopt` is required.
  */
 typedef struct GRJIT_CallHooks {
   uint32_t (*push)(void * context, uint64_t callee, const uint64_t * args,
@@ -345,6 +378,8 @@ typedef struct GRJIT_CallHooks {
   void (*pop)(void * context);
   uint32_t (*compile)(void * context, uint64_t callee);
   uint32_t (*deopt)(void * context, uint64_t cause);
+  uint32_t (*tail)(void * context, uint64_t callee, const uint64_t * args,
+      uint64_t arg_count);
 } GRJIT_CallHooks;
 
 /** @brief A function. Opaque; built by ::GRJIT_Builder. */

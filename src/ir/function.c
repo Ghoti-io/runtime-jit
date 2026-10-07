@@ -145,12 +145,14 @@ const GRJIT_Allocator * grjit_allocator_or_default(
 }
 
 bool grjit_op_is_terminator(GRJIT_OpKind kind) {
-  return kind == GRJIT_OP_BR || kind == GRJIT_OP_BR_IF || kind == GRJIT_OP_RET;
+  return kind == GRJIT_OP_BR || kind == GRJIT_OP_BR_IF || kind == GRJIT_OP_RET ||
+         kind == GRJIT_OP_TAIL_CALL_SLOT || kind == GRJIT_OP_TAIL_CALL_PTR;
 }
 
 bool grjit_op_has_state(const GRJIT_Op * op) {
   return op->kind == GRJIT_OP_POLL || op->kind == GRJIT_OP_GUARD ||
          op->kind == GRJIT_OP_CALL_SLOT || op->kind == GRJIT_OP_CALL_PTR ||
+         op->kind == GRJIT_OP_TAIL_CALL_SLOT || op->kind == GRJIT_OP_TAIL_CALL_PTR ||
          (op->kind == GRJIT_OP_CALL && op->attr == GRJIT_CALL_GC_POINT);
 }
 
@@ -174,7 +176,9 @@ void grjit_op_visit_uses(const GRJIT_Function * function, const GRJIT_Op * op,
       break;
     case GRJIT_OP_CALL_SLOT:
     case GRJIT_OP_CALL_PTR:
-      visit_operand(&op->a, visit, user); /* the code pointer of a CALL_PTR */
+    case GRJIT_OP_TAIL_CALL_SLOT:
+    case GRJIT_OP_TAIL_CALL_PTR:
+      visit_operand(&op->a, visit, user); /* the code pointer of a pointer call */
       for (size_t i = 0; i < op->arg_count; i++) {
         visit_operand(&op->args[i], visit, user);
       }
@@ -185,7 +189,8 @@ void grjit_op_visit_uses(const GRJIT_Function * function, const GRJIT_Op * op,
       break;
   }
   if (grjit_op_has_state(op)) {
-    /* A guest call has two states; every other site has one. */
+    /* A guest call has two states; every other site, a tail call included
+     * (its exit state is its state), has one. */
     uint32_t which[2] = {op->state, op->exit_state};
     for (size_t w = 0; w < 2; w++) {
       if (which[w] == GRJIT_NO_STATE || which[w] >= function->state_count) {
@@ -209,6 +214,8 @@ GRJIT_VReg grjit_op_def(const GRJIT_Op * op) {
     case GRJIT_OP_BR:
     case GRJIT_OP_BR_IF:
     case GRJIT_OP_RET:
+    case GRJIT_OP_TAIL_CALL_SLOT:
+    case GRJIT_OP_TAIL_CALL_PTR:
       return GRJIT_NO_VREG;
     default:
       return op->dst;

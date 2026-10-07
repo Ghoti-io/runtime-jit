@@ -190,7 +190,24 @@ static GRJIT_Result verify_for_compile(
  * function that has the new operations, or is callable, is refused for the
  * others with GRJIT_ERR_UNSUPPORTED before a byte is emitted, so the bytes of
  * every other function are exactly what they were. */
+static bool grjit_has_tail_calls(const GRJIT_Function * f) {
+  for (size_t b = 0; b < f->block_count; b++) {
+    for (size_t i = 0; i < f->blocks[b].count; i++) {
+      GRJIT_OpKind k = f->blocks[b].ops[i].kind;
+      if (k == GRJIT_OP_TAIL_CALL_SLOT || k == GRJIT_OP_TAIL_CALL_PTR) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 static bool grjit_emit_supports(GRJIT_Arch arch, const GRJIT_Function * f) {
+  /* No backend emits a tail call yet: the IR has them (story 5 of the calls
+   * spec), and the x86-64 emitter is the commit after this one. */
+  if (grjit_has_tail_calls(f)) {
+    return false;
+  }
   if (arch == GRJIT_ARCH_X86_64) {
     return true;
   }

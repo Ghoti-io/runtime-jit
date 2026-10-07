@@ -91,10 +91,17 @@ static void transfer(Ctx * c, const GRJIT_Op * op, uint64_t * live) {
 
 /* How many sites an operation makes. A call to another compiled function is
  * three: the push of the callee's frame, the call itself, and the exit before
- * it (backend/backend_internal.h). Every other operation with a frame state
- * is one. */
+ * it (backend/backend_internal.h). A tail call is two: the hook that replaces
+ * the guest frame, and the exit before it. Every other operation with a frame
+ * state is one. */
 size_t grjit_liveness_site_count(const GRJIT_Op * op) {
-  return op->kind == GRJIT_OP_CALL_SLOT || op->kind == GRJIT_OP_CALL_PTR ? 3u : 1u;
+  if (op->kind == GRJIT_OP_CALL_SLOT || op->kind == GRJIT_OP_CALL_PTR) {
+    return 3u;
+  }
+  if (op->kind == GRJIT_OP_TAIL_CALL_SLOT || op->kind == GRJIT_OP_TAIL_CALL_PTR) {
+    return 2u;
+  }
+  return 1u;
 }
 
 GRJIT_Result grjit_liveness_compute(const GRJIT_Function * f,
@@ -241,7 +248,7 @@ GRJIT_Result grjit_liveness_compute(const GRJIT_Function * f,
           /* What is live before the operation, for a push: its own uses (the
            * arguments, the code pointer, both frame states) and what is live
            * after it, less what it assigns. */
-          if (mult == 3) {
+          if (mult >= 2) {
             memcpy(before_set, cur, words * sizeof *before_set);
             transfer(&c, op, before_set);
           }
@@ -249,8 +256,11 @@ GRJIT_Result grjit_liveness_compute(const GRJIT_Function * f,
             memset(state_set, 0, words * sizeof *state_set);
             c.set = state_set;
             /* Variant 0 is the only one of an ordinary site; for a guest call
-             * 0 is the push, 1 the call and 2 the exit. The frame state each
-             * names: the exit's is `exit_state`, every other site's `state`. */
+             * 0 is the push, 1 the call and 2 the exit; for a tail call 0 is the
+             * hook and 1 the exit. The frame state each names: a call's exit's
+             * is `exit_state`, every other site's `state` (a tail call's exit
+             * leaves the frame in the state the hook found it in). */
+            const bool exit_site = mult == 3 ? k == 2 : (mult == 2 && k == 1);
             uint32_t which = (mult == 3 && k == 2) ? op->exit_state : op->state;
             if (which != GRJIT_NO_STATE && which < f->state_count) {
               const GRJIT_FrameState * st = &f->states[which];
@@ -260,10 +270,10 @@ GRJIT_Result grjit_liveness_compute(const GRJIT_Function * f,
                 }
               }
             }
-            if (op->kind == GRJIT_OP_GUARD || (mult == 3 && k == 2)) {
+            if (op->kind == GRJIT_OP_GUARD || exit_site) {
               /* An exit leaves the frame: only what its state names. */
               memcpy(site_set, state_set, words * sizeof *site_set);
-            } else if (mult == 3 && k == 0) {
+            } else if (mult >= 2 && k == 0) {
               memcpy(site_set, before_set, words * sizeof *site_set);
               for (size_t w = 0; w < words; w++) {
                 site_set[w] |= state_set[w];

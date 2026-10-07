@@ -261,7 +261,7 @@ static void call_release(void * payload) { (void)payload; }
  * engine's guest stack. */
 static GRJIT_Function * build_callable_inc(void) {
   GRJIT_Builder * b;
-  GRJIT_CallHooks hooks = {call_push, call_pop, call_compile, call_deopt};
+  GRJIT_CallHooks hooks = {call_push, call_pop, call_compile, call_deopt, NULL};
   check(grjit_builder_create("inc", 0, NULL, NULL, &b), "builder");
   GRJIT_VReg x, r;
   GRJIT_BlockId entry;
@@ -279,7 +279,7 @@ static GRJIT_Function * build_callable_inc(void) {
 
 static GRJIT_Function * build_call_loop(const GRCORE_EntrySlot * slot) {
   GRJIT_Builder * b;
-  GRJIT_CallHooks hooks = {call_push, call_pop, call_compile, call_deopt};
+  GRJIT_CallHooks hooks = {call_push, call_pop, call_compile, call_deopt, NULL};
   check(grjit_builder_create("call_loop", 2, NULL, NULL, &b), "builder");
   GRJIT_VReg n, i, sum, t;
   GRJIT_BlockId entry, head, body, done;

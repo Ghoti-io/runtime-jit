@@ -72,7 +72,7 @@ static const char * op_name(GRJIT_OpKind k) {
   static const char * const names[] = {"const", "move", "add", "sub", "mul",
       "and", "or", "xor", "shl", "shr", "sar", "neg", "not", "cmp", "load",
       "load_s", "store", "call", "poll", "guard", "br", "br_if", "ret",
-      "bitcast", "call_slot", "call_ptr"};
+      "bitcast", "call_slot", "call_ptr", "tail_call_slot", "tail_call_ptr"};
   _Static_assert(sizeof names / sizeof names[0] == (size_t)GRJIT_OP_COUNT,
       "one name for every operation");
   return (unsigned)k < (unsigned)GRJIT_OP_COUNT ? names[k] : "?";
@@ -204,6 +204,22 @@ static void put_op(Out * o, const GRJIT_Function * f, const GRJIT_Op * op) {
       put_state(o, f, op->state);
       put(o, " exit");
       put_state(o, f, op->exit_state);
+      break;
+    case GRJIT_OP_TAIL_CALL_SLOT:
+    case GRJIT_OP_TAIL_CALL_PTR:
+      if (op->kind == GRJIT_OP_TAIL_CALL_SLOT) {
+        put(o, "tail_call.slot 0x%" PRIx64, op->address);
+      } else {
+        put(o, "tail_call.ptr ");
+        put_operand(o, &op->a);
+      }
+      put(o, " callee=%" PRIu64 "(", op->callee);
+      for (size_t i = 0; i < op->arg_count; i++) {
+        put(o, i == 0 ? "" : ", ");
+        put_operand(o, &op->args[i]);
+      }
+      put(o, ")");
+      put_state(o, f, op->state);
       break;
     case GRJIT_OP_POLL:
       put(o, "poll");

@@ -240,7 +240,8 @@ static GRJIT_Result append_ex(GRJIT_Builder * b, const GRJIT_Op * op,
   /* A helper call carries at most `max_call_arguments`; a call to another
    * compiled function, whose arguments the internal convention puts on the
    * stack past the sixth, is capped by its own limit. */
-  bool guest_call = op->kind == GRJIT_OP_CALL_SLOT || op->kind == GRJIT_OP_CALL_PTR;
+  bool guest_call = op->kind == GRJIT_OP_CALL_SLOT || op->kind == GRJIT_OP_CALL_PTR ||
+                    op->kind == GRJIT_OP_TAIL_CALL_SLOT || op->kind == GRJIT_OP_TAIL_CALL_PTR;
   size_t arg_cap = guest_call ? b->limits.max_guest_call_arguments
                               : b->limits.max_call_arguments;
   if (arg_count > arg_cap || arg_count > GRJIT_BUILDER_MAX_ARGS) {
@@ -531,6 +532,42 @@ GRJIT_Result grjit_builder_call_ptr(GRJIT_Builder * builder, GRJIT_VReg dst,
   exit_state.identity = exit_identity;
   return append_ex(builder, &op, args, arg_count, &state, state_slots,
       state_count, &exit_state, exit_slots, exit_count);
+}
+
+GRJIT_Result grjit_builder_tail_call_slot(GRJIT_Builder * builder,
+    uint64_t slot_address, uint64_t callee, const GRJIT_Operand * args,
+    size_t arg_count, GRCORE_PollIdentity identity,
+    const GRJIT_FrameSlot * state_slots, size_t state_count) {
+  if (builder == NULL) {
+    return GRJIT_ERR_INVALID;
+  }
+  GRJIT_Op op = blank(GRJIT_OP_TAIL_CALL_SLOT);
+  op.address = slot_address;
+  op.callee = callee;
+  op.attr = GRJIT_CALL_GC_POINT;
+  op.site_kind = GRCORE_SITE_GC_POINT_FRAME_PUSH;
+  GRJIT_FrameState state;
+  memset(&state, 0, sizeof state);
+  state.identity = identity;
+  return append(builder, &op, args, arg_count, &state, state_slots, state_count);
+}
+
+GRJIT_Result grjit_builder_tail_call_ptr(GRJIT_Builder * builder,
+    GRJIT_Operand target, uint64_t callee, const GRJIT_Operand * args,
+    size_t arg_count, GRCORE_PollIdentity identity,
+    const GRJIT_FrameSlot * state_slots, size_t state_count) {
+  if (builder == NULL) {
+    return GRJIT_ERR_INVALID;
+  }
+  GRJIT_Op op = blank(GRJIT_OP_TAIL_CALL_PTR);
+  op.a = target;
+  op.callee = callee;
+  op.attr = GRJIT_CALL_GC_POINT;
+  op.site_kind = GRCORE_SITE_GC_POINT_FRAME_PUSH;
+  GRJIT_FrameState state;
+  memset(&state, 0, sizeof state);
+  state.identity = identity;
+  return append(builder, &op, args, arg_count, &state, state_slots, state_count);
 }
 
 GRJIT_Result grjit_builder_poll(GRJIT_Builder * builder,

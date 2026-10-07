@@ -459,6 +459,9 @@ static void emit_op(GRJIT_Emit * e, const GRJIT_Op * op, size_t block) {
     case GRJIT_OP_CALL_PTR:
       emit_guest_call(e, op);
       break;
+    case GRJIT_OP_TAIL_CALL_SLOT:
+    case GRJIT_OP_TAIL_CALL_PTR:
+      /* Not emitted yet: grjit_emit_supports refuses them (code/code.c). */
     case GRJIT_OP_COUNT:
       e->c.error = GRJIT_ERR_INTERNAL;
       break;

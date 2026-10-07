@@ -294,6 +294,48 @@ GRJIT_API GRJIT_Result grjit_builder_call_ptr(GRJIT_Builder * builder,
     GRCORE_PollIdentity exit_identity, const GRJIT_FrameSlot * exit_slots,
     size_t exit_count);
 
+/**
+ * @brief A tail call through an entry slot: ends the block.
+ *
+ * Only in a callable function with the `tail`, `compile` and `deopt` hooks. The
+ * callee replaces this function's frame, native and guest, and returns to this
+ * function's caller; nothing after it runs. The slot is dispatched as in
+ * ::grjit_builder_call_slot (compiled: entered; empty: compiled at the call;
+ * refused: an exit). The IR declares no signature, so the library does not check
+ * that the arguments suit the callee or that its result suits this function's
+ * callers: what a tail call is held to at run time is the callee's token and
+ * parameter count, which the slot's binding checks, and agreement of types is the
+ * engine's compiler's, as for a call.
+ *
+ * @param slot_address The address of a `GRCORE_EntrySlot`'s `entry` word.
+ * @param callee The engine's token for the callee, passed to the hooks.
+ * @param args The arguments, copied; each a register or an immediate; at most
+ *   `GRJIT_Limits::max_guest_call_arguments`.
+ * @param identity The poll identity of `state_slots`: this function's guest frame
+ *   as it stands until the `tail` hook replaces it, which is also the exit's.
+ * @param state_slots That frame state (copied), `state_count` of them.
+ * @return ::GRJIT_OK, ::GRJIT_ERR_INVALID, ::GRJIT_ERR_LIMIT or
+ *   ::GRJIT_ERR_OOM.
+ */
+GRJIT_API GRJIT_Result grjit_builder_tail_call_slot(GRJIT_Builder * builder,
+    uint64_t slot_address, uint64_t callee, const GRJIT_Operand * args,
+    size_t arg_count, GRCORE_PollIdentity identity,
+    const GRJIT_FrameSlot * state_slots, size_t state_count);
+
+/**
+ * @brief A tail call through a code pointer: ends the block.
+ *
+ * `target` is a `ptr` register or a non-null immediate holding the internal entry
+ * of registered compiled code, checked at run time as for
+ * ::grjit_builder_call_ptr (registered, not retired, tagged with `callee`'s token
+ * and this call's argument count); a target that fails is an exit. Otherwise as
+ * ::grjit_builder_tail_call_slot.
+ */
+GRJIT_API GRJIT_Result grjit_builder_tail_call_ptr(GRJIT_Builder * builder,
+    GRJIT_Operand target, uint64_t callee, const GRJIT_Operand * args,
+    size_t arg_count, GRCORE_PollIdentity identity,
+    const GRJIT_FrameSlot * state_slots, size_t state_count);
+
 /** @brief A poll, with its frame state (copied). */
 GRJIT_API GRJIT_Result grjit_builder_poll(GRJIT_Builder * builder,
     GRCORE_PollIdentity identity, const GRJIT_FrameSlot * state_slots,
