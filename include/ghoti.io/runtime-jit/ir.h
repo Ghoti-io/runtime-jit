@@ -368,6 +368,13 @@ typedef struct GRJIT_Op {
  *   tail call: the pop of the original call, when the callee returns, pops the
  *   guest frame this hook left on top.
  *
+ * The struct has no size field, and `tail` was added at its end by story 5 of the calls
+ * spec: a client compiled before it must be rebuilt (a C initialiser that names the
+ * first four members leaves `tail` NULL, which only a function with no tail calls
+ * accepts). Nothing but the fixture in this library's tests builds one yet, so the
+ * layout is still free to change; a size field is the answer once an engine ships
+ * against a released library, and is not added to a struct nobody has shipped.
+ *
  * `compile` may be NULL for a function with no `CALL_SLOT` or `TAIL_CALL_SLOT`,
  * `push` and `pop` for one with no calls, `tail` for one with no tail calls;
  * `deopt` is required.

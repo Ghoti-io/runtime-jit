@@ -720,7 +720,9 @@ types agree is the engine's compiler's, exactly as for a call. (A library that
 checked would carry an engine's types, or a table by token that duplicates the
 engine's own.)
 
-**The `tail` hook** (`GRJIT_CallHooks::tail`, `push`'s signature) replaces the top
+**The `tail` hook** (`GRJIT_CallHooks::tail`, `push`'s signature; the struct has no size
+field and `tail` was added at its end, so a client built before story 5 is rebuilt: no
+engine has shipped against it, and a size field is for the first that does) replaces the top
 guest frame, the caller's, with the callee's, and the reservation extension, as
 one step: extend by the callee's maximum, then give back the caller's, so a
 refusal leaves everything as it was. Everything that can fail or collect (the
@@ -826,9 +828,12 @@ the callee's frames (`Tail.AGuardAfterAHundredThousandTailCalls...`).
 **Native stack in bytes.** No check at the tail site, which makes no stack: the
 replacement writes only inside the caller's own frame (`pad` guarantees `ra'` is above
 its bottom). The callee's prologue check is the only one and is judged as for a call.
-At the same depth a callee whose frame is no larger than the caller's passes whenever
-the caller did; one that does not fit deoptimizes once, at its prologue, with the guest
-frame the hook made at its entry, and the interpreter continues
+The callee's lowest address is the caller's moved by `(in_A - in_T) - (F_callee -
+F_caller)` bytes (`F` the frames' sizes), so it is no deeper than the caller's when its frame
+is no larger *and* it takes no more stack arguments; a callee that takes more is
+`in_T - in_A` bytes deeper for the same frame, and one that does not fit deoptimizes
+once, at its prologue, as a call's callee would, with the guest frame the hook made at its
+entry, and the interpreter continues
 (`Tail.ACalleeWhoseFrameDoesNotFit...`; a budget that fits the first frame exactly
 runs a million tail calls with no exit, and one frame's width less deoptimizes at the
 entry).

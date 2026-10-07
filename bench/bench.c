@@ -424,6 +424,9 @@ static uint64_t loop_tail_call_run(uint64_t iterations) {
   if (grjit_code_call(g_tail_loop.code, g_context, args, out) != GRJIT_EXIT_RETURNED) {
     setup_failed("the tail loop did not return");
   }
+  if (out[0] != iterations) {
+    setup_failed("the tail loop's sum is not its iteration count");
+  }
   return out[0];
 }
 
