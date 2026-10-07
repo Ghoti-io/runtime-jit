@@ -98,6 +98,18 @@ typedef struct GRJIT_CompileOptions {
 GRJIT_API bool grjit_backend_available(void);
 
 /**
+ * @brief Whether this build can compile calls between compiled functions
+ *   (AD-28): true on Linux x86-64 SysV, false on every other target.
+ *
+ * Elsewhere ::grjit_compile refuses a callable function, and a function with
+ * ::GRJIT_OP_CALL_SLOT or ::GRJIT_OP_CALL_PTR, with ::GRJIT_ERR_UNSUPPORTED
+ * before emitting a byte (arm64 and Windows x86-64 have them in a later
+ * story), so an engine asks this once and builds callable functions only where
+ * it is true, and otherwise leaves a call as an exit.
+ */
+GRJIT_API bool grjit_backend_calls_available(void);
+
+/**
  * @brief Verifies a function and compiles it.
  *
  * An unverified function is refused with ::GRJIT_ERR_INVALID (a function over

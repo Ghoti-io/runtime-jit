@@ -1493,4 +1493,27 @@ TEST(Calls, AnExitAtAnUncompilableCalleeIsNotCountedAgainstTheCallersDiscardLimi
   }
 }
 
+TEST(Calls, TheBackendSaysWhetherItCanCompileCallsAndOnlyX86SysVCan) {
+#if defined(__x86_64__) && defined(__linux__)
+  EXPECT_TRUE(grjit_backend_calls_available());
+#else
+  EXPECT_FALSE(grjit_backend_calls_available());
+#endif
+  // The answer agrees with what compiling does.
+  B b("ident", 0);
+  GRJIT_VReg x = b.param(GRJIT_TYPE_I64);
+  GRJIT_CallHooks h{};
+  h.deopt = [](void *, uint64_t) {};
+  b.callable(h);
+  b.at(b.block());
+  b.ret(V(x));
+  Fn f(b.finish());
+  JitWorld w;
+  Compiled c(f, w.pages());
+  EXPECT_EQ(static_cast<bool>(c), grjit_backend_calls_available());
+  if (!c) {
+    EXPECT_EQ(c.result, GRJIT_ERR_UNSUPPORTED);
+  }
+}
+
 GRJIT_TEST_MAIN()

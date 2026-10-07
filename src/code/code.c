@@ -69,6 +69,10 @@ bool grjit_backend_available(void) {
   return GRJIT_HAVE_BACKEND != 0;
 }
 
+bool grjit_backend_calls_available(void) {
+  return GRJIT_HAVE_BACKEND != 0 && GRJIT_NATIVE == GRJIT_ARCH_X86_64;
+}
+
 void grjit_code_destroy(GRJIT_Code * code) {
   if (code == NULL) {
     return;
