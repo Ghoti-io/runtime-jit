@@ -1644,4 +1644,54 @@ TEST(Calls, GeneratedCallGraphsGiveTheSameResultsCompiledAndInterpretedWithAndWi
   EXPECT_GT(direct, 100);
 }
 
+/* ---- A derived pointer passed as an argument ------------------------------------ */
+
+TEST(Calls, ADerivedPointerPassedAsAnArgumentFollowsItsBaseWhenThePushCollects) {
+  CALLS_ONLY_ON_X86_64_SYSV();
+  // The push hook collects (a moving collection at the push), so the object the
+  // pointer is into moves between the arguments being copied and the callee
+  // being called. The pointer is read from the arguments area afterwards, so the
+  // area must be rewritten from the base like every other derived pointer. Seen
+  // with the argument in a register and past the sixth, on the stack.
+  for (int extra : {0, 6}) {
+    SCOPED_TRACE(extra);
+    Engine e;
+    e.torture = true;
+    int c = e.reserve();
+    {
+      std::vector<GRJIT_Type> params(static_cast<size_t>(extra), GRJIT_TYPE_I64);
+      params.push_back(GRJIT_TYPE_PTR);
+      P p("deref", params);
+      int r = p.local();
+      p.load(r, extra);
+      p.ret(r);
+      e.set(c, p.done());
+    }
+    int m = e.reserve();
+    {
+      P p("m", {});
+      int obj = p.local(GRJIT_TYPE_REF), pp = p.local(GRJIT_TYPE_PTR), r = p.local(),
+          v = p.local(), s = p.local(), z = p.local();
+      std::vector<int> args;
+      p.cnst(z, 0);
+      for (int i = 0; i < extra; i++) {
+        args.push_back(z);
+      }
+      p.nw(obj, 4242);
+      p.derive(pp, obj, 8);
+      args.push_back(pp);
+      p.call(r, c, args);
+      p.get(v, obj);
+      p.bin(K::ADD, s, r, v);
+      p.ret(s);
+      e.set(m, p.done());
+    }
+    Outcome o = e.run_compiled(m, {});
+    ASSERT_TRUE(o.finished);
+    EXPECT_EQ(o.value, 8484u);
+    EXPECT_EQ(e.heap.poisoned_reads, 0);
+    EXPECT_GT(e.heap.moved, 0);
+  }
+}
+
 GRJIT_TEST_MAIN()

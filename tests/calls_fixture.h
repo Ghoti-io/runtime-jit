@@ -73,7 +73,9 @@ enum class K {
   CLEARSLOT, // clear fn's entry slot (retiring the code a frame may be in)
   ENTRYOF,   // d = the internal entry of fn's compiled code, or 0
   PROBE,     // record local a (and the native stack pointer, compiled)
-  REFSLOT    // refuse fn's entry slot, as if it could not be compiled
+  REFSLOT,   // refuse fn's entry slot, as if it could not be compiled
+  DERIVE,    // d (a PTR) = the address a (a REF) holds plus imm: a derived pointer
+  LOAD       // d = the 64-bit word at the address in a (a PTR or REF)
 };
 
 struct Ins {
@@ -132,6 +134,8 @@ struct P {
   void collect() { add(K::COLLECT); }
   void clearslot(int fn) { auto & i = add(K::CLEARSLOT); i.fn = fn; }
   void refslot(int fn) { auto & i = add(K::REFSLOT); i.fn = fn; }
+  void derive(int d, int a, int64_t off) { auto & i = add(K::DERIVE); i.d = d; i.a = a; i.imm = off; }
+  void load(int d, int a) { auto & i = add(K::LOAD); i.d = d; i.a = a; }
   void entryof(int d, int fn) { auto & i = add(K::ENTRYOF); i.d = d; i.fn = fn; }
   void probe(int a) { auto & i = add(K::PROBE); i.a = a; }
   Func done() { return f; }
@@ -532,6 +536,11 @@ inline GRJIT_Function * Engine::build_ir(int fn) {
   for (int i = F.nparams; i < L; i++) {
     b.reg(F.type[i]);
   }
+  for (const Ins & dv : F.code) {
+    if (dv.k == K::DERIVE) {
+      b.derived(static_cast<GRJIT_VReg>(dv.d), static_cast<GRJIT_VReg>(dv.a), dv.imm);
+    }
+  }
   // Basic blocks: every branch target, and what follows a branch or a return.
   std::set<int> leaders = {0};
   const int n = static_cast<int>(F.code.size());
@@ -608,6 +617,11 @@ inline GRJIT_Function * Engine::build_ir(int fn) {
             GRCORE_SITE_GC_POINT_ALLOC_SLOW);
         break;
       case K::GET: b.load(in.d, in.a, 8, 64); break;
+      case K::LOAD: b.load(in.d, in.a, 0, 64); break;
+      case K::DERIVE:
+        b.bitcast(in.d, in.a);
+        b.bin(GRJIT_OP_ADD, in.d, V(in.d), I(in.imm));
+        break;
       case K::COLLECT:
         b.call_gc(GRJIT_NO_VREG, reinterpret_cast<const void *>(Engine::h_collect), {}, id,
             state(pc));
@@ -898,6 +912,8 @@ inline void Engine::interpret(Outcome & out) {
         break;
       }
       case K::GET: wr(S, fn, in.d, static_cast<u64>(heap.read(L(in.a)))); S[0] = pc + 1; break;
+      case K::LOAD: wr(S, fn, in.d, *reinterpret_cast<const u64 *>(L(in.a))); S[0] = pc + 1; break;
+      case K::DERIVE: wr(S, fn, in.d, L(in.a) + static_cast<u64>(in.imm)); S[0] = pc + 1; break;
       case K::COLLECT:
         h_collect();
         S = grcore_stack_slots(stack, top);

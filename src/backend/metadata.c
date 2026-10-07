@@ -70,6 +70,25 @@ static size_t push_ref_args(const GRJIT_Function * f, const GRJIT_SiteRec * rec)
   return n;
 }
 
+/* A derived pointer passed as an argument is copied into the arguments area, and
+ * the push hook's collection may move its base: the copy is a derived pointer of
+ * its own, rewritten from the same base, or the callee is handed the old address
+ * (AD-12). Its base is live at the push, as the verifier requires of any live
+ * derived pointer. */
+static size_t push_derived_args(const GRJIT_Function * f, const GRJIT_SiteRec * rec) {
+  size_t n = 0;
+  if (!rec_is_push(rec)) {
+    return 0;
+  }
+  for (size_t k = 0; k < rec->op->arg_count; k++) {
+    const GRJIT_Operand * o = &rec->op->args[k];
+    if (o->kind == GRJIT_OPERAND_VREG && f->vregs[o->vreg].derived) {
+      n++;
+    }
+  }
+  return n;
+}
+
 GRJIT_Result grjit_metadata_build(const GRJIT_Function * f,
     const GRJIT_LiveSites * live, const GRJIT_SiteRec * recs, size_t count,
     uint32_t frame_bytes, uint32_t code_bytes, const GRJIT_Allocator * a,
@@ -91,6 +110,7 @@ GRJIT_Result grjit_metadata_build(const GRJIT_Function * f,
     }
     loc_total += f->states[recs[i].state].slot_count;
     loc_total += push_ref_args(f, &recs[i]);
+    der_total += push_derived_args(f, &recs[i]);
   }
   if (count > SIZE_MAX / sizeof *out->sites ||
       loc_total > SIZE_MAX / sizeof *out->locations ||
@@ -190,6 +210,17 @@ GRJIT_Result grjit_metadata_build(const GRJIT_Function * f,
           l.value = GRJIT_ARGS_SLOT(f->vreg_count, shape.args_area, k);
           l.representation = GRCORE_REPR_BITS;
           out->locations[loc_at + refs++] = l;
+        }
+      }
+    }
+    if (rec_is_push(r)) {
+      for (size_t k = 0; k < r->op->arg_count; k++) {
+        const GRJIT_Operand * o = &r->op->args[k];
+        if (o->kind == GRJIT_OPERAND_VREG && f->vregs[o->vreg].derived) {
+          GRCORE_DerivedPointer * d = &out->derived[der_at + ders++];
+          d->slot = GRJIT_ARGS_SLOT(f->vreg_count, shape.args_area, k);
+          d->base_slot = grjit_emit_slot(f->vregs[o->vreg].base);
+          d->delta = f->vregs[o->vreg].delta;
         }
       }
     }
