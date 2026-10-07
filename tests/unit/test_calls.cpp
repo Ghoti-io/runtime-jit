@@ -716,6 +716,66 @@ TEST(Calls, APushThatIsRefusedIsAnExitAtTheCallSiteAndTheInterpreterMakesTheCall
   EXPECT_EQ(o.frames_left, 0u);
 }
 
+TEST(Calls, TheCauseOfAGuestCallExitIsZeroAtTheHookAndAtTheEntryWhateverMadeTheCallExit) {
+  CALLS_ONLY_WHERE_EMITTED();
+  // An exit at a call site is no native's status and no helper's verdict: the deopt hook is handed cause zero and
+  // the entry reports zero in out[0]. Five ways to leave at a call; each must say the same.
+  auto check = [](Engine & e, const Outcome & o, const char * how) {
+    SCOPED_TRACE(how);
+    ASSERT_TRUE(o.finished);
+    EXPECT_EQ(o.exit, uint32_t{GRJIT_EXIT_DEOPT});
+    ASSERT_EQ(e.st.causes.size(), 1u) << "the hook was asked once";
+    EXPECT_EQ(e.st.causes[0], 0u) << "the cause at the hook";
+    EXPECT_EQ(o.entry_cause, 0u) << "the cause at the entry";
+    EXPECT_TRUE(e.st.last_was_call_exit) << "the exit started at the call instruction";
+  };
+  {
+    Engine e;
+    int g = add_gchain(e, -1);
+    e.refuse_push_at = 4;
+    check(e, e.run_compiled(g, {10}), "a refused push");
+  }
+  {
+    Engine e;
+    int inc = add_inc(e);
+    int top = add_via_slot(e, inc);
+    e.uncompilable.insert(inc);
+    check(e, e.run_compiled(top, {5}), "a callee the engine cannot compile");
+  }
+  {
+    Engine e;
+    int inc = add_inc(e);
+    int top = add_via_slot(e, inc);
+    ASSERT_EQ(grcore_entry_slot_refuse(e.ctx, e.slots[inc]), GRCORE_OK);
+    check(e, e.run_compiled(top, {5}), "a slot already refused");
+  }
+  {
+    Engine e;
+    int inc = add_inc(e);
+    ASSERT_TRUE(e.compile_fn(inc));
+    int f = e.reserve();
+    {
+      P p("via_null_ptr", {GRJIT_TYPE_I64});
+      int ptr = p.local(GRJIT_TYPE_PTR), r = p.local();
+      p.cnst(ptr, 0);
+      p.callp(r, ptr, inc, {0});
+      p.ret(r);
+      e.set(f, p.done());
+    }
+    check(e, e.run_compiled(f, {10}), "a code pointer that is not an entry");
+  }
+  {
+    Engine e(/*depth=*/3);
+    int g = add_gchain(e, -1);
+    Outcome o = e.run_compiled(g, {100});
+    ASSERT_TRUE(o.limit);
+    EXPECT_EQ(o.exit, uint32_t{GRJIT_EXIT_DEOPT});
+    ASSERT_EQ(e.st.causes.size(), 1u);
+    EXPECT_EQ(e.st.causes[0], 0u) << "a guest-depth refusal is a refused push: cause zero too";
+    EXPECT_EQ(o.entry_cause, 0u);
+  }
+}
+
 TEST(Calls, TheGuestDepthBudgetRefusesAPushAtTheSameDepthCompiledAndInterpreted) {
   CALLS_ONLY_WHERE_EMITTED();
   for (uint64_t depth : {uint64_t{3}, uint64_t{10}, uint64_t{25}}) {
