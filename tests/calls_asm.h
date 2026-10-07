@@ -35,10 +35,16 @@
 #ifndef GHOTI_IO_GRJIT_TESTS_CALLS_ASM_H
 #define GHOTI_IO_GRJIT_TESTS_CALLS_ASM_H
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <vector>
+
+#include <gtest/gtest.h>
 
 #include <ghoti.io/runtime-jit/runtime-jit.h>
+
+#include <ghoti.io/runtime-core/runtime-core.h>
 
 #if defined(__x86_64__) && defined(__linux__)
 #define FX_ASM_X86_64 1
@@ -130,6 +136,43 @@ inline uint64_t sentinel_value(size_t i) {
  * after it, the registers as the call left them. */
 extern "C" uint32_t fx_call_with_sentinels(
     GRJIT_EntryFn entry, void * ctx, const uint64_t * args, uint64_t * out, uint64_t * regs);
+
+namespace fx {
+
+/** Enters function `fn` of the fixture engine `e` through the sentinel trampoline the way the
+ *  engine's own run does (a guest frame, a JIT activation record, the native-stack limit), and
+ *  checks every callee-saved register afterwards against `sentinel_value`, naming the one that
+ *  changed and `what` it was doing. Returns the entry's exit. The frames the run left are
+ *  unwound, as the engine's run leaves them. (A template, so that this header need not know the
+ *  fixture, which is included after it.) */
+template <class E>
+uint32_t call_with_sentinels_and_check(E & e, int fn, std::vector<uint64_t> in, const char * what) {
+  const auto * code = e.code_of(fn).code;
+  e.base_frames = grcore_stack_frame_count(e.stack);
+  EXPECT_TRUE(e.push_frame(fn, in.data(), in.size(), false)) << what;
+  grcore_context_native_limit_here(e.ctx);
+  GRCORE_ActivationRef rec;
+  EXPECT_EQ(grcore_activation_enter(e.stack, GRCORE_ACTIVATION_JIT, e.engine, false, nullptr, &rec), GRCORE_OK)
+      << what;
+  std::vector<uint64_t> out(grjit_code_out_words(code), 0);
+  in.resize(std::max<size_t>(in.size(), grjit_code_param_count(code)));
+  uint64_t regs[kSentinelCount];
+  for (size_t i = 0; i < kSentinelCount; i++) {
+    regs[i] = sentinel_value(i);
+  }
+  // Through a trampoline that sets the registers and reads them back: calling a callee that does
+  // not preserve them directly would corrupt this very function, which is what the test is for.
+  const uint32_t exit = fx_call_with_sentinels(grjit_code_entry(code), e.ctx, in.data(), out.data(), regs);
+  for (size_t i = 0; i < kSentinelCount; i++) {
+    EXPECT_EQ(regs[i], sentinel_value(i)) << sentinel_name(i) << " after " << what;
+  }
+  EXPECT_EQ(grcore_activation_leave(e.stack, rec), GRCORE_OK) << what;
+  grcore_unwind_all(e.stack, nullptr);
+  e.reset_reservation();
+  return exit;
+}
+
+} // namespace fx
 
 #if FX_ASM_X86_64
 asm(R"(

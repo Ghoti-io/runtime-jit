@@ -397,6 +397,7 @@ class Engine {
   std::vector<PollSnap> poll_snaps;
   bool bad_native_ctx = false;     // a native was called with a context that is not this one
   bool bad_hook_ctx = false;       // a hook was handed a context that is not this one
+  bool sp_misaligned = false;      // a hook was entered with the stack not 16-aligned
 
   explicit Engine(uint64_t guest_depth = GRCORE_UNLIMITED,
       uint64_t native_bytes = GRCORE_UNLIMITED, bool conv = false,
@@ -472,6 +473,18 @@ class Engine {
       bad_hook_ctx = true;
     }
   }
+  /* Records a stack that was not 16-aligned when the hook was entered, which the C ABI of both
+   * targets requires of every call, so compiled code that left it off by eight would be seen at
+   * its first hook. The tests have frame pointers, so a function's frame address is its stack
+   * pointer at entry less a constant that is a multiple of sixteen on both targets (the pushed
+   * return address and frame pointer on x86-64, the frame record's own frame on arm64):
+   * qemu-user does not fault on a misaligned `sp`, so this is asserted and never expected. Called
+   * from the hook itself, which is what makes the frame address the hook's. */
+  __attribute__((always_inline)) void check_sp() {
+    if (reinterpret_cast<uintptr_t>(__builtin_frame_address(0)) % 16 != 0) {
+      sp_misaligned = true;
+    }
+  }
   // ---- hooks (C ABI) ----
   static uint32_t h_push(void *, uint64_t, const uint64_t *, uint64_t);
   static uint32_t h_tail(void *, uint64_t, const uint64_t *, uint64_t);
@@ -539,6 +552,7 @@ inline Engine::~Engine() {
     }
   }
   EXPECT_FALSE(bad_hook_ctx) << "every hook is handed the context the code was called with";
+  EXPECT_FALSE(sp_misaligned) << "every hook is entered with the stack pointer 16-aligned";
   grcore_deopt_release(ctx, reservation);
   grjit_native_table_free(ntable);
   EXPECT_EQ(grcore_context_destroy(ctx), GRCORE_OK);
@@ -936,6 +950,7 @@ inline bool Engine::compile_fn(int fn) {
 inline uint32_t Engine::h_push(void * ctx, uint64_t callee, const uint64_t * args, uint64_t n) {
   Engine & e = *g_engine;
   e.check_hook_ctx(ctx);
+  e.check_sp();
   if (e.torture) {
     e.collect(); // the frame-push GC point: the arguments are read afterwards
   }
@@ -981,6 +996,7 @@ inline uint32_t Engine::h_push(void * ctx, uint64_t callee, const uint64_t * arg
 inline uint32_t Engine::h_tail(void * ctx, uint64_t callee, const uint64_t * args, uint64_t n) {
   Engine & e = *g_engine;
   e.check_hook_ctx(ctx);
+  e.check_sp();
   e.st.tails++;
   if (e.torture) {
     e.collect(); // a GC point: the arguments are read afterwards
@@ -1051,6 +1067,7 @@ inline uint32_t Engine::h_tail(void * ctx, uint64_t callee, const uint64_t * arg
 inline void Engine::h_pop(void * ctx) {
   Engine & e = *g_engine;
   e.check_hook_ctx(ctx);
+  e.check_sp();
   e.pop_frame();
   if (!e.extensions.empty()) {
     grcore_deopt_reservation_retract(e.reservation, e.extensions.back());
@@ -1062,6 +1079,7 @@ inline void Engine::h_pop(void * ctx) {
 inline uint32_t Engine::h_compile(void * ctx, uint64_t callee) {
   Engine & e = *g_engine;
   e.check_hook_ctx(ctx);
+  e.check_sp();
   e.st.compile_calls++;
   if (e.uncompilable.count(static_cast<int>(callee)) != 0) {
     e.st.compile_refusals++;
@@ -1077,6 +1095,7 @@ inline uint32_t Engine::h_compile(void * ctx, uint64_t callee) {
 inline uint32_t Engine::h_deopt(void * ctx, uint64_t cause) {
   Engine & e = *g_engine;
   e.check_hook_ctx(ctx);
+  e.check_sp();
   e.st.deopts++;
   e.st.last_cause = cause;
   e.st.causes.push_back(cause);
@@ -1161,6 +1180,7 @@ inline uint32_t Engine::h_deopt(void * ctx, uint64_t cause) {
 inline uint32_t Engine::h_poll(void * ctx, uint64_t, uint64_t) {
   Engine & e = *g_engine;
   e.check_hook_ctx(ctx);
+  e.check_sp();
   e.st.poll_slow++;
   if (e.torture) {
     e.collect();
@@ -1179,6 +1199,7 @@ inline uint32_t Engine::h_poll(void * ctx, uint64_t, uint64_t) {
 
 inline uint64_t Engine::h_new(uint64_t v) {
   Engine & e = *g_engine;
+  e.check_sp();
   e.st.news++;
   if (e.torture) {
     e.collect();
@@ -1188,6 +1209,7 @@ inline uint64_t Engine::h_new(uint64_t v) {
 
 inline uint64_t Engine::h_collect() {
   Engine & e = *g_engine;
+  e.check_sp();
   e.st.collects++;
   if (e.on_collect) {
     e.on_collect(e);

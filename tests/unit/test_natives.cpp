@@ -15,6 +15,7 @@
 #define FX_ASM_ENTRY_SP
 #define FX_ASM_STATUS_GARBAGE
 #define FX_ASM_CLOBBER
+#define FX_ASM_SENTINELS
 #include "../calls_asm.h"
 #include "../calls_fixture.h"
 
@@ -1020,6 +1021,52 @@ TEST(Natives, NativesCalledFromACompiledChainRunInTheInterpretersOrderAndNoCallL
   EXPECT_EQ(e.st.deopts, 0) << "no call, guest or native, left compiled code";
   EXPECT_FALSE(e.bad_native_ctx) << "every native got the context the code was called with";
   EXPECT_EQ(e.st.pushes, e.st.pops);
+}
+
+TEST(Natives, NoCalleeSavedRegisterIsChangedByNativesThatClobberEverythingOrByAStatusExit) {
+#if FX_HAVE_CALLS_ASM
+  // A native clobbers every caller-saved register and the vector registers, so a compiled function that
+  // used a callee-saved one without restoring it, or let the native see x29/rbp as anything but a frame
+  // base, would show in the sentinels the C caller set. The chain returns, and with a status native it
+  // leaves through the chain deopt: both are the call's end.
+  for (u64 status : {u64{0}, u64{GRJIT_NATIVE_DEOPT}}) {
+    SCOPED_TRACE(status);
+    Engine e;
+    Nat n = register_natives(e);
+    int clobber = e.add_native(reinterpret_cast<const void *>(fx::n_clobber), {GRJIT_TYPE_I64}, GRJIT_TYPE_I64, 0, 512,
+        "clobber");
+    int f3 = e.reserve(), f2 = e.reserve(), f1 = e.reserve();
+    {
+      P p("f3", {GRJIT_TYPE_I64, GRJIT_TYPE_I64});
+      int v = p.local(), w = p.local(), x = p.local(), r = p.local();
+      p.native(v, clobber, {0});
+      p.native(w, clobber, {v});
+      p.native(x, n.status, {w, 1});
+      p.native(r, n.log, {x});
+      p.ret(r);
+      e.set(f3, p.done());
+    }
+    {
+      P p("f2", {GRJIT_TYPE_I64, GRJIT_TYPE_I64});
+      int r = p.local();
+      p.call(r, f3, {0, 1});
+      p.ret(r);
+      e.set(f2, p.done());
+    }
+    {
+      P p("f1", {GRJIT_TYPE_I64, GRJIT_TYPE_I64});
+      int r = p.local();
+      p.call(r, f2, {0, 1});
+      p.ret(r);
+      e.set(f1, p.done());
+    }
+    for (int fn : {f1, f2, f3}) {
+      ASSERT_TRUE(e.compile_fn(fn));
+    }
+    EXPECT_EQ(fx::call_with_sentinels_and_check(e, f1, {5, status}, "natives that clobber"),
+        status == 0 ? uint32_t{GRJIT_EXIT_RETURNED} : uint32_t{GRJIT_EXIT_DEOPT});
+  }
+#endif
 }
 
 namespace {

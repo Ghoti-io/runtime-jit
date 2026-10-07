@@ -13,6 +13,7 @@
  */
 
 #define FX_ASM_TAIL_GARBAGE
+#define FX_ASM_SENTINELS
 #include "../calls_asm.h"
 #include "../calls_fixture.h"
 
@@ -2187,6 +2188,52 @@ TEST(Tail, TheHooksSiteNamesTheArgumentsAndTheExitsSiteOnlyWhatItsStateNames) {
   EXPECT_EQ(exit->live_count, 1u) << "keep, and not the argument";
   EXPECT_EQ(hook->live_count, 3u) << "keep and the argument's register, and the argument's slot in the area";
   EXPECT_EQ(exit->frame_state_count, hook->frame_state_count) << "the one state";
+}
+
+/* ---- The C caller's registers across tail calls --------------------------------------------- */
+
+TEST(Tail, NoCalleeSavedRegisterIsChangedAcrossAChainOfTailCallsThatReturnsOrDeoptimizes) {
+  TAIL_ONLY_WHERE_EMITTED();
+#if FX_HAVE_CALLS_ASM
+  // The frame replacement moves the frame record and loads the caller's saved base before it
+  // overwrites anything, and jumps; a callee-saved register used or a frame record left behind would
+  // show in the sentinels the C caller set (x29 included on arm64, which a tail call to a callee with
+  // more stack arguments than its caller moves to a lower place).
+  struct Case {
+    const char * what;
+    int64_t fail_at;
+    bool through_pointer;
+    u64 n;
+    uint32_t exit;
+  };
+  const Case cases[] = {
+      {"a chain of tail calls through a slot that returns", -1, false, 40, GRJIT_EXIT_RETURNED},
+      {"a chain of tail calls through a pointer that returns", -1, true, 40, GRJIT_EXIT_RETURNED},
+      {"a guard failing in the tail-called function", 9, false, 40, GRJIT_EXIT_DEOPT},
+      {"a guard failing in a function entered through a pointer", 9, true, 40, GRJIT_EXIT_DEOPT},
+  };
+  for (const Case & c : cases) {
+    SCOPED_TRACE(c.what);
+    Engine e;
+    int tc = add_tchain(e, c.fail_at, false, c.through_pointer);
+    int top = add_top(e, tc);
+    ASSERT_TRUE(e.compile_fn(tc));
+    ASSERT_TRUE(e.compile_fn(top));
+    EXPECT_EQ(fx::call_with_sentinels_and_check(e, top, {c.n}, c.what), c.exit);
+  }
+  {
+    // A tail call to a callee with more stack arguments than its caller has: the frame record moves.
+    Engine e;
+    int wide = add_callee(e, 16);
+    int caller = add_tail_caller(e, 2, wide, 16, false);
+    int outer = add_outer(e, 2, caller, wide, 16);
+    ASSERT_TRUE(e.compile_fn(wide));
+    ASSERT_TRUE(e.compile_fn(caller));
+    ASSERT_TRUE(e.compile_fn(outer));
+    EXPECT_EQ(fx::call_with_sentinels_and_check(e, outer, {3, 4}, "a tail call to a wider callee"),
+        uint32_t{GRJIT_EXIT_RETURNED});
+  }
+#endif
 }
 
 /* ---- A hook's answer is its low 32 bits ------------------------------------------------ */

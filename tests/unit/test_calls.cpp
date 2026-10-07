@@ -923,37 +923,39 @@ TEST(Calls, RepeatedReplacementUnderOneLongLivedActivationRetainsEachReplacedFun
 TEST(Calls, NoCalleeSavedRegisterIsEverChangedByCompiledCodeThroughTheEntryOrAChain) {
   CALLS_ONLY_WHERE_EMITTED();
 #if FX_HAVE_CALLS_ASM
-  Engine e;
-  int g = add_gchain(e, -1);
-  int deep = add_gchain(e, 4);
-  // A chain that returns, and one that deoptimizes in the middle of it: the C
-  // caller's rbx and r12-r15 come back as they went in either way.
-  for (int fn : {g, deep}) {
-    SCOPED_TRACE(fn);
-    ASSERT_TRUE(e.compile_fn(fn));
-    e.base_frames = grcore_stack_frame_count(e.stack);
-    ASSERT_TRUE(e.push_frame(fn, std::vector<u64>{9}.data(), 1, false));
-    grcore_context_native_limit_here(e.ctx);
-    GRCORE_ActivationRef rec;
-    ASSERT_EQ(grcore_activation_enter(e.stack, GRCORE_ACTIVATION_JIT, e.engine, false, nullptr, &rec),
-        GRCORE_OK);
-    const GRJIT_Code * code = e.code_of(fn).code;
-    uint64_t in[1] = {9};
-    std::vector<uint64_t> out(grjit_code_out_words(code), 0);
-    uint64_t regs[fx::kSentinelCount];
-    for (size_t i = 0; i < fx::kSentinelCount; i++) {
-      regs[i] = fx::sentinel_value(i);
+  // Every callee-saved register of the target (rbx, r12-r15; x19-x28, x29 and d8-d15) is set to its own
+  // sentinel by a trampoline, the compiled entry is called through it, and each comes back as it went in.
+  // A chain that returns, a fifty-deep one, a guard that fails in the middle of one and a poll whose
+  // helper answers with a verdict (and, below, an entry hook that refuses): each ends the call
+  // differently, and each leaves the C caller's registers as they were. (On arm64 x29 is one of them: the adapter makes it the
+  // chain-end marker for the first compiled frame and gives it back.)
+  struct Case {
+    const char * what;
+    int64_t fail_at;
+    bool poll;
+    u64 n;
+    uint32_t exit;
+  };
+  const Case cases[] = {
+      {"a chain that returns", -1, false, 9, GRJIT_EXIT_RETURNED},
+      {"a fifty-deep chain that returns", -1, false, 50, GRJIT_EXIT_RETURNED},
+      {"a guard failing in the middle of a chain", 4, false, 9, GRJIT_EXIT_DEOPT},
+      {"a guard failing at the bottom of a fifty-deep chain", 0, false, 50, GRJIT_EXIT_DEOPT},
+      {"a poll verdict in the third frame", -1, true, 9, GRJIT_EXIT_DEOPT},
+  };
+  for (const Case & c : cases) {
+    SCOPED_TRACE(c.what);
+    Engine e;
+    int g = add_gchain(e, c.fail_at, c.poll);
+    ASSERT_TRUE(e.compile_fn(g));
+    if (c.poll) {
+      uint64_t * request = reinterpret_cast<uint64_t *>(
+          reinterpret_cast<unsigned char *>(e.ctx) + grcore_jit_layout()->request_word_offset);
+      *request = 1;
+      e.poll_slow_calls_to_fail = 3;
     }
-    // Through a trampoline that sets the registers and reads them back: calling
-    // a callee that does not preserve them directly would corrupt this very
-    // function, which is what the test is for.
-    fx_call_with_sentinels(grjit_code_entry(code), e.ctx, in, out.data(), regs);
-    for (size_t i = 0; i < fx::kSentinelCount; i++) {
-      EXPECT_EQ(regs[i], fx::sentinel_value(i)) << fx::sentinel_name(i);
-    }
-    ASSERT_EQ(grcore_activation_leave(e.stack, rec), GRCORE_OK);
-    grcore_unwind_all(e.stack, nullptr);
-    e.reset_reservation();
+    uint32_t exit = fx::call_with_sentinels_and_check(e, g, {c.n}, c.what);
+    EXPECT_EQ(exit, c.exit) << "the call ended the way the case means it to";
   }
 #endif
 }
@@ -1151,6 +1153,30 @@ GRJIT_Function * callable_identity(GRJIT_Type t) {
 }
 
 } // namespace
+
+TEST(Calls, AnEntryHooksRefusalLeavesEveryCalleeSavedRegisterAsItWas) {
+  CALLS_ONLY_WHERE_EMITTED();
+#if FX_HAVE_CALLS_ASM
+  // The entry hook refuses before anything else: the adapter's own refusal path, which gives the
+  // frame record back as the normal exit does.
+  JitWorld w;
+  Fn f(callable_identity(GRJIT_TYPE_I64));
+  Compiled c(f, w.pages(), refuse_with_seven);
+  ASSERT_TRUE(c);
+  uint64_t in[1] = {9};
+  std::vector<uint64_t> out(grjit_code_out_words(c.code), 0);
+  uint64_t regs[fx::kSentinelCount];
+  for (size_t i = 0; i < fx::kSentinelCount; i++) {
+    regs[i] = fx::sentinel_value(i);
+  }
+  EXPECT_EQ(fx_call_with_sentinels(grjit_code_entry(c.code), w.ctx, in, out.data(), regs),
+      uint32_t{GRJIT_EXIT_REFUSED});
+  EXPECT_EQ(out[0], 7u);
+  for (size_t i = 0; i < fx::kSentinelCount; i++) {
+    EXPECT_EQ(regs[i], fx::sentinel_value(i)) << fx::sentinel_name(i) << " after an entry hook's refusal";
+  }
+#endif
+}
 
 TEST(Calls, TheEntryHookRunsInTheAdapterBeforeAnythingAndItsRefusalIsReportedAsRefused) {
   CALLS_ONLY_WHERE_EMITTED();
@@ -2032,6 +2058,78 @@ TEST(Calls, CallableCodeBuiltForAnotherLayoutIsRefusedBeforeAnyOfItRuns) {
     *field = saved;
   }
   EXPECT_EQ(grjit_code_call(c.code, w.ctx, args, out), uint32_t{GRJIT_EXIT_RETURNED});
+}
+
+/* ---- The stack pointer across a call and its return --------------------------------------- */
+
+TEST(Calls, TheStackPointerIsTheSameBeforeEveryCallAndAfterEveryReturnForEveryArityAndForm) {
+  CALLS_ONLY_WHERE_EMITTED();
+  // The convention has the callee pop the stack arguments (and on arm64 the caller make the area at
+  // [sp] and the callee's `add sp` give it back), so a caller's stack pointer is the same after a
+  // return as before the call, whatever the count: a probe, which is a native called directly from
+  // the compiled caller, reads its caller's stack pointer and frame base four times, around three
+  // calls, and every reading must be the same. A callee that did not pop, or popped the wrong area,
+  // drifts the pointer by the area with every call. Arities from 0 to 16 cross the register boundary
+  // of both targets (6 and 8), and the area's rounding to sixteen bytes.
+  for (int through_pointer = 0; through_pointer < 2; through_pointer++) {
+    for (int k = 0; k <= 16; k++) {
+      SCOPED_TRACE(testing::Message() << (through_pointer ? "pointer" : "slot") << " k=" << k);
+      Engine e;
+      std::vector<GRJIT_Type> types(static_cast<size_t>(k), GRJIT_TYPE_I64);
+      int callee = e.reserve();
+      {
+        P p("callee", types);
+        int acc = p.local(), c = p.local(), t = p.local();
+        p.cnst(acc, 100);
+        for (int i = 0; i < k; i++) {
+          p.cnst(c, i + 1);
+          p.bin(K::MUL, t, i, c);
+          p.bin(K::ADD, acc, acc, t);
+        }
+        p.ret(acc);
+        e.set(callee, p.done());
+      }
+      int64_t ref = 100;
+      for (int i = 0; i < k; i++) {
+        ref += static_cast<int64_t>(i + 1) * (7 + 3 * i);
+      }
+      int outer = e.reserve();
+      {
+        P p("outer", {GRJIT_TYPE_I64});
+        int r1 = p.local(), r2 = p.local(), r3 = p.local(), s = p.local(), ptr = p.local(GRJIT_TYPE_PTR);
+        std::vector<int> args;
+        for (int i = 0; i < k; i++) {
+          args.push_back(p.imm(7 + 3 * i));
+        }
+        if (through_pointer) {
+          p.entryof(ptr, callee);
+        }
+        p.probe(0);
+        for (int r : {r1, r2, r3}) {
+          if (through_pointer) {
+            p.callp(r, ptr, callee, args);
+          } else {
+            p.call(r, callee, args);
+          }
+          p.probe(0);
+        }
+        p.bin(K::ADD, s, r1, r2);
+        p.bin(K::ADD, s, s, r3);
+        p.ret(s);
+        e.set(outer, p.done());
+      }
+      ASSERT_TRUE(e.compile_fn(callee));
+      Outcome o = e.run_compiled(outer, {1});
+      ASSERT_TRUE(o.finished);
+      EXPECT_EQ(o.exit, uint32_t{GRJIT_EXIT_RETURNED});
+      EXPECT_EQ(static_cast<int64_t>(o.value), 3 * ref);
+      ASSERT_EQ(e.st.sps.size(), 4u);
+      for (size_t i = 1; i < e.st.sps.size(); i++) {
+        EXPECT_EQ(e.st.sps[i], e.st.sps[0]) << "the stack pointer after return " << i << " is the one before the first call";
+        EXPECT_EQ(e.st.bases[i], e.st.bases[0]) << "and so is the frame base";
+      }
+    }
+  }
 }
 
 /* ---- An entry is on a sixteen-byte boundary ------------------------------------------------ */
