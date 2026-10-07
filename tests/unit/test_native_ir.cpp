@@ -538,6 +538,30 @@ TEST(NativeIr, ADerivedPointerLiveAcrossANativeCallNeedsItsBaseLiveToo) {
   EXPECT_NE(bad.second.find("derived pointer v1 is live at block b0"), std::string::npos) << bad.second;
 }
 
+TEST(NativeIr, CompilingAFunctionWhoseNativeTheTableDoesNotHoldIsRefusedAndNothingIsEmitted) {
+  GRJIT_REQUIRE_BACKEND();
+  JitWorld w;
+  NativeTab t;
+  uint32_t plain = t.add(reinterpret_cast<const void *>(n_plain), {}, TI);
+  auto compile = [&](uint32_t id, const GRJIT_NativeTable * table) {
+    B b("caller", 1);
+    GRJIT_VReg x = b.param(TI);
+    b.callable(hooks());
+    b.natives(table);
+    b.at(b.block());
+    b.call_native(x, id, {}, kId, {grjit_frame_slot_vreg(x)});
+    b.ret(V(x));
+    Fn f(b.finish());
+    Compiled c(f, w.pages());
+    return c.result;
+  };
+  EXPECT_EQ(compile(plain + 1, t), GRJIT_ERR_INVALID) << "an id the table does not hold";
+  EXPECT_EQ(compile(plain, nullptr), GRJIT_ERR_INVALID) << "no table";
+  EXPECT_EQ(compile(plain, t), grjit_backend_calls_available() ? GRJIT_OK : GRJIT_ERR_UNSUPPORTED)
+      << "the control: the same call with its native";
+  EXPECT_EQ(w.blocks_in_use(), 0u) << "a refusal leaves no memory behind";
+}
+
 /* ---- The printer ------------------------------------------------------------------- */
 
 TEST(NativeIr, ThePrinterShowsTheIdTheArgumentsTheStateAndTheStateAfterTheCall) {

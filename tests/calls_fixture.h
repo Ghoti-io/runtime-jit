@@ -39,11 +39,13 @@
 #include <ghoti.io/runtime-core/a/registry.h>
 
 #include <algorithm>
+#include <array>
 #include <deque>
 #include <map>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 namespace fx {
 
@@ -77,7 +79,8 @@ enum class K {
   DERIVE,    // d (a PTR) = the address a (a REF) holds plus imm: a derived pointer
   LOAD,      // d = the 64-bit word at the address in a (a PTR or REF)
   TAILCALL,  // return fn(args...): replaces this frame, through fn's entry slot
-  TAILCALLP  // the same through the code pointer in local a
+  TAILCALLP, // the same through the code pointer in local a
+  NATIVE     // d = native[native](args...): a registered native, called from either tier
 };
 
 struct Ins {
@@ -86,6 +89,7 @@ struct Ins {
   int64_t imm = 0;
   int t = 0;
   int fn = -1;
+  int native = -1; // NATIVE: the id the engine registered it under
   std::vector<int> args;
 };
 
@@ -98,6 +102,10 @@ struct Func {
    * is refused by the engine's hook, goes through an exit, and the interpreter
    * makes it as a call whose result this frame returns (AD-28). */
   bool owns_scope = false;
+  /* A scope boundary: an unwind (a native's status UNWIND) pops the frames above
+   * the nearest caller that catches, and that frame resumes after the call that
+   * was running, with the value kUnwound as its result. */
+  bool catches = false;
   /* Immediate operands of call arguments (and of a tail call's code pointer): a
    * negative `-1 - k` in an argument list is `imms[k]`. */
   std::vector<int64_t> imms;
@@ -146,6 +154,10 @@ struct P {
   void tailcallp(int ptr, int fn, std::vector<int> args) {
     auto & i = add(K::TAILCALLP); i.a = ptr; i.fn = fn; i.args = std::move(args);
   }
+  /* d = native `id` (as Engine::add_native gave it) called with `args`; `d` may be -1. */
+  void native(int d, int id, std::vector<int> args) {
+    auto & i = add(K::NATIVE); i.d = d; i.native = id; i.args = std::move(args);
+  }
   void ret(int a) { auto & i = add(K::RET); i.a = a; }
   void guard(int a) { auto & i = add(K::GUARD); i.a = a; }
   void poll() { add(K::POLL); }
@@ -186,6 +198,13 @@ struct Heap {
     live.insert(a);
     return a;
   }
+  /* The value of a reference without counting a read: -1 for none, -2 for a dead cell. */
+  int64_t peek(u64 ref) const {
+    if (ref == 0) {
+      return -1;
+    }
+    return live.count(ref) != 0 ? reinterpret_cast<const Obj *>(ref)->value : -2;
+  }
   /* The value of a reference; a poisoned one is counted, and gives the poison. */
   int64_t read(u64 ref) {
     if (ref == 0) {
@@ -221,6 +240,37 @@ struct CompiledFn {
 class Engine;
 inline Engine * g_engine = nullptr;
 
+/* What a frame looked like at a poll, in either tier: the function, the pc, and
+ * the value of each local (a reference is its object's value; zero is -1). The
+ * frame differential compares these, frame for frame, across tiers. */
+struct FrameSnap {
+  int fn = -1;
+  int64_t pc = 0;
+  std::vector<int64_t> locals;
+  bool operator==(const FrameSnap & o) const { return fn == o.fn && pc == o.pc && locals == o.locals; }
+};
+using PollSnap = std::vector<FrameSnap>; // the whole guest stack, innermost first
+
+/* A native the engine registered: the function, and the descriptor given to the
+ * library, kept so that the interpreter calls it the same way. */
+struct NativeSpec {
+  std::string name;
+  const void * fn = nullptr;
+  std::vector<GRJIT_Type> params;
+  GRJIT_Type result = GRJIT_NATIVE_NO_RESULT;
+  uint32_t flags = 0;
+  uint32_t stack_bytes = 64;
+};
+
+/* A native's result as the engine's wrapper sees it, whatever its signature. */
+struct NativeOut {
+  uint64_t value = 0;
+  uint64_t status = 0;
+};
+
+/* The value an unwound call gives the scope that catches the unwind. */
+constexpr u64 kUnwound = 0x0BADC0DE0BADC0DEull;
+
 /* How the run ended. */
 struct Outcome {
   bool finished = false;   // a value was produced
@@ -231,6 +281,8 @@ struct Outcome {
   size_t frames_left = 0;  // guest frames still on the stack (a failure)
   size_t limit_depth = 0;  // guest frames on the stack when a call was refused
   bool failed = false;     // the interpreter met a state no rebuild leaves
+  bool paused = false;     // the interpreter paused at a poll, frames left for a resume
+  bool unwound = false;    // an unwind reached the base of the run with no scope to catch it
   bool rebuild_failed = false; // the adapter reported GRJIT_EXIT_REBUILD_FAILED
   u64 failed_with = 0;     // and the hook's answer, out[0]
   std::vector<u64> pcs_after_failure; // each guest frame's pc slot, before the unwind
@@ -261,6 +313,11 @@ struct Stats {
    * is finished by the interpreter from it. */
   std::vector<std::vector<u64>> push_args;
   std::vector<std::vector<u64>> tail_args;
+  long native_exits = 0;         // exits before a native call (the stack check failed)
+  long status_exits = 0;         // exits a native's non-zero status took
+  long conversions = 0;          // values the engine's `convert` was asked for
+  long unwinds = 0;              // unwinds the engine carried out
+  std::vector<uint64_t> causes;  // the cause each deopt hook call was given
   long tails = 0;                // the tail hook's calls
   long tail_refusals = 0;        // ... that it refused
   long reserve_refusals = 0;     // ... of those, for want of room on the guest stack
@@ -328,10 +385,22 @@ class Engine {
    * hook's return value may be (see test_tail.cpp). */
   uint32_t (*tail_override)(void *, uint64_t, const uint64_t *, uint64_t) = nullptr;
   bool record_hook_args = false;  // keep what each push and tail hook was handed
+  /* ---- Natives (AD-28, CAP-7): the engine's side, played ---- */
+  GRJIT_NativeTable * ntable = nullptr;
+  std::vector<NativeSpec> natives;
+  std::vector<int64_t> trace;      // what the natives log, in order: both tiers must agree
+  bool pause_pending = false;      // a native left a pause pending: the interpreter's next poll pauses
+  int nesting = 0;                 // nested runs open (a pause inside one becomes a limit unwind)
+  size_t ext_floor = 0;            // reservation extensions below this belong to an outer run
+  bool unwind_run = false;         // a hook unwound the whole run: its entry frame is left to the caller
+  bool record_polls = false;       // snapshot the whole stack at every poll, in either tier
+  std::vector<PollSnap> poll_snaps;
+  bool bad_native_ctx = false;     // a native was called with a context that is not this one
 
   explicit Engine(uint64_t guest_depth = GRCORE_UNLIMITED,
       uint64_t native_bytes = GRCORE_UNLIMITED, bool conv = false,
-      const GRCORE_Allocator * allocator = nullptr, uint64_t memory_bytes = GRCORE_UNLIMITED);
+      const GRCORE_Allocator * allocator = nullptr, uint64_t memory_bytes = GRCORE_UNLIMITED,
+      uint64_t native_depth = GRCORE_UNLIMITED);
   ~Engine();
   Engine(const Engine &) = delete;
   Engine & operator=(const Engine &) = delete;
@@ -363,9 +432,31 @@ class Engine {
   void install(int fn);
   const CompiledFn & code_of(int fn) const { return C(fn); }
 
+  // ---- natives (the engine's side of AD-28's CAP-7) ----
+  /* Registers a native with the library and with the interpreter, which calls it by
+   * the same descriptor: the id is the same in both. */
+  int add_native(const void * fn, std::vector<GRJIT_Type> params,
+      GRJIT_Type result = GRJIT_NATIVE_NO_RESULT, uint32_t flags = 0, uint32_t stack_bytes = 64,
+      const char * name = "native");
+  /* The wrapper both tiers share: the C call by the descriptor's arity and signature. */
+  NativeOut call_native(int id, const u64 * args, size_t n);
+  /* An unwind from the top guest frame (the one that called a native): it and the frames
+   * above the nearest catching caller are popped, and the catcher resumes with kUnwound. */
+  bool unwind_top(Outcome & out);
+  void finish_unwound_call(GRCORE_FrameRef catcher);
+  GRCORE_FrameRef frame_at(size_t index);
+  PollSnap snapshot();
+  /* A nested run, as a native's re-entry makes one: it has its own base, its own part of
+   * the reservation, and a pause inside it is a limit unwind. The native opens the
+   * REENTRY record around it. */
+  Outcome run_nested(int fn, const std::vector<u64> & args, bool compiled);
+  /* The interpreter again, after a pause: what a host does when it resumes. */
+  Outcome resume();
+
   // ---- running ----
   Outcome run_interpreted(int fn, const std::vector<u64> & args);
   Outcome run_compiled(int fn, const std::vector<u64> & args);
+  Outcome run_compiled_core(int fn, const std::vector<u64> & args, bool nested);
   void interpret(Outcome & out);           // finish the guest frames
   bool push_frame(int fn, const u64 * args, size_t n, bool compiled_call);
   void pop_frame();
@@ -408,11 +499,12 @@ inline const GRCORE_EngineDescriptor kConvDescriptor = GRCORE_ENGINE_DESCRIPTOR_
 /* ---- Construction and teardown --------------------------------------------- */
 
 inline Engine::Engine(uint64_t guest_depth, uint64_t native_bytes, bool conv,
-    const GRCORE_Allocator * allocator, uint64_t memory_bytes) {
+    const GRCORE_Allocator * allocator, uint64_t memory_bytes, uint64_t native_depth) {
   boxed = conv;
   GRCORE_Options * o = nullptr;
   EXPECT_EQ(grcore_options_create(nullptr, &o), GRCORE_OK);
   grcore_options_set_guest_depth(o, guest_depth);
+  grcore_options_set_native_depth(o, native_depth);
   grcore_options_set_native_stack_bytes(o, native_bytes);
   if (memory_bytes != GRCORE_UNLIMITED) {
     grcore_options_set_memory_bytes(o, memory_bytes);
@@ -426,6 +518,7 @@ inline Engine::Engine(uint64_t guest_depth, uint64_t native_bytes, bool conv,
       GRCORE_OK);
   stack = grcore_context_stack(ctx);
   EXPECT_EQ(grcore_deopt_reserve(ctx, 0, &reservation), GRCORE_OK);
+  EXPECT_EQ(grjit_native_table_create(nullptr, nullptr, &ntable), GRJIT_OK);
   g_engine = this;
 }
 
@@ -440,6 +533,7 @@ inline Engine::~Engine() {
     }
   }
   grcore_deopt_release(ctx, reservation);
+  grjit_native_table_free(ntable);
   EXPECT_EQ(grcore_context_destroy(ctx), GRCORE_OK);
   EXPECT_EQ(grcore_group_destroy(group), GRCORE_OK);
   g_engine = nullptr;
@@ -466,6 +560,9 @@ inline GRCORE_SlotKind Engine::slot_kind(const GRCORE_AbstractFrame * f, size_t 
 inline void Engine::convert(GRCORE_Context *, GRCORE_Representation rep, uint64_t raw,
     uint64_t * out_root) {
   (void)rep;
+  if (g_engine != nullptr) {
+    g_engine->st.conversions++;
+  }
   *out_root = box(raw);
 }
 
@@ -514,7 +611,7 @@ inline void Engine::discard(int fn) {
 }
 
 inline void Engine::reset_reservation() {
-  while (!extensions.empty()) {
+  while (extensions.size() > ext_floor) {
     grcore_deopt_reservation_retract(reservation, extensions.back());
     extensions.pop_back();
   }
@@ -522,12 +619,43 @@ inline void Engine::reset_reservation() {
 
 /* ---- The heap's collector -------------------------------------------------- */
 
+/* A conservative range, read word by word: what it holds that is the address of a
+ * live object is pinned. The words are a native's own frame, which the sanitizers
+ * have poisoned around its locals, and reading them is the point. */
+#if defined(__clang__)
+__attribute__((no_sanitize("address", "thread")))
+#else
+__attribute__((no_sanitize_address, no_sanitize_thread))
+#endif
+inline void scan_range_for_pins(const GRCORE_ConservativeRange * r, const std::unordered_set<u64> & live,
+    std::unordered_set<u64> * pinned) {
+  for (uint64_t at = (r->lo + 7) & ~uint64_t{7}; at + 8 <= r->hi; at += 8) {
+    uint64_t w = *reinterpret_cast<const volatile uint64_t *>(at);
+    uint64_t a = ((w & r->mask) >> r->shift) + r->base;
+    if (live.count(a) != 0) {
+      pinned->insert(a);
+    }
+  }
+}
+
 inline void Engine::collect() {
   heap.collections++;
   struct Ctx {
     Engine * e;
     std::unordered_map<u64, u64> fwd;
-  } c{this, {}};
+    std::unordered_set<u64> pinned; // held by a native's own frame: it does not move
+  } c{this, {}, {}};
+  // First, the conservative ranges (a native's frame under a NATIVE or REENTRY record):
+  // whatever they hold is pinned, so the second pass leaves it where it is.
+  {
+    GRCORE_RootVisitor pv = {};
+    pv.user = &c;
+    pv.range = [](void * user, const GRCORE_ConservativeRange * r) {
+      auto * c = static_cast<Ctx *>(user);
+      scan_range_for_pins(r, c->e->heap.live, &c->pinned);
+    };
+    EXPECT_EQ(grcore_context_enumerate_roots(ctx, &pv), GRCORE_OK);
+  }
   GRCORE_RootVisitor v = {};
   v.user = &c;
   v.slot = [](void * user, uint64_t * slot) {
@@ -537,7 +665,7 @@ inline void Engine::collect() {
     if (c->e->heap.live.count(w) == 0) {
       return;
     }
-    if (c->e->heap.moving) {
+    if (c->e->heap.moving && c->pinned.count(w) == 0) {
       auto it = c->fwd.find(w);
       if (it == c->fwd.end()) {
         auto copy = std::make_unique<Obj>(*reinterpret_cast<Obj *>(w));
@@ -585,6 +713,7 @@ inline GRJIT_Function * Engine::build_ir(int fn) {
   hooks.deopt = Engine::h_deopt;
   hooks.tail = tail_override != nullptr ? tail_override : Engine::h_tail;
   b.callable(hooks);
+  b.natives(ntable);
   EXPECT_EQ(grjit_builder_set_token(b.b, static_cast<u64>(fn)), GRJIT_OK);
   b.poll_helper(Engine::h_poll);
   for (int i = 0; i < F.nparams; i++) {
@@ -679,6 +808,17 @@ inline GRJIT_Function * Engine::build_ir(int fn) {
         b.tail_call_ptr(operand(in.a), static_cast<u64>(in.fn), operands(in.args), id, state(pc));
         terminated = true;
         break;
+      case K::NATIVE: {
+        // The state after the call is the interpreter's with the call done: the next
+        // instruction, and the result (which the call's frame slot holds by then).
+        if ((natives[static_cast<size_t>(in.native)].flags & GRJIT_NATIVE_STATUS) != 0) {
+          b.call_native(in.d, static_cast<uint32_t>(in.native), operands(in.args), id, state(pc),
+              GRCORE_PollIdentity{static_cast<u64>(fn), static_cast<u64>(pc) + 1}, state(pc + 1));
+        } else {
+          b.call_native(in.d, static_cast<uint32_t>(in.native), operands(in.args), id, state(pc));
+        }
+        break;
+      }
       case K::GUARD: b.guard(V(in.a), id, state(pc)); break;
       case K::POLL: b.poll(id, state(pc)); break;
       case K::NEW:
@@ -927,6 +1067,12 @@ inline uint32_t Engine::h_deopt(void *, uint64_t cause) {
   Engine & e = *g_engine;
   e.st.deopts++;
   e.st.last_cause = cause;
+  e.st.causes.push_back(cause);
+  const bool from_native = (cause & GRJIT_CAUSE_NATIVE) != 0;
+  const uint64_t native_status = from_native ? (cause & 0xFFFFFFFFull) : 0;
+  if (from_native) {
+    e.st.status_exits++;
+  }
   // Where it started: the innermost compiled frame's site. A site at a call
   // instruction is an exit at a call site (a callee that cannot be compiled, a
   // refused push, a bad code pointer), which is not the caller's fault and is
@@ -945,6 +1091,13 @@ inline uint32_t Engine::h_deopt(void *, uint64_t cause) {
         K k = e.funcs[fn].code[pc].k;
         e.st.last_was_call_exit =
             k == K::CALL || k == K::CALLP || k == K::TAILCALL || k == K::TAILCALLP;
+        if (k == K::NATIVE && !from_native) {
+          e.st.last_was_call_exit = true; // an exit before a native call: not the caller's fault
+          e.st.native_exits++;
+        }
+      }
+      if (from_native) {
+        e.st.last_was_call_exit = true; // a native's status is not the caller's fault either
       }
     }
   }
@@ -953,9 +1106,43 @@ inline uint32_t Engine::h_deopt(void *, uint64_t cause) {
     e.st.rebuild = static_cast<GRCORE_Result>(e.refuse_rebuild_with);
     return e.refuse_rebuild_with;
   }
-  GRCORE_Result r = grcore_compiled_rebuild(e.ctx, e.reservation, SIZE_MAX, &n);
+  // An unwind rebuilds only the frames that survive it: those below the nearest caller that
+  // catches, that frame included. The frame that called the native, and everything above the
+  // scope, is popped without being converted (AD-27).
+  size_t keep = SIZE_MAX;
+  size_t catcher = SIZE_MAX;
+  const bool unwinding = from_native && native_status == GRJIT_NATIVE_UNWIND;
+  if (unwinding) {
+    keep = e.base_frames; // nothing survives unless a scope is found
+    size_t count = grcore_stack_frame_count(e.stack);
+    for (size_t i = count - 1; i-- > e.base_frames;) {
+      GRCORE_PollIdentity id;
+      grcore_stack_identity(e.stack, e.frame_at(i), &id);
+      if (e.funcs[static_cast<size_t>(id.function)].catches) {
+        catcher = i;
+        keep = i + 1;
+        break;
+      }
+    }
+  }
+  GRCORE_Result r = grcore_compiled_rebuild(e.ctx, e.reservation, keep, &n);
   e.st.rebuild = r;
   e.st.deopt_frames += static_cast<long>(n);
+  if (unwinding && r == GRCORE_OK) {
+    e.st.unwinds++;
+    // The frames above the scope go; the run's entry frame stays when nothing catches, because
+    // the record that began with it is left before the run is over (activation.h), and the
+    // caller of the run finishes the unwind.
+    const size_t floor = catcher != SIZE_MAX ? catcher + 1 : e.base_frames + 1;
+    while (grcore_stack_frame_count(e.stack) > floor) {
+      e.pop_frame();
+    }
+    if (catcher != SIZE_MAX) {
+      e.finish_unwound_call(e.frame_at(catcher));
+    } else {
+      e.unwind_run = true;
+    }
+  }
   return r == GRCORE_OK ? 0u : static_cast<uint32_t>(r);
 }
 
@@ -965,8 +1152,14 @@ inline uint32_t Engine::h_poll(void *, uint64_t, uint64_t) {
   if (e.torture) {
     e.collect();
   }
+  if (e.pause_pending) {
+    return 1; // a verdict: the chain is rebuilt and the interpreter decides at this poll
+  }
   if (e.poll_slow_calls_to_fail > 0 && ++e.poll_count_for_fail == e.poll_slow_calls_to_fail) {
     return 1;
+  }
+  if (e.record_polls) {
+    e.poll_snaps.push_back(e.snapshot()); // continuing: the poll counts, once, in either tier
   }
   return 0;
 }
@@ -1032,6 +1225,209 @@ __attribute__((noinline)) inline uint64_t Engine::h_probe(uint64_t v) {
   return 0;
 }
 
+/* ---- Natives: the wrapper both tiers share ----------------------------------------- */
+
+namespace detail {
+
+template <size_t>
+using Word = u64;
+
+template <size_t... Is>
+u64 invoke_plain_n(const void * fn, void * ctx, const u64 * a, std::index_sequence<Is...>) {
+  return reinterpret_cast<u64 (*)(void *, Word<Is>...)>(fn)(ctx, a[Is]...);
+}
+template <size_t... Is>
+GRJIT_NativeResult invoke_status_n(const void * fn, void * ctx, const u64 * a, std::index_sequence<Is...>) {
+  return reinterpret_cast<GRJIT_NativeResult (*)(void *, Word<Is>...)>(fn)(ctx, a[Is]...);
+}
+template <size_t N>
+u64 invoke_plain_at(const void * fn, void * ctx, const u64 * a) {
+  return invoke_plain_n(fn, ctx, a, std::make_index_sequence<N>{});
+}
+template <size_t N>
+GRJIT_NativeResult invoke_status_at(const void * fn, void * ctx, const u64 * a) {
+  return invoke_status_n(fn, ctx, a, std::make_index_sequence<N>{});
+}
+template <size_t... Ns>
+u64 invoke_plain_dispatch(size_t n, const void * fn, void * ctx, const u64 * a, std::index_sequence<Ns...>) {
+  static constexpr std::array<u64 (*)(const void *, void *, const u64 *), sizeof...(Ns)> by = {
+      invoke_plain_at<Ns>...};
+  return by[n](fn, ctx, a);
+}
+template <size_t... Ns>
+GRJIT_NativeResult invoke_status_dispatch(size_t n, const void * fn, void * ctx, const u64 * a,
+    std::index_sequence<Ns...>) {
+  static constexpr std::array<GRJIT_NativeResult (*)(const void *, void *, const u64 *), sizeof...(Ns)> by = {
+      invoke_status_at<Ns>...};
+  return by[n](fn, ctx, a);
+}
+
+} // namespace detail
+
+inline int Engine::add_native(const void * fn, std::vector<GRJIT_Type> params, GRJIT_Type result,
+    uint32_t flags, uint32_t stack_bytes, const char * name) {
+  NativeSpec sp;
+  sp.name = name;
+  sp.fn = fn;
+  sp.params = params;
+  sp.result = result;
+  sp.flags = flags;
+  sp.stack_bytes = stack_bytes;
+  natives.push_back(sp);
+  GRJIT_NativeDesc d{};
+  d.address = reinterpret_cast<uintptr_t>(fn);
+  d.params = params.data();
+  d.param_count = params.size();
+  d.result = result;
+  d.flags = flags;
+  d.stack_bytes = stack_bytes;
+  uint32_t id = UINT32_MAX;
+  EXPECT_EQ(grjit_native_table_add(ntable, &d, &id), GRJIT_OK);
+  EXPECT_EQ(static_cast<size_t>(id) + 1, natives.size());
+  return static_cast<int>(id);
+}
+
+inline NativeOut Engine::call_native(int id, const u64 * args, size_t n) {
+  const NativeSpec & sp = natives[static_cast<size_t>(id)];
+  EXPECT_EQ(n, sp.params.size());
+  NativeOut out;
+  if ((sp.flags & GRJIT_NATIVE_STATUS) != 0) {
+    GRJIT_NativeResult r = detail::invoke_status_dispatch(n, sp.fn, ctx, args, std::make_index_sequence<17>{});
+    out.value = r.value;
+    out.status = r.status;
+  } else {
+    out.value = detail::invoke_plain_dispatch(n, sp.fn, ctx, args, std::make_index_sequence<17>{});
+  }
+  return out;
+}
+
+inline GRCORE_FrameRef Engine::frame_at(size_t index) {
+  GRCORE_FrameRef ref = grcore_stack_top(stack);
+  for (size_t up = grcore_stack_frame_count(stack) - 1; up > index; up--) {
+    ref = grcore_stack_caller(stack, ref);
+  }
+  return ref;
+}
+
+/* The scope that catches an unwind resumes after the call that was running, with the
+ * value kUnwound as its result. */
+inline void Engine::finish_unwound_call(GRCORE_FrameRef catcher) {
+  GRCORE_PollIdentity id;
+  grcore_stack_identity(stack, catcher, &id);
+  const int fn = static_cast<int>(id.function);
+  uint64_t * S = grcore_stack_slots(stack, catcher);
+  const int pc = static_cast<int>(S[0]);
+  const Ins & in = funcs[static_cast<size_t>(fn)].code[static_cast<size_t>(pc)];
+  EXPECT_TRUE(in.k == K::CALL || in.k == K::CALLP || in.k == K::NATIVE)
+      << "a scope resumes from a call: " << funcs[static_cast<size_t>(fn)].name << " at " << pc;
+  if (in.d >= 0) {
+    wr(S, fn, in.d, kUnwound);
+  }
+  S[0] = static_cast<uint64_t>(pc) + 1;
+}
+
+inline bool Engine::unwind_top(Outcome & out) {
+  st.unwinds++;
+  pop_frame(); // the frame that called the native is unwound with the rest
+  while (grcore_stack_frame_count(stack) > base_frames) {
+    GRCORE_FrameRef top = grcore_stack_top(stack);
+    GRCORE_PollIdentity id;
+    grcore_stack_identity(stack, top, &id);
+    if (funcs[static_cast<size_t>(id.function)].catches) {
+      finish_unwound_call(top);
+      return true;
+    }
+    pop_frame();
+  }
+  out.unwound = true;
+  return false;
+}
+
+/* The whole guest stack as a frame differential sees it, innermost first: a frame that
+ * has compiled code is read through its site's frame state (its guest frame's slots are
+ * stale until a rebuild), every other frame from its guest slots. */
+inline PollSnap Engine::snapshot() {
+  auto local_value = [&](int fn, size_t local, u64 raw) -> int64_t {
+    switch (funcs[static_cast<size_t>(fn)].type[local]) {
+      case GRJIT_TYPE_I64: return static_cast<int64_t>(raw);
+      case GRJIT_TYPE_REF: return heap.peek(raw);
+      default: return 0; // a raw pointer differs between tiers by construction
+    }
+  };
+  std::map<size_t, FrameSnap> compiled;
+  GRCORE_CompiledWalk w;
+  GRCORE_CompiledFrame f;
+  if (grcore_compiled_walk_begin(ctx, &w) == GRCORE_OK) {
+    while (grcore_compiled_walk_next(&w, &f) == GRCORE_CWALK_FRAME) {
+      if (f.base_frames == 0 || f.run_depth >= f.run_length) {
+        continue;
+      }
+      FrameSnap fs;
+      fs.fn = static_cast<int>(f.identity.function);
+      fs.pc = static_cast<int64_t>(f.identity.offset);
+      for (size_t i = 1; i < f.site->frame_state_count; i++) {
+        const GRCORE_CodeLocation & loc = f.site->frame_state[i];
+        u64 raw = loc.kind == GRCORE_LOC_FRAME_SLOT
+            ? *reinterpret_cast<const u64 *>(f.frame_base + static_cast<uintptr_t>(loc.value))
+            : loc.kind == GRCORE_LOC_CONSTANT ? static_cast<u64>(loc.value) : 0;
+        fs.locals.push_back(local_value(fs.fn, i - 1, raw));
+      }
+      compiled[f.base_frames - 1 + (f.run_length - 1 - f.run_depth)] = fs;
+    }
+  }
+  PollSnap snap;
+  GRCORE_FrameRef ref = grcore_stack_top(stack);
+  for (size_t idx = grcore_stack_frame_count(stack); idx-- > 0;) {
+    auto it = compiled.find(idx);
+    if (it != compiled.end()) {
+      snap.push_back(it->second);
+    } else {
+      GRCORE_PollIdentity id;
+      grcore_stack_identity(stack, ref, &id);
+      const uint64_t * S = grcore_stack_slots(stack, ref);
+      FrameSnap fs;
+      fs.fn = static_cast<int>(id.function);
+      fs.pc = static_cast<int64_t>(S[0]);
+      for (int i = 0; i < funcs[static_cast<size_t>(fs.fn)].locals(); i++) {
+        fs.locals.push_back(local_value(fs.fn, static_cast<size_t>(i), rd(S, fs.fn, i)));
+      }
+      snap.push_back(fs);
+    }
+    if (idx > 0) {
+      ref = grcore_stack_caller(stack, ref);
+    }
+  }
+  return snap;
+}
+
+/* The interpreter again after a pause. */
+inline Outcome Engine::resume() {
+  Outcome out;
+  pause_pending = false;
+  interpret(out);
+  out.frames_left = grcore_stack_frame_count(stack) - base_frames;
+  return out;
+}
+
+inline Outcome Engine::run_nested(int fn, const std::vector<u64> & args, bool compiled) {
+  struct Restore {
+    Engine & e;
+    size_t base;
+    size_t floor;
+    bool unwind_run;
+    ~Restore() {
+      e.base_frames = base;
+      e.ext_floor = floor;
+      e.unwind_run = unwind_run;
+      e.nesting--;
+    }
+  } restore{*this, base_frames, ext_floor, unwind_run};
+  nesting++;
+  ext_floor = extensions.size();
+  unwind_run = false;
+  return compiled ? run_compiled_core(fn, args, true) : run_interpreted(fn, args);
+}
+
 /* ---- The interpreter -------------------------------------------------------- */
 
 /* Runs the top guest frame, and the frames it calls and returns into, until the
@@ -1079,7 +1475,45 @@ inline void Engine::interpret(Outcome & out) {
       case K::EQ: wr(S, fn, in.d, L(in.a) == L(in.b) ? 1 : 0); S[0] = pc + 1; break;
       case K::BRZ: S[0] = L(in.a) == 0 ? in.t : pc + 1; break;
       case K::BR: S[0] = in.t; break;
-      case K::GUARD: case K::POLL: S[0] = pc + 1; break;
+      case K::GUARD: S[0] = pc + 1; break;
+      case K::POLL:
+        if (pause_pending) {
+          if (nesting > 0) {
+            // A pause inside a native's nested run cannot reach the host (AD-5): the run
+            // is unwound as a limit, and the native reports it by its status.
+            pause_pending = false;
+            unwind_top(out);
+            break;
+          }
+          S[0] = pc + 1;
+          out.paused = true;
+          return;
+        }
+        if (record_polls) {
+          poll_snaps.push_back(snapshot());
+        }
+        S[0] = pc + 1;
+        break;
+      case K::NATIVE: {
+        u64 args[16];
+        size_t n = in.args.size();
+        for (size_t i = 0; i < n; i++) {
+          args[i] = in.args[i] < 0 ? static_cast<u64>(F.imms[static_cast<size_t>(-1 - in.args[i])])
+                                  : L(in.args[i]);
+        }
+        NativeOut r = call_native(in.native, args, n);
+        S = grcore_stack_slots(stack, top); // a nested run may have grown the guest stack
+        if (in.d >= 0) {
+          wr(S, fn, in.d, r.value);
+        }
+        S[0] = pc + 1;
+        if (r.status == GRJIT_NATIVE_UNWIND) {
+          unwind_top(out);
+        }
+        // Any other status is for a tier that can leave: the interpreter is already where it
+        // would go (a pause the native left pending is seen at the next poll).
+        break;
+      }
       case K::NEW: {
         u64 r = h_new(static_cast<u64>(in.imm));
         S = grcore_stack_slots(stack, top);
@@ -1195,6 +1629,13 @@ inline Outcome Engine::run_interpreted(int fn, const std::vector<u64> & args) {
  * pushed, a JIT record is entered, and the adapter is called with the arguments
  * from the frame. A deoptimization leaves guest frames the interpreter finishes. */
 inline Outcome Engine::run_compiled(int fn, const std::vector<u64> & args) {
+  return run_compiled_core(fn, args, false);
+}
+
+/* A nested run is one a native opens (inside its own REENTRY record): the limit word the outer
+ * run set is the outer run's, and the reservation extensions below `ext_floor` are not this
+ * run's to give back. */
+inline Outcome Engine::run_compiled_core(int fn, const std::vector<u64> & args, bool nested) {
   Outcome out;
   base_frames = grcore_stack_frame_count(stack);
   if (!compile_fn(fn)) {
@@ -1209,7 +1650,9 @@ inline Outcome Engine::run_compiled(int fn, const std::vector<u64> & args) {
   EXPECT_EQ(grcore_deopt_reservation_extend(ctx, reservation, C(fn).max_converting),
       GRCORE_OK);
   extensions.push_back(C(fn).max_converting);
-  grcore_context_native_limit_here(ctx);
+  if (!nested) {
+    grcore_context_native_limit_here(ctx);
+  }
   last_native_limit = grcore_context_native_limit(ctx);
   GRCORE_ActivationRef rec;
   EXPECT_EQ(grcore_activation_enter(stack, GRCORE_ACTIVATION_JIT, engine, false, nullptr, &rec),
@@ -1253,6 +1696,18 @@ inline Outcome Engine::run_compiled(int fn, const std::vector<u64> & args) {
   }
   EXPECT_EQ(exit, GRJIT_EXIT_DEOPT);
   reset_reservation();
+  if (unwind_run) {
+    // A native's UNWIND with no scope in this run to catch it: the hook popped the frames above
+    // the entry's, and the entry's own, which the record had to be left with, goes now.
+    unwind_run = false;
+    while (grcore_stack_frame_count(stack) > base_frames) {
+      pop_frame();
+    }
+    out.unwound = true;
+    out.interpreted_rest = true;
+    out.frames_left = 0;
+    return out;
+  }
   if (st.last_innermost_fn >= 0 && !st.last_was_call_exit &&
       ++st.counted[st.last_innermost_fn] >= discard_limit) {
     // Deoptimized too often to be worth having: the code is let go (the frames
@@ -1277,6 +1732,58 @@ inline Outcome Engine::run_compiled(int fn, const std::vector<u64> & args) {
   out.frames_left = grcore_stack_frame_count(stack) - base_frames;
   return out;
 }
+
+/* ---- What a native does to be seen by the collector (AD-17, AD-23) --------------------- */
+
+/* The stack pointer of the function it is inlined into. */
+__attribute__((always_inline)) inline uintptr_t current_sp() {
+  uintptr_t sp;
+  asm volatile("mov %%rsp, %0" : "=r"(sp));
+  return sp;
+}
+
+/* A native's record: an activation record of `kind` (NATIVE, or REENTRY for a native that
+ * re-enters guest code) that gives the native's own C frame as its conservative segment, so
+ * every object the frame holds is pinned and not moved. The segment runs from the native's
+ * stack pointer to the innermost compiled frame's base (read from the walk-start cell, which
+ * the call stored before it moved anything): that takes in the stack arguments the call
+ * made, and the collector cuts the compiled frames out of the range. Called from the
+ * interpreter, where there is no compiled frame under the native, it ends just above the
+ * native's own frame. Opening the record moves the cell into the record below, so a compiled
+ * run under the native stays described. A refusal (the native-depth budget is full) is `ok()`
+ * false, and the native reports it by returning UNWIND. */
+class NativeScope {
+ public:
+  NativeScope(Engine & e, GRCORE_ActivationKind kind, uintptr_t sp, uintptr_t frame_address) : e_(e) {
+    const uintptr_t * cell = reinterpret_cast<const uintptr_t *>(
+        reinterpret_cast<const char *>(e.ctx) + grcore_jit_layout()->walk_cell_offset);
+    const uintptr_t lo = sp - 256;
+    uintptr_t hi = cell[0];
+    if (hi <= lo || hi - lo > (uintptr_t{1} << 20)) {
+      hi = frame_address + 16;
+    }
+    GRCORE_CSegment seg{lo, hi};
+    ok_ = grcore_activation_enter(e.stack, kind, 0, kind == GRCORE_ACTIVATION_REENTRY, &seg, &ref_) ==
+        GRCORE_OK;
+  }
+  ~NativeScope() {
+    if (ok_) {
+      EXPECT_EQ(grcore_activation_leave(e_.stack, ref_), GRCORE_OK);
+    }
+  }
+  NativeScope(const NativeScope &) = delete;
+  NativeScope & operator=(const NativeScope &) = delete;
+  bool ok() const { return ok_; }
+
+ private:
+  Engine & e_;
+  GRCORE_ActivationRef ref_{};
+  bool ok_ = false;
+};
+
+#define FX_NATIVE_SCOPE(var, engine, kind) \
+  ::fx::NativeScope var((engine), (kind), ::fx::current_sp(), \
+      reinterpret_cast<uintptr_t>(__builtin_frame_address(0)))
 
 } // namespace fx
 
