@@ -227,9 +227,15 @@ void for_every_callable_function(F && check) {
     grjit_emitted_free(&e);
     return true;
   };
-  cg::each_call_function([&](const GRJIT_Function * f, unsigned id) { return emit(f, id, "call"); });
-  cg::each_tail_function([&](const GRJIT_Function * f, unsigned id) { return emit(f, id, "tail"); });
-  cg::each_native_function([&](const GRJIT_Function * f, unsigned id) { return emit(f, id, "native"); });
+  // The corpus is exactly what the pin test hashes (design.md says 1,016 functions): a generator that quietly
+  // makes fewer would leave the structural claims resting on less than they say.
+  size_t calls = 0, tails = 0, natives = 0;
+  cg::each_call_function([&](const GRJIT_Function * f, unsigned id) { calls++; return emit(f, id, "call"); });
+  cg::each_tail_function([&](const GRJIT_Function * f, unsigned id) { tails++; return emit(f, id, "tail"); });
+  cg::each_native_function([&](const GRJIT_Function * f, unsigned id) { natives++; return emit(f, id, "native"); });
+  EXPECT_EQ(calls, 336u) << "functions with calls";
+  EXPECT_EQ(tails, 168u) << "functions with tail calls";
+  EXPECT_EQ(natives, 512u) << "functions with native calls";
 }
 
 /* Where the tag is: the sixteen bytes before the internal entry. The words between the adapter and
@@ -262,7 +268,7 @@ TEST(Arm64Calls, EveryWordOfEveryCallableFunctionDecodesAndNoCalleeSavedRegister
       }
     }
   });
-  EXPECT_GE(functions, 200u) << "the corpus is every function the pinning test generates";
+  EXPECT_EQ(functions, 336u + 168u + 512u) << "the corpus is every function the pinning test generates: 1,016";
   EXPECT_GT(words, 10000u);
   // The registers that are used are the ones the convention names: the arguments x0-x7, the context x9,
   // the temporaries x10 and x15-x17, the frame record's x29 and x30, and the scratch x1-x2 of the
