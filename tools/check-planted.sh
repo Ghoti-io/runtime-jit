@@ -36,6 +36,18 @@
 #  14  a tail call made as a call, its frame kept:  -> testTail
 #      the answer is right and the native stack
 #      grows with every tail call
+#  15  the walk start stored after a native call,   -> testNatives
+#      not before it: a collection under the native
+#      finds the previous call's
+#  16  the stack arguments of a native call not     -> testNatives
+#      popped by the caller: rsp drifts
+#  17  the stack-argument area not rounded to       -> testNatives
+#      sixteen bytes: the native is entered
+#      misaligned
+#  18  the native-stack check that leaves out the   -> testNatives
+#      stack-argument area
+#  19  stack argument k of a native call one word   -> testNatives
+#      too high: the native reads the wrong words
 #
 # An entry is `n:test` or `n:test:filter`. With a filter the test binary runs
 # only that gtest (control and planted alike), which is how defect 4 is caught

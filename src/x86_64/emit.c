@@ -508,6 +508,12 @@ static void emit_native_call(GRJIT_Emit * e, const GRJIT_Op * op) {
   const size_t words = n + 1; /* the context first */
   const size_t stack_words = words > GRJIT_INTERNAL_REG_ARGS ? words - GRJIT_INTERNAL_REG_ARGS : 0;
   uint32_t area = (uint32_t)((stack_words * 8 + 15) / 16 * 16);
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 17
+  /* Planted defect 17 (tests only): the stack-argument area is not rounded to
+   * sixteen bytes, so an odd count of stack words leaves the stack misaligned at
+   * the call. */
+  area = (uint32_t)(stack_words * 8);
+#endif
   const size_t live = e->c.live_cursor;
   e->c.live_cursor += status ? 3 : 2; /* the call, the exit before it, the status exit */
   const GRJIT_FrameState * st = &f->states[op->state];
@@ -524,6 +530,10 @@ static void emit_native_call(GRJIT_Emit * e, const GRJIT_Op * op) {
     grjit_emit_add_pending(&e->c, &p);
   }
   uint64_t need = (uint64_t)area + d->stack_bytes;
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 18
+  /* Planted defect 18 (tests only): the check leaves out the stack-argument area. */
+  need = d->stack_bytes;
+#endif
   grjit_asm_lea(a, GRJIT_RAX, GRJIT_RSP, -(int32_t)need);
   grjit_asm_load64(a, GRJIT_RCX, GRJIT_RBP, GRJIT_SLOT_CTX);
   grjit_asm_cmp_rm(a, GRJIT_RAX, GRJIT_RCX, (int32_t)e->c.native_limit_offset);
@@ -531,7 +541,12 @@ static void emit_native_call(GRJIT_Emit * e, const GRJIT_Op * op) {
 
   /* 2. The walk start, before anything moves. */
   GRJIT_Label ret = grjit_asm_label(a);
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 15
+  /* Planted defect 15 (tests only): the walk start is stored after the call, so
+   * a collection the native triggers finds the previous call's. */
+#else
   grjit_emit_store_walk_cell(e, ret);
+#endif
 
   /* 3. The arguments. */
   if (area != 0) {
@@ -540,7 +555,12 @@ static void emit_native_call(GRJIT_Emit * e, const GRJIT_Op * op) {
   for (size_t i = GRJIT_INTERNAL_REG_ARGS - 1; i < n; i++) {
     /* IR argument i is C argument i + 1; the sixth C argument is the fifth IR one. */
     load_operand(e, GRJIT_RAX, &op->args[i]);
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 19
+    /* Planted defect 19 (tests only): each stack argument is one word too high. */
+    grjit_asm_store64(a, GRJIT_RSP, (int32_t)(8 * (i - (GRJIT_INTERNAL_REG_ARGS - 1)) + 8), GRJIT_RAX);
+#else
     grjit_asm_store64(a, GRJIT_RSP, (int32_t)(8 * (i - (GRJIT_INTERNAL_REG_ARGS - 1))), GRJIT_RAX);
+#endif
   }
   grjit_asm_load64(a, GRJIT_RDI, GRJIT_RBP, GRJIT_SLOT_CTX);
   for (size_t i = 0; i < n && i + 1 < GRJIT_INTERNAL_REG_ARGS; i++) {
@@ -550,11 +570,23 @@ static void emit_native_call(GRJIT_Emit * e, const GRJIT_Op * op) {
   /* 4. The call; the return address is the site. */
   grjit_asm_mov_ri(a, GRJIT_RAX, d->address);
   grjit_asm_call_r(a, GRJIT_RAX);
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 15
+  /* The late store, through registers that leave the native's rax and rdx alone. */
+  grjit_asm_lea_rip(a, GRJIT_R8, ret);
+  grjit_asm_load64(a, GRJIT_RCX, GRJIT_RBP, GRJIT_SLOT_CTX);
+  grjit_asm_store64(a, GRJIT_RCX, (int32_t)e->c.walk_cell_offset, GRJIT_RBP);
+  grjit_asm_store64(a, GRJIT_RCX, (int32_t)e->c.walk_cell_offset + 8, GRJIT_R8);
+#endif
   grjit_asm_bind(a, ret);
   grjit_emit_add_site_for(&e->c, (uint32_t)grjit_asm_size(a), GRCORE_SITE_GC_POINT_CALL,
       st->identity, live, op->state, op);
   if (area != 0) {
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 16
+    /* Planted defect 16 (tests only): the caller does not pop the stack
+     * arguments, so rsp drifts by their area with every call. */
+#else
     grjit_asm_add_rsp(a, area);
+#endif
   }
 
   /* 5. The result before the status; a non-zero status leaves. */

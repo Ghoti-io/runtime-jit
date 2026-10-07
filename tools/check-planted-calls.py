@@ -96,7 +96,9 @@ JIT_PRISTINE = os.path.join(T, 'jit-pristine')
 copy_tree(CORE_SRC, CORE_PRISTINE)
 copy_tree(JIT_SRC, JIT_PRISTINE)
 
-# (name, lib, file, old, new): `old` must occur exactly once in the file.
+# (name, lib, file, old, new[, tests]): `old` must occur exactly once in the file. With `tests`, only
+# those test programs run (and none of core's): the mutations of calls to natives are each shown to be
+# caught by `testNatives` or `testNative_ir` alone, so that they cannot lean on an older test.
 M = [
     ("frame missed: a deep rebuild skips the fourth frame of the run", "core",
      "src/a/deopt.c",
@@ -240,11 +242,98 @@ M = [
      'src/backend/metadata.c',
      '          d->slot = GRJIT_ARGS_SLOT(GRJIT_SHAPE_REGS(f, shape), shape.args_area, k);',
      '          d->slot = GRJIT_ARGS_SLOT(f->vreg_count, shape.args_area, k);'),
+
+    # Calls to natives (story 6): each is shown to be caught by testNatives or testNative_ir alone.
+    ("native: the status is never tested, so a non-zero status continues in compiled code", "jit",
+     'src/x86_64/emit.c',
+     '    grjit_asm_test_rr(a, GRJIT_RDX, GRJIT_RDX);\n    grjit_asm_jcc(a, GRJIT_COND_NE, leave);',
+     '    (void)leave;',
+     ['testNatives']),
+    ("native: the status exit is built from the state before the call, so the native runs twice", "jit",
+     'src/x86_64/exit.c',
+     '      state->identity, p->live_index, p->op->exit_state);\n  grjit_asm_load64(a, GRJIT_RAX, GRJIT_RBP, GRJIT_SLOT_OUT);',
+     '      state->identity, p->live_index, p->op->state);\n  grjit_asm_load64(a, GRJIT_RAX, GRJIT_RBP, GRJIT_SLOT_OUT);',
+     ['testNatives']),
+    ("native: the result is stored after the status test, so a status exit finds the old value", "jit",
+     'src/x86_64/emit.c',
+     '  if (op->dst != GRJIT_NO_VREG) {\n    store_result(e, op->dst, GRJIT_RAX);\n  }\n  if (status) {\n    GRJIT_Label leave = grjit_asm_label(a);',
+     '  if (op->dst != GRJIT_NO_VREG && !status) {\n    store_result(e, op->dst, GRJIT_RAX);\n  }\n  if (status) {\n    GRJIT_Label leave = grjit_asm_label(a);',
+     ['testNatives']),
+    ("native: the cause of a status exit lacks the native bit", "jit",
+     'src/x86_64/exit.c',
+     '  grjit_asm_alu_rr(a, GRJIT_ALU_OR, GRJIT_RSI, GRJIT_RAX);\n',
+     '',
+     ['testNatives']),
+    ("native: the stack-argument area is not rounded to sixteen bytes", "jit",
+     'src/x86_64/emit.c',
+     '  uint32_t area = (uint32_t)((stack_words * 8 + 15) / 16 * 16);',
+     '  uint32_t area = (uint32_t)(stack_words * 8);',
+     ['testNatives']),
+    ("native: the caller does not pop the stack arguments", "jit",
+     'src/x86_64/emit.c',
+     '    grjit_asm_add_rsp(a, area);',
+     '    (void)area;',
+     ['testNatives']),
+    ("native: stack argument k is stored one word too high", "jit",
+     'src/x86_64/emit.c',
+     '    grjit_asm_store64(a, GRJIT_RSP, (int32_t)(8 * (i - (GRJIT_INTERNAL_REG_ARGS - 1))), GRJIT_RAX);',
+     '    grjit_asm_store64(a, GRJIT_RSP, (int32_t)(8 * (i - (GRJIT_INTERNAL_REG_ARGS - 1)) + 8), GRJIT_RAX);',
+     ['testNatives']),
+    ("native: the references are left out of a native call site's stack map", "jit",
+     'src/backend/metadata.c',
+     '        GRCORE_CodeLocation l = slot_location(v, info->type);\n#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 2',
+     '        if (r->op != NULL && r->op->kind == GRJIT_OP_CALL_NATIVE &&\n            r->kind == GRCORE_SITE_GC_POINT_CALL) {\n          continue;\n        }\n        GRCORE_CodeLocation l = slot_location(v, info->type);\n#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 2',
+     ['testNatives']),
+    ("native: the derived pointers are left out of a native call site's map", "jit",
+     'src/backend/metadata.c',
+     '      } else {\n        GRCORE_DerivedPointer * d = &out->derived[der_at + ders++];\n        d->slot = grjit_emit_slot(v);',
+     '      } else if (r->op != NULL && r->op->kind == GRJIT_OP_CALL_NATIVE &&\n                 r->kind == GRCORE_SITE_GC_POINT_CALL) {\n        continue;\n      } else {\n        GRCORE_DerivedPointer * d = &out->derived[der_at + ders++];\n        d->slot = grjit_emit_slot(v);',
+     ['testNatives']),
+    ("native: the stack check leaves out the stack-argument area", "jit",
+     'src/x86_64/emit.c',
+     '  uint64_t need = (uint64_t)area + d->stack_bytes;',
+     '  uint64_t need = d->stack_bytes;',
+     ['testNatives']),
+    ("native: the stack check leaves out the native's declared use", "jit",
+     'src/x86_64/emit.c',
+     '  uint64_t need = (uint64_t)area + d->stack_bytes;',
+     '  uint64_t need = area;',
+     ['testNatives']),
+    ("native: the verifier does not refuse a call with fewer arguments than the descriptor", "jit",
+     'src/ir/verify.c',
+     '      if (op->arg_count != d->param_count) {',
+     '      if (op->arg_count > d->param_count) {',
+     ['testNative_ir']),
+    ("native: the verifier does not check an argument register's type against the descriptor", "jit",
+     'src/ir/verify.c',
+     '          if (type_of(v, o->vreg) != d->params[i]) {',
+     '          if (false) {',
+     ['testNative_ir']),
+    ("native: the verifier accepts a destination of another type than the native's result", "jit",
+     'src/ir/verify.c',
+     '        if (type_of(v, op->dst) != d->result) {',
+     '        if (false) {',
+     ['testNative_ir']),
+    ("native: the verifier accepts a status native with no state after the call", "jit",
+     'src/ir/verify.c',
+     '        if (op->exit_state == GRJIT_NO_STATE) {\n          return refuse(v, GRJIT_ERR_INVALID,\n              "block b%u op %zu: native #%u returns a status',
+     '        if (false) {\n          return refuse(v, GRJIT_ERR_INVALID,\n              "block b%u op %zu: native #%u returns a status',
+     ['testNative_ir']),
+    ("early free (native): a slot cleared under a live JIT record releases its code at once", "core",
+     "src/a/registry.c",
+     "  if (stack->jit_live == 0) {\n    grcore_code_release(code);\n    const GRCORE_Allocator * a = grcore_context_allocator(stack->context);\n    a->free_fn(a->ctx, node);\n    return;\n  }\n  node->code",
+     "  if (true) {\n    grcore_code_release(code);\n    const GRCORE_Allocator * a = grcore_context_allocator(stack->context);\n    a->free_fn(a->ctx, node);\n    return;\n  }\n  node->code",
+     ['testNatives']),
+    ("early free (native): unregistering a range under a live JIT record releases it at once", "core",
+     "src/a/registry.c",
+     "  if (stack->jit_live == 0) {\n    grcore_code_release(r->entries[at].code);",
+     "  if (stack->jit_live == 0 || stack != NULL) {\n    grcore_code_release(r->entries[at].code);",
+     ['testNatives']),
 ]
 
 # What each library's tests are.
 CORE_TESTS = ['testRebuild', 'testRegistry', 'testCompiled']
-JIT_TESTS = ['testCalls', 'testCall_ir', 'testTail', 'testTail_ir']
+JIT_TESTS = ['testCalls', 'testCall_ir', 'testTail', 'testTail_ir', 'testNatives', 'testNative_ir']
 
 # Edits whose verdict is known, for --self-test: (name, expected, file, old, new).
 SELF = [
@@ -261,8 +350,8 @@ SELF = [
 P_HOLDS_MUTATED_CORE = False
 
 
-def build_and_run(core, jit, mutated_lib, timeout, extra_env=None):
-    """-> (verdict, detail). core and jit are the trees to build."""
+def build_and_run(core, jit, mutated_lib, timeout, extra_env=None, only=None):
+    """-> (verdict, detail). core and jit are the trees to build. With `only`, just those jit tests."""
     # A mutated tree may hang a test; the tests' watchdog aborts it after this long
     # (a signal, so a catch) well inside the harness's own timeout.
     extra_env = dict({'GRJIT_TEST_WATCHDOG_SECONDS': '45'}, **(extra_env or {}))
@@ -279,18 +368,18 @@ def build_and_run(core, jit, mutated_lib, timeout, extra_env=None):
         rc, out = sh('make -j8 install PREFIX=%s' % P, core)
         if rc != 0:
             return 'BUILD FAILED', out[-300:]
-        for t in CORE_TESTS:
+        for t in ([] if only else CORE_TESTS):
             rc, out = sh('make -j8 build/linux/release/apps/%s PREFIX=%s' % (t, P), core)
             if rc != 0:
                 return 'BUILD FAILED', out[-300:]
-    for t in JIT_TESTS:
+    for t in (only or JIT_TESTS):
         rc, out = sh('make -j8 build/linux/release/apps/%s PREFIX=%s' % (t, P), jit)
         if rc != 0:
             return 'BUILD FAILED', out[-300:]
     # Every test program of both libraries that bears on the defect runs; the
     # first verdict that is not a pass decides.
-    runs = ([(core, t) for t in CORE_TESTS] if mutated_lib == 'core' else []) + \
-           [(jit, t) for t in JIT_TESTS]
+    runs = ([(core, t) for t in CORE_TESTS] if mutated_lib == 'core' and not only else []) + \
+           [(jit, t) for t in (only or JIT_TESTS)]
     for tree, t in runs:
         rc, out = sh('./build/linux/release/apps/%s --gtest_brief=1' % t, tree, timeout, extra_env)
         if rc == 'timeout':
@@ -347,11 +436,11 @@ if SELF_TEST:
         print('self-test: %-34s want %-12s got %-12s %s' % (name, expected, verdict, 'ok' if good else 'WRONG'),
               flush=True)
 else:
-    for idx, (name, lib, rel, old, new) in enumerate(M):
+    for idx, (name, lib, rel, old, new, *rest) in enumerate(M):
         if args and not any(a in name or a == str(idx) for a in args):
             continue
         core, jit = tree_pair(lib, rel, old, new)
-        verdict, detail = build_and_run(core, jit, lib, TIMEOUT)
+        verdict, detail = build_and_run(core, jit, lib, TIMEOUT, only=rest[0] if rest else None)
         results.append((idx, name, verdict, detail))
         print('%2d %-6s %s\n      %s %s' % (idx, lib, name, verdict, detail), flush=True)
     bad = [r for r in results if r[2] != 'CAUGHT']

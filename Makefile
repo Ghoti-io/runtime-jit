@@ -764,7 +764,11 @@ endif
 # stack map, 13: no padding between a frame's registers and its arguments area,
 # so the staging area overlaps the place the stack arguments are copied to, 14:
 # the tail call made as a call and its frame kept, so the answer is right and the
-# native stack grows with every call), and the test
+# native stack grows with every call; and the five of calls to natives: 15: the
+# walk start stored after the call and not before it, 16: the stack arguments not
+# popped by the caller, 17: the stack-argument area not rounded to sixteen bytes,
+# 18: the native-stack check that leaves out the stack-argument area, 19: stack
+# argument k one word too high), and the test
 # that is meant to catch it is built and run there. The test must FAIL, and
 # say what it saw; the same test in the ordinary tree passes (it is part of
 # `make test`). The ordinary tree never sees the macro.
@@ -777,7 +781,12 @@ PLANT_DEFECTS := 1:testDifferential 2:testReadback 3:testReadback \
 	11:testTail:Tail.APingPongBetweenANarrowAndAWideFunctionAMillionDeepLeavesTheStackWhereItWas \
 	12:testTail:Tail.ArgumentsOfAllThreeTypesTailCalledAtEveryCountAndCallerWidthArriveIntactUnderCollection \
 	13:testTail:Tail.EveryPairOfCallerParametersAndCalleeArgumentsFromZeroToSixteenArrivesIntactInConstantStack \
-	14:testTail:Tail.ASelfRecursionAMillionDeepRunsInConstantNativeStackAndGuestDepth
+	14:testTail:Tail.ASelfRecursionAMillionDeepRunsInConstantNativeStackAndGuestDepth \
+	15:testNatives:Natives.TheCallStoresItsFrameBaseAndReturnAddressBeforeTheNativeRunsOverAStaleCell \
+	16:testNatives:Natives.TheStackIsSixteenAlignedAtTheNativesEntryAndTheSameAfterEveryCallForOddAndEvenStackArguments \
+	17:testNatives:Natives.TheStackIsSixteenAlignedAtTheNativesEntryAndTheSameAfterEveryCallForOddAndEvenStackArguments \
+	18:testNatives:Natives.TheNativeStackIsCheckedAtTheCallSiteForTheStackArgumentsAndTheNativesOwnUseToTheByte \
+	19:testNatives:Natives.EveryArityFromZeroToSixteenArrivesInTheOrderOfTheCAbiAndTheResultIsTheNativesOwn
 
 # The controls the script runs are built by this make, as prerequisites, and
 # not by the script's own sub-make. Under `make -j test` the sibling goals
