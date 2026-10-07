@@ -14,6 +14,7 @@
 
 #include "../calls_fixture.h"
 
+#include "../../src/backend/backend_internal.h"
 #include "../../src/code/code_internal.h"
 
 #include <random>
@@ -2006,6 +2007,60 @@ TEST(Tail, ACalleeThatCannotStartIsFinishedByTheInterpreterFromTheGuestFrameTheH
     ASSERT_FALSE(seen.empty());
     EXPECT_EQ(seen.back(), (std::vector<u64>{9, 7, 5})) << "the hook was handed every argument, in order";
     EXPECT_EQ(o.frames_left, 0u);
+  }
+}
+
+/* ---- An address nothing registered is refused whatever tag it carries ---------------- */
+
+TEST(Tail, AnAddressThatIsNotRegisteredCodeOfThisContextIsRefusedEvenWithAValidTag) {
+  TAIL_ONLY_ON_X86_64_SYSV();
+  // The tag before an entry (magic and parameter count, then the token) is what
+  // a call through a pointer checks beside the registry; forged, on the heap or
+  // copied from code of another context, it must still not get the address
+  // entered: only the registry says what is code. An entered forgery would run
+  // heap bytes (no execute permission) or another context's code.
+  alignas(16) static uint64_t forged[8];
+  Engine e;
+  int c2 = add_callee(e, 2);
+  ASSERT_TRUE(e.compile_fn(c2));
+  Engine other;
+  int o2 = add_callee(other, 2);
+  ASSERT_TRUE(other.compile_fn(o2));
+  ASSERT_EQ(c2, o2) << "the same token in both contexts";
+  struct Case {
+    const char * name;
+    uintptr_t target;
+  };
+  forged[0] = forged[1] = 0xCCCCCCCCCCCCCCCCull;
+  forged[2] = GRJIT_ENTRY_TAG_WORD(2);
+  forged[3] = static_cast<uint64_t>(c2);
+  forged[4] = forged[5] = 0xCCCCCCCCCCCCCCCCull;
+  const Case cases[] = {
+      {"a tagged buffer on the heap", reinterpret_cast<uintptr_t>(&forged[4])},
+      {"the internal entry of the same function in another context", other.code_of(o2).internal},
+  };
+  for (const Case & c : cases) {
+    for (int tail = 0; tail < 2; tail++) {
+      SCOPED_TRACE(testing::Message() << c.name << (tail ? ", tail call" : ", call"));
+      int f = e.reserve();
+      P p("forged", {GRJIT_TYPE_I64});
+      int ptr = p.local(GRJIT_TYPE_PTR), r = p.local();
+      p.cnst(ptr, static_cast<int64_t>(c.target));
+      if (tail) {
+        p.tailcallp(ptr, c2, {0, 0});
+      } else {
+        p.callp(r, ptr, c2, {0, 0});
+        p.ret(r);
+      }
+      e.set(f, p.done());
+      long tails = e.st.tails;
+      Outcome i = e.run_interpreted(f, {5});
+      Outcome o = e.run_compiled(f, {5});
+      ASSERT_TRUE(o.finished) << "no fault: the address was never entered";
+      EXPECT_EQ(o.value, i.value);
+      EXPECT_EQ(o.exit, uint32_t{GRJIT_EXIT_DEOPT}) << "an exit at the call site";
+      EXPECT_EQ(e.st.tails, tails) << "the hook is never reached";
+    }
   }
 }
 
