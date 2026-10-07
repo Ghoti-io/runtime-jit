@@ -2075,6 +2075,59 @@ TEST(Natives, GeneratedProgramsOfGuestCallsTailCallsNativesAndReentryAgreeWithTh
 }
 
 
+TEST(Natives, ANativeOfEveryArityCalledFromTheBottomOfACompiledChainGivesTheCReferenceAndTheInterpretersResult) {
+  for (size_t n = 0; n <= 16; n++) {
+    SCOPED_TRACE(n);
+    Engine e;
+    // Parameters of every type (a reference or a pointer that is never dereferenced, and never
+    // collected over), the native's own descriptor types the same.
+    const GRJIT_Type cycle[3] = {GRJIT_TYPE_I64, GRJIT_TYPE_REF, GRJIT_TYPE_PTR};
+    std::vector<GRJIT_Type> types;
+    for (size_t i = 0; i < n; i++) {
+      types.push_back(cycle[(i + n) % 3]);
+    }
+    int id = e.add_native(sums()[n], types, GRJIT_TYPE_I64, 0, 256, "sum");
+    int leaf = e.reserve(), mid = e.reserve(), top = e.reserve();
+    {
+      P p("leaf", types);
+      std::vector<int> args;
+      for (size_t i = 0; i < n; i++) {
+        args.push_back(static_cast<int>(i));
+      }
+      int r = p.local();
+      p.native(r, id, args);
+      p.ret(r);
+      e.set(leaf, p.done());
+    }
+    auto relay = [&](const char * name, int self, int callee) {
+      P p(name, types);
+      std::vector<int> args;
+      for (size_t i = 0; i < n; i++) {
+        args.push_back(static_cast<int>(i));
+      }
+      int r = p.local();
+      p.call(r, callee, args);
+      p.ret(r);
+      e.set(self, p.done());
+    };
+    relay("mid", mid, leaf);
+    relay("top", top, mid);
+    std::vector<u64> a(16);
+    for (size_t i = 0; i < 16; i++) {
+      a[i] = 0x0123456789abcdefull * (i + 1) + 5 * i;
+    }
+    const long calls_before = g_calls;
+    Pair p = run_both(e, top, std::vector<u64>(a.begin(), a.begin() + static_cast<long>(n)));
+    ASSERT_TRUE(p.i.finished);
+    ASSERT_TRUE(p.c.finished);
+    EXPECT_EQ(p.c.value, p.i.value);
+    EXPECT_EQ(p.c.value, call_c(n, sums()[n], e.ctx, a.data()));
+    EXPECT_EQ(g_calls - calls_before, 3) << "the C reference, the interpreter's call and the compiled call";
+    EXPECT_EQ(p.c.exit, uint32_t{GRJIT_EXIT_RETURNED});
+    EXPECT_EQ(e.st.deopts, 0);
+  }
+}
+
 /* ---- What a native call is not: no reservation, no depth, no guest frame ----------------------- */
 
 TEST(Natives, ANativeCallPushesNoGuestFrameCountsNoDepthAndExtendsNoReservation) {
