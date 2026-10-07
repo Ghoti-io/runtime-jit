@@ -79,7 +79,7 @@ const std::array<const void *, 17> & sums() {
 /* Calls a native of `n` arguments from C, the context first. */
 template <size_t... Is>
 uint64_t call_c_n(const void * fn, void * ctx, const uint64_t * a, std::index_sequence<Is...>) {
-  return reinterpret_cast<uint64_t (*)(void *, W<Is>...)>(fn)(ctx, a[Is]...);
+  return reinterpret_cast<uint64_t (*)(void *, W<Is>...)>(reinterpret_cast<uintptr_t>(fn))(ctx, a[Is]...);
 }
 
 template <size_t N>

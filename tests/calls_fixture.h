@@ -1234,11 +1234,11 @@ using Word = u64;
 
 template <size_t... Is>
 u64 invoke_plain_n(const void * fn, void * ctx, const u64 * a, std::index_sequence<Is...>) {
-  return reinterpret_cast<u64 (*)(void *, Word<Is>...)>(fn)(ctx, a[Is]...);
+  return reinterpret_cast<u64 (*)(void *, Word<Is>...)>(reinterpret_cast<uintptr_t>(fn))(ctx, a[Is]...);
 }
 template <size_t... Is>
 GRJIT_NativeResult invoke_status_n(const void * fn, void * ctx, const u64 * a, std::index_sequence<Is...>) {
-  return reinterpret_cast<GRJIT_NativeResult (*)(void *, Word<Is>...)>(fn)(ctx, a[Is]...);
+  return reinterpret_cast<GRJIT_NativeResult (*)(void *, Word<Is>...)>(reinterpret_cast<uintptr_t>(fn))(ctx, a[Is]...);
 }
 template <size_t N>
 u64 invoke_plain_at(const void * fn, void * ctx, const u64 * a) {
