@@ -240,9 +240,19 @@ TEST(Tail, ASelfRecursionAMillionDeepRunsInConstantNativeStackAndGuestDepth) {
   EXPECT_EQ(e.st.rets[0], e.st.rets[1]);
   EXPECT_EQ(e.st.frames[0], e.st.frames[1]) << "guest frames";
   EXPECT_EQ(e.st.depths[0], e.st.depths[1]) << "guest depth";
+  EXPECT_EQ(e.st.depths[0], 1u) << "the one frame, counted (a depth that read as a budget would be vacuous)";
   EXPECT_EQ(e.st.caps[0], e.st.caps[1]) << "reservation capacity";
   EXPECT_EQ(e.st.pushes, e.st.pops);
   EXPECT_EQ(c.frames_left, 0u);
+  // What constant means, for design.md: the figures at the first and the last probe.
+  std::printf("tail: %lld tail calls in a %u-byte native budget: native sp %#llx -> %#llx, frame base "
+              "%#llx -> %#llx, guest frames %zu -> %zu, guest depth %llu -> %llu, reservation "
+              "capacity %zu -> %zu\n",
+      static_cast<long long>(kMillion), 64 * 1024,
+      static_cast<unsigned long long>(e.st.sps[0] & 0xFFF), static_cast<unsigned long long>(e.st.sps[1] & 0xFFF),
+      static_cast<unsigned long long>(e.st.bases[0] & 0xFFF), static_cast<unsigned long long>(e.st.bases[1] & 0xFFF),
+      e.st.frames[0], e.st.frames[1], static_cast<unsigned long long>(e.st.depths[0]),
+      static_cast<unsigned long long>(e.st.depths[1]), e.st.caps[0], e.st.caps[1]);
 }
 
 /* ---- Mutual recursion, through slots and through code pointers ---------------- */
@@ -311,6 +321,8 @@ void expect_constant(const Engine & e, size_t probes) {
   EXPECT_EQ(e.st.rets.front(), e.st.rets.back()) << "and its return address";
   EXPECT_EQ(e.st.frames.front(), e.st.frames.back()) << "guest frames";
   EXPECT_EQ(e.st.depths.front(), e.st.depths.back()) << "guest depth";
+  EXPECT_GE(e.st.depths.front(), 1u) << "a depth that is counted: at least the one frame";
+  EXPECT_LT(e.st.depths.front(), 1000u) << "and not a budget read as one";
   EXPECT_EQ(e.st.caps.front(), e.st.caps.back()) << "reservation capacity";
 }
 
@@ -1695,6 +1707,79 @@ TEST(Tail, GeneratedProgramsOfCallsAndTailCallsAgreeWithTheInterpreterAcrossColl
   EXPECT_GT(tails, 500);
   EXPECT_GT(refused, 50);
   EXPECT_GT(pointer_tails, 100);
+}
+
+/* ---- The frame's shape: the pad is what the staging area needs, and no more ------- */
+
+namespace {
+
+uint32_t h_noop_push(void *, uint64_t, const uint64_t *, uint64_t) { return 0; }
+void h_noop_pop(void *) {}
+uint32_t h_noop(void *, uint64_t) { return 0; }
+
+/* The metadata's frame size of a callable function of `params` parameters and no
+ * other register whose only operation is a tail call with `t_args` immediate
+ * arguments, or, for `t_args < 0`, a return. */
+uint32_t frame_bytes_of(int params, int t_args) {
+  B b("shape", 1);
+  GRJIT_CallHooks h{};
+  h.push = h_noop_push;
+  h.pop = h_noop_pop;
+  h.compile = h_noop;
+  h.deopt = h_noop;
+  h.tail = h_noop_push;
+  b.callable(h);
+  for (int i = 0; i < params; i++) {
+    b.param(GRJIT_TYPE_I64);
+  }
+  b.at(b.block());
+  static uint64_t word;
+  if (t_args >= 0) {
+    std::vector<GRJIT_Operand> args(static_cast<size_t>(t_args), I(1));
+    b.tail_call_slot(&word, 1, args, GRCORE_PollIdentity{0, 0}, {grjit_frame_slot_dead()});
+  } else {
+    b.ret();
+  }
+  Fn f(b.finish());
+  GRJIT_Emitted e;
+  EXPECT_EQ(grjit_emit_for(GRJIT_ARCH_X86_64, f, grjit_allocator_default(), nullptr, nullptr,
+                0x40, &e),
+      GRJIT_OK);
+  uint32_t bytes = e.meta.meta.frame_bytes;
+  grjit_emitted_free(&e);
+  return bytes;
+}
+
+} // namespace
+
+TEST(Tail, TheFramesPaddingIsExactlyWhatTheStagingAreaNeedsAndNoFunctionWithoutATailCallHasAny) {
+  // A function with `params` parameters has 3 fixed slots and one per register;
+  // its tail call to a callee of `t` arguments stages them in an area of `t`
+  // slots and keeps the entry in one more. The area must end at or below where the
+  // return address goes, `8 + in_A - in_T` above the frame base; the padding is the
+  // least that makes it so, which is shown here from the frame sizes alone.
+  for (int params = 0; params <= 16; params++) {
+    for (int t = 0; t <= 16; t++) {
+      SCOPED_TRACE(testing::Message() << "params=" << params << " t=" << t);
+      auto in_bytes = [](int n) { return n > 6 ? (n - 6) * 8 + ((n - 6) % 2) * 8 : 0; };
+      const int in_a = in_bytes(params);
+      const int in_t = in_bytes(t);
+      const int slots_without_pad = params + 3 + t + 1;
+      const int want_pad = std::max(0, (in_t - in_a) / 8 - (params + 4));
+      const uint32_t frame = frame_bytes_of(params, t);
+      EXPECT_EQ(frame, static_cast<uint32_t>((slots_without_pad + want_pad) * 8 + 15) / 16 * 16);
+      // The area's end is `8 * (params + 3 + pad)` below the base; the return
+      // address goes `8 + in_a - in_t` above it. The area ends at or below it...
+      EXPECT_LE(-8 * (params + 3 + want_pad), 8 + in_a - in_t);
+      // ...and with one slot less of padding it would not (when there is any).
+      if (want_pad > 0) {
+        EXPECT_GT(-8 * (params + 3 + want_pad - 1), 8 + in_a - in_t);
+      }
+    }
+    // A function with no tail call has no padding at all: the frame of 3 slots, its
+    // registers, and nothing else.
+    EXPECT_EQ(frame_bytes_of(params, -1), static_cast<uint32_t>((params + 3) * 8 + 15) / 16 * 16);
+  }
 }
 
 GRJIT_TEST_MAIN()

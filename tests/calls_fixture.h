@@ -1001,7 +1001,7 @@ __attribute__((noinline)) inline uint64_t Engine::h_probe(uint64_t v) {
     e.st.rets.push_back(base[1]);
   }
   e.st.frames.push_back(grcore_stack_frame_count(e.stack));
-  e.st.depths.push_back(grcore_context_guest_depth(e.ctx));
+  e.st.depths.push_back(grcore_context_depth(e.ctx, GRCORE_DEPTH_GUEST));
   e.st.caps.push_back(grcore_deopt_reservation_capacity(e.reservation));
   if (e.on_probe) {
     e.on_probe(e);
