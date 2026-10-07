@@ -43,6 +43,7 @@
 
 #include "test_helpers.h"
 
+#include "../callable_gen.h"
 #include "../ir_gen.h"
 
 #include "../../src/arm64/asm_internal.h"
@@ -90,17 +91,11 @@ Pin pin_of(GRJIT_Arch arch) {
   return pin;
 }
 
-/* ---- Callable functions with calls and no tail call -------------------------
+/* ---- Callable functions (callable_gen.h) ---------------------------------------------------
  *
- * One function for every combination of a parameter count, an argument count
- * and a form of call (slot, code pointer in a register, code pointer as an
- * immediate), each in two shapes: a call and a return; and a guard, a poll, a
- * derived pointer as an argument and a branch to a second return. The
- * parameters rotate through I64, REF and PTR. Nothing here is run, so the hooks,
- * the slots and the poll helper are made-up addresses. */
-
-constexpr unsigned kParams[] = {0, 1, 2, 3, 6, 7, 9, 16};
-constexpr unsigned kArgs[] = {0, 1, 4, 6, 7, 10, 16};
+ * Calls to other compiled functions and no tail call, tail calls, and calls to natives: the
+ * generators are shared with the structural test of the arm64 convention. Each function is emitted
+ * for `arch` and its bytes folded in. */
 
 /* The instruction words that materialise `value` in x16, for finding it in arm64 code. */
 std::vector<uint8_t> a64_address_words(uint64_t value) {
@@ -145,313 +140,85 @@ unsigned mask_target_check(GRJIT_Arch arch, std::vector<uint8_t> * bytes) {
 
 Pin callable_pin(GRJIT_Arch arch, unsigned * pointer_calls, unsigned * functions) {
   Pin pin;
-  unsigned id = 0;
   unsigned checks = 0;
-  GRJIT_CallHooks hooks{};
-  hooks.push = reinterpret_cast<decltype(hooks.push)>(0x30000);
-  hooks.pop = reinterpret_cast<decltype(hooks.pop)>(0x30100);
-  hooks.compile = reinterpret_cast<decltype(hooks.compile)>(0x30200);
-  hooks.deopt = reinterpret_cast<decltype(hooks.deopt)>(0x30300);
-  for (unsigned params : kParams) {
-    for (unsigned args : kArgs) {
-      for (unsigned form = 0; form < 3; form++) {
-        for (unsigned variant = 0; variant < 2; variant++, id++) {
-          B b("pin", 3);
-          b.callable(hooks);
-          EXPECT_EQ(grjit_builder_set_token(b.b, 1000 + id), GRJIT_OK);
-          b.poll_helper(kFakePoll);
-          const GRJIT_Type rotate[3] = {GRJIT_TYPE_I64, GRJIT_TYPE_REF, GRJIT_TYPE_PTR};
-          std::vector<GRJIT_VReg> p;
-          for (unsigned i = 0; i < params; i++) {
-            p.push_back(b.param(rotate[i % 3]));
-          }
-          GRJIT_VReg r = b.reg(variant == 0 && id % 4 == 2 ? GRJIT_TYPE_REF : GRJIT_TYPE_I64);
-          GRJIT_VReg d = GRJIT_NO_VREG;
-          if (variant == 1 && params >= 2) {
-            d = b.reg(GRJIT_TYPE_PTR);
-            b.derived(d, p[1], 24);
-          }
-          GRJIT_BlockId b0 = b.block();
-          GRJIT_BlockId b1 = variant == 1 ? b.block() : 0;
-          GRJIT_BlockId b2 = variant == 1 ? b.block() : 0;
-          b.at(b0);
-          const GRCORE_PollIdentity at{1, id};
-          std::vector<GRJIT_FrameSlot> state = {grjit_frame_slot_constant(id),
-              params > 0 ? grjit_frame_slot_vreg(p[0]) : grjit_frame_slot_dead(),
-              params > 1 ? grjit_frame_slot_vreg(p[1]) : grjit_frame_slot_dead()};
-          if (variant == 1) {
-            if (params > 0) {
-              b.guard(V(p[0]), at, state);
-            }
-            b.poll(at, state);
-            if (d != GRJIT_NO_VREG) {
-              b.bitcast(d, p[1]);
-              b.bin(GRJIT_OP_ADD, d, V(d), I(24));
-            }
-          }
-          std::vector<GRJIT_Operand> ops;
-          for (unsigned i = 0; i < args; i++) {
-            if (i == 0 && d != GRJIT_NO_VREG) {
-              ops.push_back(V(d));
-            } else if (i < params) {
-              ops.push_back(V(p[i]));
-            } else {
-              ops.push_back(I(static_cast<int64_t>(i) * 3 + 1));
-            }
-          }
-          if (form == 0) {
-            b.call_slot(r, reinterpret_cast<const void *>(0x40000 + 8 * id), 500 + id, ops, at,
-                state, at, state);
-          } else if (form == 1 && params >= 3) {
-            b.call_ptr(r, V(p[2]), 500 + id, ops, at, state, at, state);
-          } else {
-            b.call_ptr(r, I(0x50000 + 16 * id), 500 + id, ops, at, state, at, state);
-          }
-          if (variant == 1) {
-            b.br_if(V(r), b1, b2);
-            b.at(b1);
-            b.ret(V(r));
-            b.at(b2);
-            b.ret(I(0));
-          } else {
-            b.ret(V(r));
-          }
-          Fn f(b.finish());
-          char why[256];
-          EXPECT_EQ(grjit_function_verify(f, nullptr, why, sizeof why), GRJIT_OK) << id << why;
-          GRJIT_Emitted e;
-          GRJIT_Result res = grjit_emit_for(arch, f, grjit_allocator_default(),
-              nullptr, nullptr, kRequestOffset, &e);
-          EXPECT_EQ(res, GRJIT_OK) << "function " << id << ": " << grjit_result_string(res);
-          if (res != GRJIT_OK) {
-            return pin;
-          }
-          /* A call through a pointer calls the library's own target check, whose
-           * address is the one thing in the bytes that is the process's and not
-           * the emitter's. It is replaced by a marker before hashing, and the
-           * marker is counted: one for each such call, or the pin proved less. */
-          std::vector<uint8_t> bytes(e.bytes, e.bytes + e.size);
-          checks += mask_target_check(arch, &bytes);
-          for (uint8_t byte : bytes) {
-            pin.hash = fold(pin.hash, byte);
-          }
-          pin.hash = fold(pin.hash, 0xFF);
-          pin.bytes += bytes.size();
-          grjit_emitted_free(&e);
-          *functions += 1;
-        }
-      }
+  cg::each_call_function([&](const GRJIT_Function * f, unsigned id) {
+    GRJIT_Emitted e;
+    GRJIT_Result res = grjit_emit_for(arch, f, grjit_allocator_default(), nullptr, nullptr, kRequestOffset, &e);
+    EXPECT_EQ(res, GRJIT_OK) << "function " << id << ": " << grjit_result_string(res);
+    if (res != GRJIT_OK) {
+      return false;
     }
-  }
+    /* A call through a pointer calls the library's own target check, whose address is the one thing
+     * in the bytes that is the process's and not the emitter's. It is replaced by a marker before
+     * hashing, and the marker is counted: one for each such call, or the pin proved less. */
+    std::vector<uint8_t> bytes(e.bytes, e.bytes + e.size);
+    checks += mask_target_check(arch, &bytes);
+    for (uint8_t byte : bytes) {
+      pin.hash = fold(pin.hash, byte);
+    }
+    pin.hash = fold(pin.hash, 0xFF);
+    pin.bytes += bytes.size();
+    grjit_emitted_free(&e);
+    *functions += 1;
+    return true;
+  });
   *pointer_calls = checks;
   return pin;
 }
-
-/* ---- Callable functions with tail calls ---------------------------------------------------
- *
- * One tail call, in each form, for every combination of a parameter count and the callee's
- * argument count: the frame replacement is the part of a callable function that depends most
- * on both. The parameters rotate through the three types. Nothing here is run. */
 
 Pin tail_pin(GRJIT_Arch arch, unsigned * pointer_calls, unsigned * functions) {
   Pin pin;
-  unsigned id = 0;
   unsigned checks = 0;
-  GRJIT_CallHooks hooks{};
-  hooks.push = reinterpret_cast<decltype(hooks.push)>(0x30000);
-  hooks.pop = reinterpret_cast<decltype(hooks.pop)>(0x30100);
-  hooks.compile = reinterpret_cast<decltype(hooks.compile)>(0x30200);
-  hooks.deopt = reinterpret_cast<decltype(hooks.deopt)>(0x30300);
-  hooks.tail = reinterpret_cast<decltype(hooks.tail)>(0x30400);
-  for (unsigned params : kParams) {
-    for (unsigned args : kArgs) {
-      for (unsigned form = 0; form < 3; form++, id++) {
-        B b("pin", 3);
-        b.callable(hooks);
-        EXPECT_EQ(grjit_builder_set_token(b.b, 3000 + id), GRJIT_OK);
-        b.poll_helper(kFakePoll);
-        const GRJIT_Type rotate[3] = {GRJIT_TYPE_I64, GRJIT_TYPE_REF, GRJIT_TYPE_PTR};
-        std::vector<GRJIT_VReg> p;
-        for (unsigned i = 0; i < params; i++) {
-          p.push_back(b.param(rotate[i % 3]));
-        }
-        b.at(b.block());
-        const GRCORE_PollIdentity at{3, id};
-        std::vector<GRJIT_FrameSlot> state = {grjit_frame_slot_constant(id),
-            params > 0 ? grjit_frame_slot_vreg(p[0]) : grjit_frame_slot_dead(),
-            params > 1 ? grjit_frame_slot_vreg(p[1]) : grjit_frame_slot_dead()};
-        std::vector<GRJIT_Operand> ops;
-        for (unsigned i = 0; i < args; i++) {
-          ops.push_back(i < params ? V(p[i]) : I(static_cast<int64_t>(i) * 3 + 1));
-        }
-        if (form == 0) {
-          b.tail_call_slot(reinterpret_cast<const void *>(0x40000 + 8 * id), 700 + id, ops, at, state);
-        } else if (form == 1 && params >= 3) {
-          b.tail_call_ptr(V(p[2]), 700 + id, ops, at, state);
-        } else {
-          b.tail_call_ptr(I(0x50000 + 16 * id), 700 + id, ops, at, state);
-        }
-        Fn f(b.finish());
-        char why[256];
-        EXPECT_EQ(grjit_function_verify(f, nullptr, why, sizeof why), GRJIT_OK) << id << why;
-        GRJIT_Emitted e;
-        GRJIT_Result res = grjit_emit_for(arch, f, grjit_allocator_default(), nullptr, nullptr, kRequestOffset, &e);
-        EXPECT_EQ(res, GRJIT_OK) << "tail function " << id << ": " << grjit_result_string(res);
-        if (res != GRJIT_OK) {
-          return pin;
-        }
-        std::vector<uint8_t> bytes(e.bytes, e.bytes + e.size);
-        checks += mask_target_check(arch, &bytes);
-        for (uint8_t byte : bytes) {
-          pin.hash = fold(pin.hash, byte);
-        }
-        pin.hash = fold(pin.hash, 0xFF);
-        pin.bytes += bytes.size();
-        grjit_emitted_free(&e);
-        *functions += 1;
-      }
+  cg::each_tail_function([&](const GRJIT_Function * f, unsigned id) {
+    GRJIT_Emitted e;
+    GRJIT_Result res = grjit_emit_for(arch, f, grjit_allocator_default(), nullptr, nullptr, kRequestOffset, &e);
+    EXPECT_EQ(res, GRJIT_OK) << "tail function " << id << ": " << grjit_result_string(res);
+    if (res != GRJIT_OK) {
+      return false;
     }
-  }
+    std::vector<uint8_t> bytes(e.bytes, e.bytes + e.size);
+    checks += mask_target_check(arch, &bytes);
+    for (uint8_t byte : bytes) {
+      pin.hash = fold(pin.hash, byte);
+    }
+    pin.hash = fold(pin.hash, 0xFF);
+    pin.bytes += bytes.size();
+    grjit_emitted_free(&e);
+    *functions += 1;
+    return true;
+  });
   *pointer_calls = checks;
   return pin;
 }
 
-/* ---- Callable functions with calls to natives -------------------------------
- *
- * Parameters rotate through I64, REF and PTR; the native's parameters do too, so
- * every argument is a register of the type the descriptor wants, or an immediate.
- * The shapes: a call and a return; and a guard, a poll, a derived pointer and a
- * reference live across the call, the result tested and a branch. The descriptors'
- * addresses are made up (nothing is run) and their stack use varies. */
-
-constexpr unsigned kNativeParams[] = {0, 1, 3, 7};
-constexpr unsigned kNativeArgs[] = {0, 1, 4, 5, 6, 7, 10, 16};
-
 Pin native_pin(GRJIT_Arch arch, unsigned * functions, bool * all_refused_elsewhere) {
   Pin pin;
-  unsigned id = 0;
-  GRJIT_CallHooks hooks{};
-  hooks.push = reinterpret_cast<decltype(hooks.push)>(0x30000);
-  hooks.pop = reinterpret_cast<decltype(hooks.pop)>(0x30100);
-  hooks.compile = reinterpret_cast<decltype(hooks.compile)>(0x30200);
-  hooks.deopt = reinterpret_cast<decltype(hooks.deopt)>(0x30300);
   *all_refused_elsewhere = true;
-  for (unsigned params : kNativeParams) {
-    for (unsigned args : kNativeArgs) {
-      for (unsigned status = 0; status < 2; status++) {
-        for (unsigned result = 0; result < 4; result++) { // none, I64, REF, PTR
-          for (unsigned variant = 0; variant < 2; variant++, id++) {
-            const GRJIT_Type rotate[3] = {GRJIT_TYPE_I64, GRJIT_TYPE_REF, GRJIT_TYPE_PTR};
-            std::vector<GRJIT_Type> types;
-            for (unsigned i = 0; i < args; i++) {
-              types.push_back(rotate[(i + id) % 3]);
-            }
-            NativeTab t;
-            GRJIT_Type rt = result == 0 ? GRJIT_NATIVE_NO_RESULT : rotate[result - 1];
-            uint32_t nid = t.add(reinterpret_cast<const void *>(0x60000 + 16 * static_cast<uintptr_t>(id)), types, rt,
-                status != 0 ? GRJIT_NATIVE_STATUS : 0, (id % 5) * 100);
-            B b("pin", 4);
-            b.callable(hooks);
-            b.natives(t);
-            EXPECT_EQ(grjit_builder_set_token(b.b, 2000 + id), GRJIT_OK);
-            b.poll_helper(kFakePoll);
-            std::vector<GRJIT_VReg> p;
-            for (unsigned i = 0; i < params; i++) {
-              p.push_back(b.param(rotate[i % 3]));
-            }
-            GRJIT_VReg dst = rt == GRJIT_NATIVE_NO_RESULT ? GRJIT_NO_VREG : b.reg(rt);
-            GRJIT_VReg flag = b.reg(GRJIT_TYPE_I64);
-            GRJIT_VReg d = GRJIT_NO_VREG;
-            if (variant == 1 && params >= 2) {
-              d = b.reg(GRJIT_TYPE_PTR);
-              b.derived(d, p[1], 24);
-            }
-            GRJIT_BlockId b0 = b.block();
-            GRJIT_BlockId b1 = variant == 1 ? b.block() : 0;
-            GRJIT_BlockId b2 = variant == 1 ? b.block() : 0;
-            b.at(b0);
-            b.cnst(flag, 1);
-            const GRCORE_PollIdentity at{2, id};
-            const GRCORE_PollIdentity after{2, id + 1};
-            std::vector<GRJIT_FrameSlot> state = {grjit_frame_slot_constant(id),
-                params > 0 ? grjit_frame_slot_vreg(p[0]) : grjit_frame_slot_dead(),
-                params > 1 ? grjit_frame_slot_vreg(p[1]) : grjit_frame_slot_dead(),
-                dst != GRJIT_NO_VREG && dst < params ? grjit_frame_slot_vreg(dst) : grjit_frame_slot_dead()};
-            std::vector<GRJIT_FrameSlot> after_state = state;
-            after_state[0] = grjit_frame_slot_constant(id + 1);
-            if (dst != GRJIT_NO_VREG) {
-              after_state[3] = grjit_frame_slot_vreg(dst);
-            }
-            if (variant == 1) {
-              if (params > 0) {
-                b.guard(V(flag), at, state);
-              }
-              b.poll(at, state);
-              if (d != GRJIT_NO_VREG) {
-                b.bitcast(d, p[1]);
-                b.bin(GRJIT_OP_ADD, d, V(d), I(24));
-              }
-            }
-            std::vector<GRJIT_Operand> ops;
-            for (unsigned i = 0; i < args; i++) {
-              // A register of the right type if there is one, or an immediate.
-              GRJIT_Operand o = I(static_cast<int64_t>(i) * 5 + 2);
-              for (unsigned q = 0; q < params; q++) {
-                if (rotate[q % 3] == types[i] && (q + i) % 2 == 0) {
-                  o = V(p[q]);
-                  break;
-                }
-              }
-              if (i == 0 && d != GRJIT_NO_VREG && types[i] == GRJIT_TYPE_PTR) {
-                o = V(d);
-              }
-              ops.push_back(o);
-            }
-            if (status != 0) {
-              b.call_native(dst, nid, ops, at, state, after, after_state);
-            } else {
-              b.call_native(dst, nid, ops, at, state);
-            }
-            if (variant == 1) {
-              b.br_if(V(flag), b1, b2);
-              b.at(b1);
-              b.ret(dst != GRJIT_NO_VREG ? V(dst) : I(1));
-              b.at(b2);
-              b.ret(I(0));
-            } else {
-              b.ret(dst != GRJIT_NO_VREG ? V(dst) : I(1));
-            }
-            Fn f(b.finish());
-            char why[256];
-            EXPECT_EQ(grjit_function_verify(f, nullptr, why, sizeof why), GRJIT_OK) << id << why;
-            GRJIT_Emitted e;
-            GRJIT_Result res = grjit_emit_for(arch, f, grjit_allocator_default(),
-                nullptr, nullptr, kRequestOffset, &e);
-            EXPECT_EQ(res, GRJIT_OK) << "function " << id << ": " << grjit_result_string(res);
-            if (res != GRJIT_OK) {
-              return pin;
-            }
-            for (size_t i = 0; i < e.size; i++) {
-              pin.hash = fold(pin.hash, e.bytes[i]);
-            }
-            pin.hash = fold(pin.hash, 0xFF);
-            pin.bytes += e.size;
-            grjit_emitted_free(&e);
-            {
-              /* Win64 refuses every one of them before a byte. */
-              GRJIT_Emitted other;
-              if (grjit_emit_for(GRJIT_ARCH_X86_64_WIN64, f, grjit_allocator_default(), nullptr, nullptr,
-                      kRequestOffset, &other) != GRJIT_ERR_UNSUPPORTED ||
-                  other.size != 0 || other.bytes != nullptr) {
-                *all_refused_elsewhere = false;
-              }
-            }
-          }
-        }
+  cg::each_native_function([&](const GRJIT_Function * f, unsigned id) {
+    GRJIT_Emitted e;
+    GRJIT_Result res = grjit_emit_for(arch, f, grjit_allocator_default(), nullptr, nullptr, kRequestOffset, &e);
+    EXPECT_EQ(res, GRJIT_OK) << "function " << id << ": " << grjit_result_string(res);
+    if (res != GRJIT_OK) {
+      return false;
+    }
+    for (size_t i = 0; i < e.size; i++) {
+      pin.hash = fold(pin.hash, e.bytes[i]);
+    }
+    pin.hash = fold(pin.hash, 0xFF);
+    pin.bytes += e.size;
+    grjit_emitted_free(&e);
+    {
+      /* Win64 refuses every one of them before a byte. */
+      GRJIT_Emitted other;
+      if (grjit_emit_for(GRJIT_ARCH_X86_64_WIN64, f, grjit_allocator_default(), nullptr, nullptr, kRequestOffset,
+              &other) != GRJIT_ERR_UNSUPPORTED ||
+          other.size != 0 || other.bytes != nullptr) {
+        *all_refused_elsewhere = false;
       }
     }
-  }
-  *functions = id;
+    *functions = id + 1;
+    return true;
+  });
   return pin;
 }
 
