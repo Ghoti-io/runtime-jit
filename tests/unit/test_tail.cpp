@@ -1466,16 +1466,86 @@ void add_walk_chain(Engine & e, int * a_out, int * b_out, int * w_out, bool thro
   *w_out = w;
 }
 
+/* The widening twin of add_walk_chain: A2(n) calls N(n), a function of one
+ * parameter, which tail-calls Wd(n, 11 immediates), a function of twelve, so the
+ * callee takes more stack arguments than its caller (in_T > in_A: the return
+ * address moves down and the arguments land below the frame being replaced). Wd(n,
+ * ...) has an object; n == 0: collect and return its value; else r = A2(n - 1) by a
+ * call; return r + its value. The chain from A2(L) is A2(L), Wd(L), A2(L - 1), ...,
+ * A2(0), Wd(0). `outer` is A2 and `inner` is Wd. */
+void add_widen_chain(Engine & e, int * outer, int * inner, bool through_pointer) {
+  int a2 = e.reserve();
+  int nn = e.reserve();
+  int wd = e.reserve();
+  {
+    P p("A2", {GRJIT_TYPE_I64});
+    int obj = p.local(GRJIT_TYPE_REF), r = p.local(), v = p.local(), s = p.local();
+    p.nw(obj, 3);
+    p.call(r, nn, {0});
+    p.get(v, obj);
+    p.bin(K::ADD, s, r, v);
+    p.ret(s);
+    e.set(a2, p.done());
+  }
+  {
+    P p("N", {GRJIT_TYPE_I64});
+    std::vector<int> args = {0};
+    for (int i = 0; i < 11; i++) {
+      args.push_back(p.imm(70 + i));
+    }
+    if (through_pointer) {
+      int ptr = p.local(GRJIT_TYPE_PTR);
+      p.entryof(ptr, wd);
+      p.tailcallp(ptr, wd, args);
+    } else {
+      p.tailcall(wd, args);
+    }
+    e.set(nn, p.done());
+  }
+  {
+    std::vector<GRJIT_Type> types(12, GRJIT_TYPE_I64);
+    P p("Wd", types);
+    int obj = p.local(GRJIT_TYPE_REF), zero = p.local(), one = p.local(), c = p.local(),
+        n1 = p.local(), r = p.local(), v = p.local(), s = p.local();
+    p.nw(obj, 4);
+    p.cnst(zero, 0);
+    p.cnst(one, 1);
+    p.bin(K::EQ, c, 0, zero);
+    int more = p.brz(c);
+    p.collect();
+    p.get(v, obj);
+    p.ret(v);
+    p.patch(more, p.here());
+    p.bin(K::SUB, n1, 0, one);
+    p.call(r, a2, {n1});
+    p.get(v, obj);
+    p.bin(K::ADD, s, r, v);
+    p.ret(s);
+    e.set(wd, p.done());
+  }
+  *outer = a2;
+  *inner = wd;
+}
+
 } // namespace
 
 TEST(Tail, ACollectionInAFiftyDeepChainAfterWideningAndNarrowingTailCallsSeesEveryFrameOnceWithItsReferences) {
+  // Narrowing: a function of twelve parameters tail-calls one of one. Widening: a
+  // function of one tail-calls one of twelve. Either way, relocation (a moving
+  // collection at every GC point) happens with the replaced frames in the chain.
   TAIL_ONLY_ON_X86_64_SYSV();
-  for (int through_pointer = 0; through_pointer < 2; through_pointer++) {
-    SCOPED_TRACE(through_pointer ? "pointer" : "slot");
+  for (int variant = 0; variant < 4; variant++) {
+    const bool through_pointer = variant % 2 != 0;
+    const bool widen = variant >= 2;
+    SCOPED_TRACE(testing::Message() << (through_pointer ? "pointer" : "slot") << (widen ? ", widening" : ", narrowing"));
     Engine e;
     e.torture = true;
     int a, b, w;
-    add_walk_chain(e, &a, &b, &w, through_pointer != 0);
+    if (widen) {
+      add_widen_chain(e, &a, &b, through_pointer);
+    } else {
+      add_walk_chain(e, &a, &b, &w, through_pointer);
+    }
     ASSERT_TRUE(e.compile_fn(b));
     struct Seen {
       std::vector<GRCORE_CompiledFrame> frames;
