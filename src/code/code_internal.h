@@ -95,6 +95,7 @@ struct GRJIT_Code {
   uint32_t walk_cell_offset;    ///< The layout a callable function was built for.
   uint32_t native_limit_offset;
   bool callable;                ///< Has an internal entry (AD-28).
+  uint64_t token;               ///< Its token (builder.h), also written before the entry.
   uint32_t internal_offset;     ///< Where it is, from the start of the mapping.
   void * unwind_table; ///< The registered RUNTIME_FUNCTION (Win64), or NULL.
 };

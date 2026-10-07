@@ -326,8 +326,15 @@ typedef struct GRJIT_Op {
  *   into its guest frame (`grcore_compiled_rebuild`), which is the one place the
  *   rebuild happens; compiled code then returns `DEOPTED` through each frame
  *   without touching anything. `cause` is zero, or the poll helper's non-zero
- *   result. It must not fail; if it cannot rebuild, the process is in an
- *   unrecoverable state and the hook stops it.
+ *   result. It returns zero when the chain was rebuilt. **A non-zero return
+ *   means the rebuild was refused** (a frame state whose length is not its guest
+ *   frame's, a reservation that is short, a chain that does not walk) and nothing
+ *   was written: the guest frames are as the compiled calls left them, which is
+ *   not a state anything can finish. Every frame still returns, with status
+ *   `FAILED` and the hook's value in `rax`, and the entry returns
+ *   ::GRJIT_EXIT_REBUILD_FAILED with that value in `out[0]`. The engine must treat
+ *   it as an internal error: unwind every guest frame the run pushed and report
+ *   it, never continue in the interpreter.
  *
  * `compile` may be NULL for a function with no `CALL_SLOT`, `push` and `pop`
  * for one with no calls; `deopt` is required.
@@ -337,7 +344,7 @@ typedef struct GRJIT_CallHooks {
       uint64_t arg_count);
   void (*pop)(void * context);
   uint32_t (*compile)(void * context, uint64_t callee);
-  void (*deopt)(void * context, uint64_t cause);
+  uint32_t (*deopt)(void * context, uint64_t cause);
 } GRJIT_CallHooks;
 
 /** @brief A function. Opaque; built by ::GRJIT_Builder. */

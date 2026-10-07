@@ -239,7 +239,7 @@ static uint32_t call_compile(void * context, uint64_t callee) {
   (void)callee;
   return 1;
 }
-static void call_deopt(void * context, uint64_t cause) {
+static uint32_t call_deopt(void * context, uint64_t cause) {
   (void)context;
   (void)cause;
   setup_failed("a deopt in the call loop");

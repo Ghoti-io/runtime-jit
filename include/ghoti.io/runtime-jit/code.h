@@ -65,7 +65,9 @@
 
 #include <ghoti.io/runtime-jit/core.h>
 
+#include <ghoti.io/runtime-core/a/code.h>
 #include <ghoti.io/runtime-core/a/codemeta.h>
+#include <ghoti.io/runtime-core/a/registry.h>
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -86,7 +88,14 @@ typedef enum GRJIT_Exit {
   GRJIT_EXIT_DEOPT = 1,
   /** The entry hook or the poll helper returned non-zero; the value is in
    *  `out[0]` and nothing after it ran. */
-  GRJIT_EXIT_REFUSED = 2
+  GRJIT_EXIT_REFUSED = 2,
+  /** A callable function's chain deoptimization was refused by the engine's
+   *  `deopt` hook (a frame state of the wrong length, a short reservation, a
+   *  chain that does not walk): nothing was rebuilt, so the guest frames are as
+   *  the compiled calls left them, and `out[0]` is the hook's non-zero value.
+   *  The engine must unwind what the run pushed and report an internal error;
+   *  it must not continue in the interpreter (`ir.h`, ::GRJIT_CallHooks). */
+  GRJIT_EXIT_REBUILD_FAILED = 3
 } GRJIT_Exit;
 
 /** @brief The signature of compiled code. */
@@ -132,6 +141,33 @@ GRJIT_API uintptr_t grjit_code_internal_entry(const GRJIT_Code * code);
 
 /** @brief Whether the code is callable (has an internal entry). */
 GRJIT_API bool grjit_code_callable(const GRJIT_Code * code);
+
+/** @brief The token the function was given (::grjit_builder_set_token). */
+GRJIT_API uint64_t grjit_code_token(const GRJIT_Code * code);
+
+/**
+ * @brief Installs a callable function's internal entry in an entry slot, after
+ *   checking that it is the function the slot is for.
+ *
+ * The slot belongs to the function with `token` and `arg_count` parameters; the
+ * code must be callable and carry exactly that token and parameter count, or
+ * nothing is installed. A bare ::grcore_entry_slot_set takes any address above
+ * one, the C-ABI entry included, and an engine that installs code that way
+ * bypasses the check a call through a slot relies on.
+ *
+ * @param context The context. The caller must own it.
+ * @param slot A slot of the context.
+ * @param handle The counted handle that owns `code`, as `grcore_entry_slot_set`.
+ * @param code The compiled function.
+ * @param token The token of the function the slot is for.
+ * @param arg_count Its parameter count.
+ * @return ::GRJIT_OK; ::GRJIT_ERR_INVALID for code that is not callable or does
+ *   not match, or any refusal of `grcore_entry_slot_set`; ::GRJIT_ERR_OOM or
+ *   ::GRJIT_ERR_LIMIT when it cannot allocate. Nothing changes on a refusal.
+ */
+GRJIT_API GRJIT_Result grjit_entry_slot_install(GRCORE_Context * context,
+    GRCORE_EntrySlot * slot, GRCORE_Code * handle, const GRJIT_Code * code,
+    uint64_t token, size_t arg_count);
 
 /** @brief The address of the first byte of code. */
 GRJIT_API const void * grjit_code_address(const GRJIT_Code * code);

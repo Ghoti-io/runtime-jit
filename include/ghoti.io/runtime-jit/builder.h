@@ -151,6 +151,22 @@ GRJIT_API GRJIT_Result grjit_builder_set_block(
 GRJIT_API GRJIT_Result grjit_builder_set_callable(
     GRJIT_Builder * builder, const GRJIT_CallHooks * hooks);
 
+/**
+ * @brief Names a callable function for the engine's calls to it: the token a
+ *   `CALL_SLOT` or `CALL_PTR` that means this function passes as `callee`.
+ *
+ * The token and the parameter count are written before the internal entry, and
+ * a call through a code pointer refuses, at run time, a target whose token is
+ * not the call's `callee` or whose parameter count is not the call's argument
+ * count (so a call can never be entered with the wrong number of arguments,
+ * which would corrupt the stack, or into the wrong function, which a chain
+ * rebuild would then misread). ::grjit_entry_slot_install makes the same check
+ * when code is installed in a slot. The default is zero.
+ *
+ * @return ::GRJIT_OK, or ::GRJIT_ERR_INVALID for NULL.
+ */
+GRJIT_API GRJIT_Result grjit_builder_set_token(GRJIT_Builder * builder, uint64_t token);
+
 /** @brief Declares the poll slow-path helper that `POLL` calls. */
 GRJIT_API GRJIT_Result grjit_builder_set_poll_helper(
     GRJIT_Builder * builder, GRJIT_PollHelper helper);

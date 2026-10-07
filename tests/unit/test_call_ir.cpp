@@ -16,7 +16,7 @@ namespace {
 uint32_t h_push(void *, uint64_t, const uint64_t *, uint64_t) { return 0; }
 void h_pop(void *) {}
 uint32_t h_compile(void *, uint64_t) { return 0; }
-void h_deopt(void *, uint64_t) {}
+uint32_t h_deopt(void *, uint64_t) { return 0; }
 
 GRJIT_CallHooks all_hooks() {
   GRJIT_CallHooks h{};

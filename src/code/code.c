@@ -110,6 +110,28 @@ uintptr_t grjit_code_internal_entry(const GRJIT_Code * code) {
       : (uintptr_t)code->mapping + code->internal_offset;
 }
 
+uint64_t grjit_code_token(const GRJIT_Code * code) {
+  return code == NULL ? 0 : code->token;
+}
+
+GRJIT_Result grjit_entry_slot_install(GRCORE_Context * context, GRCORE_EntrySlot * slot,
+    GRCORE_Code * handle, const GRJIT_Code * code, uint64_t token, size_t arg_count) {
+  if (code == NULL || !code->callable || code->token != token ||
+      code->param_count != arg_count) {
+    return GRJIT_ERR_INVALID;
+  }
+  switch (grcore_entry_slot_set(context, slot, handle, grjit_code_internal_entry(code))) {
+    case GRCORE_OK:
+      return GRJIT_OK;
+    case GRCORE_ERR_OOM:
+      return GRJIT_ERR_OOM;
+    case GRCORE_ERR_LIMIT:
+      return GRJIT_ERR_LIMIT;
+    default:
+      return GRJIT_ERR_INVALID;
+  }
+}
+
 bool grjit_code_callable(const GRJIT_Code * code) {
   return code != NULL && code->callable;
 }
@@ -332,6 +354,7 @@ GRJIT_Result grjit_compile(const GRJIT_CompileOptions * options,
   code->walk_cell_offset = grcore_jit_layout()->walk_cell_offset;
   code->native_limit_offset = grcore_jit_layout()->native_limit_offset;
   code->callable = function->callable;
+  code->token = function->token;
   memcpy(&code->entry, &code->mapping, sizeof code->entry);
   *out_code = code;
   return GRJIT_OK;

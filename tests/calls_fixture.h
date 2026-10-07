@@ -211,6 +211,9 @@ struct Outcome {
   size_t frames_left = 0;  // guest frames still on the stack (a failure)
   size_t limit_depth = 0;  // guest frames on the stack when a call was refused
   bool failed = false;     // the interpreter met a state no rebuild leaves
+  bool rebuild_failed = false; // the adapter reported GRJIT_EXIT_REBUILD_FAILED
+  u64 failed_with = 0;     // and the hook's answer, out[0]
+  std::vector<u64> pcs_after_failure; // each guest frame's pc slot, before the unwind
 };
 
 struct Stats {
@@ -276,6 +279,7 @@ class Engine {
   TrackingAllocator * refuse_extend_with = nullptr; // refuses the allocation of the Nth extension
   long refuse_extend_at = 0;
   long extend_calls = 0;
+  uint32_t refuse_rebuild_with = 0; // the deopt hook refuses without rebuilding
   long refuse_push_at = 0;        // the Nth push is refused (an exit at the call site)
   long push_calls = 0;
 
@@ -329,7 +333,7 @@ class Engine {
   static uint32_t h_push(void *, uint64_t, const uint64_t *, uint64_t);
   static void h_pop(void *);
   static uint32_t h_compile(void *, uint64_t);
-  static void h_deopt(void *, uint64_t);
+  static uint32_t h_deopt(void *, uint64_t);
   static uint32_t h_poll(void *, uint64_t, uint64_t);
   static uint64_t h_new(uint64_t);
   static uint64_t h_collect();
@@ -529,6 +533,7 @@ inline GRJIT_Function * Engine::build_ir(int fn) {
   hooks.compile = Engine::h_compile;
   hooks.deopt = Engine::h_deopt;
   b.callable(hooks);
+  EXPECT_EQ(grjit_builder_set_token(b.b, static_cast<u64>(fn)), GRJIT_OK);
   b.poll_helper(Engine::h_poll);
   for (int i = 0; i < F.nparams; i++) {
     b.param(F.type[i]);
@@ -701,7 +706,9 @@ inline bool Engine::compile_fn(int fn) {
       GRCORE_OK);
   EXPECT_EQ(grcore_code_register(ctx, engine, c.handle, c.start, grjit_code_size(code), &c.meta),
       GRCORE_OK);
-  EXPECT_EQ(grcore_entry_slot_set(ctx, slots[fn], c.handle, c.internal), GRCORE_OK);
+  EXPECT_EQ(grjit_entry_slot_install(ctx, slots[fn], c.handle, code, static_cast<u64>(fn),
+                static_cast<size_t>(funcs[fn].nparams)),
+      GRJIT_OK);
   // The registry's and the slot's references are the code's life now.
   grcore_code_release(c.handle);
   st.compiles++;
@@ -771,7 +778,7 @@ inline uint32_t Engine::h_compile(void *, uint64_t callee) {
   return e.compile_fn(static_cast<int>(callee)) ? 0 : 1;
 }
 
-inline void Engine::h_deopt(void *, uint64_t cause) {
+inline uint32_t Engine::h_deopt(void *, uint64_t cause) {
   Engine & e = *g_engine;
   e.st.deopts++;
   e.st.last_cause = cause;
@@ -796,9 +803,14 @@ inline void Engine::h_deopt(void *, uint64_t cause) {
     }
   }
   size_t n = 0;
+  if (e.refuse_rebuild_with != 0) {
+    e.st.rebuild = static_cast<GRCORE_Result>(e.refuse_rebuild_with);
+    return e.refuse_rebuild_with;
+  }
   GRCORE_Result r = grcore_compiled_rebuild(e.ctx, e.reservation, SIZE_MAX, &n);
   e.st.rebuild = r;
   e.st.deopt_frames += static_cast<long>(n);
+  return r == GRCORE_OK ? 0u : static_cast<uint32_t>(r);
 }
 
 inline uint32_t Engine::h_poll(void *, uint64_t, uint64_t) {
@@ -1019,7 +1031,7 @@ inline Outcome Engine::run_compiled(int fn, const std::vector<u64> & args) {
   uint32_t exit = grjit_code_call(code, ctx, in.data(), res.data());
   out.exit = exit;
   GRCORE_Result left = grcore_activation_leave(stack, rec);
-  if (!interpreter_cannot_recover) {
+  if (!interpreter_cannot_recover && exit != GRJIT_EXIT_REBUILD_FAILED) {
     EXPECT_EQ(left, GRCORE_OK) << "frames: " << grcore_stack_frame_count(stack)
                                << " base: " << base_frames + 1;
   }
@@ -1029,6 +1041,22 @@ inline Outcome Engine::run_compiled(int fn, const std::vector<u64> & args) {
     reset_reservation();
     pop_frame();
     out.frames_left = grcore_stack_frame_count(stack) - base_frames;
+    return out;
+  }
+  if (exit == GRJIT_EXIT_REBUILD_FAILED) {
+    // The engine's contract: nothing was rebuilt, so unwind what the run pushed
+    // and report an internal error; never continue in the interpreter.
+    out.rebuild_failed = true;
+    out.failed_with = res[0];
+    for (size_t k = base_frames; k < grcore_stack_frame_count(stack); k++) {
+      GRCORE_FrameRef fr = grcore_stack_top(stack);
+      for (size_t up = grcore_stack_frame_count(stack) - 1; up > k; up--) {
+        fr = grcore_stack_caller(stack, fr);
+      }
+      out.pcs_after_failure.push_back(grcore_stack_slots(stack, fr)[0]);
+    }
+    reset_reservation();
+    grcore_unwind_all(stack, nullptr);
     return out;
   }
   EXPECT_EQ(exit, GRJIT_EXIT_DEOPT);

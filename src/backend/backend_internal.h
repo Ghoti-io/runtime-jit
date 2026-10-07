@@ -114,9 +114,17 @@ typedef struct GRJIT_SiteRec {
  * address a call loaded across the push. */
 #define GRJIT_STATUS_RETURNED 0u
 #define GRJIT_STATUS_DEOPTED 1u
-/** The eight bytes before every internal entry: the check a call through a
- *  code pointer makes that the target is the entry of compiled code. */
-#define GRJIT_ENTRY_TAG UINT64_C(0x4752494E54454E54)
+/** The engine's `deopt` hook refused the rebuild; `rax` is its answer. */
+#define GRJIT_STATUS_FAILED 2u
+/** The sixteen bytes before every internal entry: a word holding the magic in
+ *  its high half and the parameter count in its low half, then the function's
+ *  token. A call through a code pointer checks all three, so a target that is
+ *  not compiled code, or not the function the call means, or takes a different
+ *  number of arguments, is never entered. */
+#define GRJIT_ENTRY_TAG_MAGIC UINT32_C(0x4752494E)
+#define GRJIT_ENTRY_TAG_WORD(params) \
+  ((UINT64_C(0x4752494E) << 32) | (uint64_t)(uint32_t)(params))
+#define GRJIT_ENTRY_TAG_BYTES 16u
 /** The most arguments passed in registers by the internal convention. */
 #define GRJIT_INTERNAL_REG_ARGS 6u
 
@@ -131,8 +139,10 @@ typedef struct GRJIT_CallableShape {
 
 /** Whether `target` is the internal entry of compiled code registered in the
  *  context (src/code/target.c): the check a call through a code pointer makes.
- *  Called from compiled code, through the C ABI. */
-uint32_t grjit_call_target_ok(void * context, uint64_t target);
+ *  Called from compiled code, through the C ABI. It also requires the tag
+ *  before the entry to name `callee` and `arg_count` parameters. */
+uint32_t grjit_call_target_ok(
+    void * context, uint64_t target, uint64_t callee, uint64_t arg_count);
 
 /** The shape of `f`, which need not be callable (then all zero). */
 void grjit_callable_shape(const GRJIT_Function * f, GRJIT_CallableShape * out);

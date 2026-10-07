@@ -59,6 +59,8 @@ typedef struct GRJIT_Emit {
   /* A callable function (AD-28; backend_internal.h for the convention). */
   GRJIT_Label internal;     ///< The internal entry.
   GRJIT_Label ret_deopted;  ///< Returns DEOPTED with `rax` untouched.
+  GRJIT_Label ret_failed;   ///< Returns FAILED with the hook's answer in `rax`.
+  GRJIT_Label ret_propagate; ///< Returns what a callee returned, `rdx` and `rax` as they are.
   GRJIT_Label overflow;     ///< The prologue's native-stack exit.
   uint32_t internal_offset; ///< Where the internal entry is, after the adapter.
 } GRJIT_Emit;
@@ -107,6 +109,8 @@ void grjit_emit_call_slow_stub(GRJIT_Emit * e, const GRJIT_Pending * p);
 void grjit_emit_call_exit_stub(GRJIT_Emit * e, const GRJIT_Pending * p);
 void grjit_emit_overflow_stub(GRJIT_Emit * e);
 void grjit_emit_ret_deopted(GRJIT_Emit * e);
+/** The other two returns: FAILED, and a callee's non-zero status passed on. */
+void grjit_emit_ret_status(GRJIT_Emit * e);
 /** `leave; ret` of a callable function: the callee pops its stack arguments. */
 void grjit_emit_callable_epilogue(GRJIT_Emit * e);
 /** A poll's slow path: call the helper, refuse on non-zero, resume. */

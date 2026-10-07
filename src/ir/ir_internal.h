@@ -64,6 +64,8 @@ struct GRJIT_Function {
   size_t param_count;
   GRJIT_PollHelper poll_helper;
   bool callable;            ///< Has an internal entry and the hooks below.
+  uint64_t token;           ///< The engine's token for this function, which a call
+                            ///< through a code pointer must name (AD-28).
   GRJIT_CallHooks hooks;    ///< Valid when `callable`.
   GRJIT_VRegInfo * vregs;
   size_t vreg_count;

@@ -80,6 +80,7 @@ Compiled code is `uint32_t (*)(void * context, const uint64_t * args, uint64_t *
 | `GRJIT_EXIT_RETURNED` (0) | a `RET` ran | `out[0]` is the value, if any |
 | `GRJIT_EXIT_DEOPT` (1) | a guard failed | `out[0..interp_slot_count)` are the frame state's slots, `out[interp_slot_count]` the site's code offset, which `grcore_codemeta_find` turns into the site's record |
 | `GRJIT_EXIT_REFUSED` (2) | the entry hook or a poll's helper answered non-zero | `out[0]` is that answer; nothing after it ran |
+| `GRJIT_EXIT_REBUILD_FAILED` (3) | a callable function's deopt hook reported that the chain rebuild was refused | `out[0]` is the rebuild's result. Fatal: some compiled frames are gone and their guest frames were not completely rebuilt, so nothing may carry on from it |
 
 ## Building
 
@@ -103,6 +104,7 @@ this library:
 | `check-edges` | fail on any `#include` or shared-object dependency on a Ghoti library other than `cutil`, `runtime-core` and this one |
 | `check-gates` | run each gate against a planted defect and a control, and against an empty tree, and fail unless each behaves |
 | `check-planted` | build the library with a planted backend defect (`SHR` and `SAR` swapped; every stack-map slot 8 bytes off; a live reference left out; and in the Windows flavour a callee-saved register used, no shadow space, an unwind table never registered) and require the differential, the read-back or the Win64 structural tests to fail on it, and to pass without it |
+| `check-planted-calls` | plant, in a scratch copy of `runtime-core` or of this library, the defects of the call protocol (a frame missed in a rebuild, an early free, a short reservation, no status test after a pointer call, a reference left out of a call site's map, the walk start not stored, retired code entered, a token or an arity not checked, a refused rebuild ignored, a derived argument not recorded) and require a test to fail on each; first run it against edits of known outcome so that a missed one, a build failure and a hang each show as what they are, not as a catch |
 | `bench` | run the benchmark harness in full; it prints a calibration result first |
 | `test-asan`, `test-tsan`, `test-valgrind-quiet` | the same tests under ASan+UBSan, ThreadSanitizer and Valgrind |
 | `coverage` | instrumented run and line report |

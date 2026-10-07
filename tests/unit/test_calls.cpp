@@ -63,7 +63,7 @@ void expect_calls_refused_here() {
   B b("ident", 0);
   GRJIT_VReg x = b.param(GRJIT_TYPE_I64);
   GRJIT_CallHooks h{};
-  h.deopt = [](void *, uint64_t) {};
+  h.deopt = [](void *, uint64_t) -> uint32_t { return 0; };
   b.callable(h);
   b.at(b.block());
   b.ret(V(x));
@@ -100,7 +100,6 @@ TEST(Calls, FibCompiledMatchesTheInterpreterAndTheCReferenceAndNeverLeavesCompil
     // Every call pushed a guest frame, and every return popped it: the entry's,
     // and one for each of the 2 * fib(n + 1) - 2 calls inside.
     EXPECT_EQ(e.st.pushes - pushes, 2 * fib_ref(n + 1) - 1);
-    EXPECT_EQ(e.st.pops, e.st.pushes - 0 - (e.st.pushes - e.st.pops));
   }
   EXPECT_EQ(e.st.pushes, e.st.pops);
   EXPECT_EQ(e.st.deopts, 0);
@@ -273,32 +272,6 @@ TEST(Calls, AnI64AReferenceAndAPointerEachGoThroughACallAndComeBackIntact) {
 
 namespace {
 
-/* deep(n): holds a reference across the call it makes; at n == 0 it collects.
- * Its result is n + (n-1) + ... + 0, each term read through that frame's own
- * reference after the collection. */
-int add_deep(Engine & e) {
-  int deep = e.reserve();
-  P p("deep", {GRJIT_TYPE_I64});
-  int n = 0, obj = p.local(GRJIT_TYPE_REF), zero = p.local(), one = p.local(), t = p.local(),
-      nn = p.local(), r = p.local(), v = p.local(), sum = p.local();
-  p.nw(obj, 0);          // overwritten below: the value is n, set by a second NEW
-  p.cnst(zero, 0);
-  p.cnst(one, 1);
-  p.bin(K::EQ, t, n, zero);
-  int br = p.brz(t);
-  p.collect();
-  p.get(v, obj);
-  p.ret(v);
-  p.patch(br, p.here());
-  p.bin(K::SUB, nn, n, one);
-  p.call(r, deep, {nn});
-  p.get(v, obj);
-  p.bin(K::ADD, sum, r, v);
-  p.ret(sum);
-  e.set(deep, p.done());
-  return deep;
-}
-
 } // namespace
 
 TEST(Calls, AFiftyDeepChainWithACollectionAtTheBottomKeepsEveryFramesReferenceAndMovesIt) {
@@ -329,7 +302,6 @@ TEST(Calls, AFiftyDeepChainWithACollectionAtTheBottomKeepsEveryFramesReferenceAn
   }
   size_t compiled_frames = 0;
   std::set<u64 *> slots;
-  std::vector<u64> values;
   e.on_collect = [&](Engine & en) {
     GRCORE_CompiledWalk w;
     ASSERT_EQ(grcore_compiled_walk_begin(en.ctx, &w), GRCORE_OK);
@@ -337,17 +309,13 @@ TEST(Calls, AFiftyDeepChainWithACollectionAtTheBottomKeepsEveryFramesReferenceAn
     while (grcore_compiled_walk_next(&w, &f) == GRCORE_CWALK_FRAME) {
       compiled_frames++;
     }
-    struct V { std::set<u64 *> * slots; std::vector<u64> * values; size_t dup = 0; } v{&slots, &values};
+    struct V { std::set<u64 *> * slots; size_t dup = 0; } v{&slots};
     GRCORE_RootVisitor rv = {};
     rv.user = &v;
     rv.slot = [](void * user, uint64_t * slot) {
       auto * v = static_cast<V *>(user);
       if (!v->slots->insert(slot).second) {
         v->dup++;
-      }
-      if (std::find(v->values->begin(), v->values->end(), *slot) == v->values->end() ||
-          true) {
-        v->values->push_back(*slot);
       }
     };
     ASSERT_EQ(grcore_context_enumerate_roots(en.ctx, &rv), GRCORE_OK);
@@ -359,16 +327,10 @@ TEST(Calls, AFiftyDeepChainWithACollectionAtTheBottomKeepsEveryFramesReferenceAn
   EXPECT_EQ(compiled_frames, 50u) << "the walk saw every compiled frame";
   // One reference per frame, 50 of them, each a VALUE slot reported once: the
   // guest frames' own (stale) slots are not reported beside them.
-  size_t objects = 0;
-  for (u64 v : values) {
-    objects += e.heap.live.count(v) != 0 ? 0 : 0;
-  }
-  EXPECT_EQ(slots.size(), 50u + 0u) << "50 frames, one reference each";
+  EXPECT_EQ(slots.size(), 50u) << "50 frames, one reference each";
   EXPECT_EQ(e.heap.poisoned_reads, 0);
   EXPECT_GT(e.heap.moved, 0);
   EXPECT_EQ(e.st.deopts, 0);
-  (void)objects;
-  (void)add_deep;
 }
 
 /* ---- Dispatch: through a slot, through a code pointer ----------------------- */
@@ -845,23 +807,31 @@ TEST(Calls, EveryCallExtendsTheReservationByTheCalleesMaximumAndAChainRebuildNev
   EXPECT_EQ(grcore_deopt_reservation_capacity(f.reservation), 0u);
 }
 
-TEST(Calls, AReservationExtensionOneCellShortIsRefusedBeforeAnythingIsWritten) {
+TEST(Calls, AReservationExtensionOneCellShortIsRefusedUpFrontAndNothingIsWritten) {
   CALLS_ONLY_ON_X86_64_SYSV();
+  // A reservation sized one cell short is an engine's defect, not a resource
+  // that ran out (that is the allocator refusing an extension, below, which is
+  // an exit at the call site). The chain rebuild refuses it before writing
+  // anything, the hook reports the refusal, and the run ends in the fatal exit.
   for (long short_by : {0L, 1L}) {
     SCOPED_TRACE(short_by);
     Engine e(GRCORE_UNLIMITED, GRCORE_UNLIMITED, /*conv=*/true);
     int g = add_gchain(e, /*fail_at=*/0);
     ASSERT_TRUE(e.compile_fn(g));
     e.short_by = short_by;
-    e.interpreter_cannot_recover = short_by != 0; // a refused rebuild writes nothing: nothing to finish
     Outcome o = e.run_compiled(g, {49});
     if (short_by == 0) {
       EXPECT_EQ(e.st.rebuild, GRCORE_OK);
       EXPECT_TRUE(o.finished);
+      EXPECT_FALSE(o.rebuild_failed);
     } else {
-      // The control above passes; this is what the planted defect looks like.
-      EXPECT_EQ(e.st.rebuild, GRCORE_ERR_INVALID)
-          << "the chain needs more cells than the calls extended: caught, up front";
+      EXPECT_EQ(e.st.rebuild, GRCORE_ERR_INVALID);
+      EXPECT_TRUE(o.rebuild_failed);
+      EXPECT_EQ(o.failed_with, static_cast<u64>(GRCORE_ERR_INVALID));
+      ASSERT_EQ(o.pcs_after_failure.size(), 50u);
+      for (u64 pc : o.pcs_after_failure) {
+        EXPECT_EQ(pc, 0u) << "not one guest frame was written";
+      }
     }
   }
 }
@@ -1206,7 +1176,7 @@ namespace {
 uint32_t refuse_with_seven(void *) { return 7; }
 uint32_t accept(void *) { return 0; }
 void h_unused_pop(void *) {}
-void h_unused_deopt(void *, uint64_t) {}
+uint32_t h_unused_deopt(void *, uint64_t) { return 0; }
 
 GRJIT_Function * callable_identity(GRJIT_Type t) {
   B b("ident", 0);
@@ -1226,7 +1196,6 @@ TEST(Calls, TheEntryHookRunsInTheAdapterBeforeAnythingAndItsRefusalIsReportedAsR
   CALLS_ONLY_ON_X86_64_SYSV();
   JitWorld w;
   Fn f(callable_identity(GRJIT_TYPE_I64));
-  uint64_t ctx_unused[64] = {};
   {
     Compiled c(f, w.pages(), refuse_with_seven);
     ASSERT_TRUE(c) << c.result;
@@ -1243,7 +1212,6 @@ TEST(Calls, TheEntryHookRunsInTheAdapterBeforeAnythingAndItsRefusalIsReportedAsR
     EXPECT_EQ(r.exit, uint32_t{GRJIT_EXIT_RETURNED});
     EXPECT_EQ(r.out[0], 123u);
   }
-  (void)ctx_unused;
 }
 
 TEST(Calls, ACallableFunctionHasAnInternalEntryAndAPlainOneHasNone) {
@@ -1258,9 +1226,10 @@ TEST(Calls, ACallableFunctionHasAnInternalEntryAndAPlainOneHasNone) {
   EXPECT_GT(internal, start) << "after the adapter";
   EXPECT_LT(internal, start + grjit_code_size(c.code));
   EXPECT_EQ(internal % 16, 0u);
-  uint64_t tag;
-  std::memcpy(&tag, reinterpret_cast<const void *>(internal - 8), 8);
-  EXPECT_EQ(tag, UINT64_C(0x4752494E54454E54)) << "the tag a call through a pointer checks";
+  uint64_t tag[2];
+  std::memcpy(tag, reinterpret_cast<const void *>(internal - 16), 16);
+  EXPECT_EQ(tag[0], (UINT64_C(0x4752494E) << 32) | 1u) << "the magic and the parameter count";
+  EXPECT_EQ(tag[1], 0u) << "the token, zero by default";
   EXPECT_EQ(reinterpret_cast<uintptr_t>(grjit_code_entry(c.code)), start);
   B plain("plain", 0);
   plain.at(plain.block());
@@ -1297,10 +1266,10 @@ TEST(Calls, EveryArchitectureButX86SysVRefusesACallableFunctionBeforeEmittingABy
   grjit_emitted_free(&out);
 }
 
-TEST(Calls, AFunctionWithoutTheNewOperationsIsEmittedExactlyAsBefore) {
-  // A plain function's bytes do not depend on the existence of calls: the same
-  // function is emitted for every architecture, and the pins (test_pin) are the
-  // standing proof over a large corpus. Here, one function, byte for byte twice.
+TEST(Calls, AFunctionWithoutTheNewOperationsCarriesNoCallMachineryOnAnyArchitecture) {
+  // That its bytes are exactly what they were is the pins' claim (test_pin, over a
+  // large corpus). What this holds is the part of it that is visible from here:
+  // a plain function has no internal entry and none of the call machinery's tag.
   B b("plain", 0);
   GRJIT_VReg x = b.param(GRJIT_TYPE_I64);
   GRJIT_VReg y = b.reg();
@@ -1310,16 +1279,20 @@ TEST(Calls, AFunctionWithoutTheNewOperationsIsEmittedExactlyAsBefore) {
   Fn f(b.finish());
   GRCORE_JitLayout layout = *grcore_jit_layout();
   for (GRJIT_Arch arch : {GRJIT_ARCH_X86_64, GRJIT_ARCH_ARM64, GRJIT_ARCH_X86_64_WIN64}) {
-    GRJIT_Emitted a, c;
+    SCOPED_TRACE(arch);
+    GRJIT_Emitted a;
     ASSERT_EQ(grjit_emit_for(arch, f, grjit_allocator_default(), nullptr, nullptr,
                   layout.request_word_offset, &a), GRJIT_OK);
-    ASSERT_EQ(grjit_emit_for(arch, f, grjit_allocator_default(), nullptr, nullptr,
-                  layout.request_word_offset, &c), GRJIT_OK);
-    ASSERT_EQ(a.size, c.size);
-    EXPECT_EQ(std::memcmp(a.bytes, c.bytes, a.size), 0);
     EXPECT_EQ(a.internal_offset, 0u);
+    const uint32_t magic = 0x4752494E;
+    bool found = false;
+    for (size_t i = 0; i + 4 <= a.size; i++) {
+      uint32_t w;
+      std::memcpy(&w, a.bytes + i, 4);
+      found = found || w == magic;
+    }
+    EXPECT_FALSE(found) << "no tag, so no adapter and no internal entry";
     grjit_emitted_free(&a);
-    grjit_emitted_free(&c);
   }
 }
 
@@ -1506,7 +1479,7 @@ TEST(Calls, TheBackendSaysWhetherItCanCompileCallsAndOnlyX86SysVCan) {
   B b("ident", 0);
   GRJIT_VReg x = b.param(GRJIT_TYPE_I64);
   GRJIT_CallHooks h{};
-  h.deopt = [](void *, uint64_t) {};
+  h.deopt = [](void *, uint64_t) -> uint32_t { return 0; };
   b.callable(h);
   b.at(b.block());
   b.ret(V(x));
@@ -1550,7 +1523,7 @@ namespace {
  * arithmetic, may call lower functions on either side of a branch, may collect,
  * may hit a guard that fails for some inputs, reads its object back after its
  * calls, and returns a mix of everything. */
-void generate(Engine & e, std::mt19937 & rng, int n, std::vector<int> * fns) {
+void generate(Engine & e, std::mt19937 & rng, int n, std::vector<int> * fns, bool mix_ptr = false) {
   auto pick = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
   for (int i = 0; i < n; i++) {
     fns->push_back(e.reserve());
@@ -1568,8 +1541,15 @@ void generate(Engine & e, std::mt19937 & rng, int n, std::vector<int> * fns) {
     if (pick(0, 3) == 0) {
       p.collect();
     }
+    int ptr = mix_ptr ? p.local(GRJIT_TYPE_PTR) : -1;
     if (i > 0 && pick(0, 2) != 0) {
-      p.call(r1, (*fns)[pick(0, i - 1)], {a, b});
+      int target = (*fns)[pick(0, i - 1)];
+      if (mix_ptr && pick(0, 1) == 0) {
+        p.entryof(ptr, target);
+        p.callp(r1, ptr, target, {a, b});
+      } else {
+        p.call(r1, target, {a, b});
+      }
     } else {
       p.bin(K::ADD, r1, a, b);
     }
@@ -1590,7 +1570,13 @@ void generate(Engine & e, std::mt19937 & rng, int n, std::vector<int> * fns) {
       p.cnst(k, pick(0, 12));
       p.bin(K::LT, t, x, k);
       int br = p.brz(t);
-      p.call(r2, (*fns)[pick(0, i - 1)], {b, a});
+      int target2 = (*fns)[pick(0, i - 1)];
+      if (mix_ptr && pick(0, 1) == 0) {
+        p.entryof(ptr, target2);
+        p.callp(r2, ptr, target2, {b, a});
+      } else {
+        p.call(r2, target2, {b, a});
+      }
       int over = p.br();
       p.patch(br, p.here());
       p.bin(K::SUB, r2, a, r1);
@@ -1692,6 +1678,390 @@ TEST(Calls, ADerivedPointerPassedAsAnArgumentFollowsItsBaseWhenThePushCollects) 
     EXPECT_EQ(e.heap.poisoned_reads, 0);
     EXPECT_GT(e.heap.moved, 0);
   }
+}
+
+/* ---- A code pointer is bound to the function and arity the call means --------- */
+
+namespace {
+
+/* A caller that calls the code of `target` through a pointer, naming `token` as
+ * the callee and passing `n` arguments. */
+int add_ptr_caller(Engine & e, int target, int token, int n) {
+  int f = e.reserve();
+  P p("via_ptr", {GRJIT_TYPE_I64});
+  int ptr = p.local(GRJIT_TYPE_PTR), r = p.local();
+  std::vector<int> args(static_cast<size_t>(n), 0);
+  p.entryof(ptr, target);
+  p.callp(r, ptr, token, args);
+  p.ret(r);
+  e.set(f, p.done());
+  return f;
+}
+
+} // namespace
+
+TEST(Calls, ACodePointerToAnotherFunctionOrOfAnotherArityIsRefusedAndNeverEntered) {
+  CALLS_ONLY_ON_X86_64_SYSV();
+  Engine e;
+  int c2, c2caller, c8, c8caller;
+  add_args_pair(e, 2, &c2, &c2caller);
+  add_args_pair(e, 8, &c8, &c8caller);
+  ASSERT_TRUE(e.compile_fn(c2));
+  ASSERT_TRUE(e.compile_fn(c8));
+  struct Case {
+    const char * name;
+    int target, token, n;
+    bool enters;
+  };
+  // Another function of the same parameter count, whose answer is not c2's: only
+  // the token tells them apart.
+  int other = e.reserve();
+  {
+    P p("other", {GRJIT_TYPE_I64, GRJIT_TYPE_I64});
+    int t = p.local(), k = p.local(), r = p.local();
+    p.bin(K::ADD, t, 0, 1);
+    p.cnst(k, 1000);
+    p.bin(K::ADD, r, t, k);
+    p.ret(r);
+    e.set(other, p.done());
+  }
+  ASSERT_TRUE(e.compile_fn(other));
+  const Case cases[] = {
+      {"the right function with the right count", c2, c2, 2, true},
+      {"another function of the same parameter count", other, c2, 2, false},
+      {"a function of eight parameters called as the one of two", c8, c2, 2, false},
+      {"the right token but two arguments for eight parameters", c8, c8, 2, false},
+      {"the right token but eight arguments for two parameters", c2, c2, 8, false},
+  };
+  for (const Case & c : cases) {
+    SCOPED_TRACE(c.name);
+    int f = add_ptr_caller(e, c.target, c.token, c.n);
+    long before = e.st.deopts;
+    Outcome i = e.run_interpreted(f, {5});
+    Outcome o = e.run_compiled(f, {5});
+    ASSERT_TRUE(o.finished) << "no fault, and the interpreter's answer";
+    EXPECT_EQ(o.value, i.value);
+    EXPECT_EQ(o.exit, c.enters ? uint32_t{GRJIT_EXIT_RETURNED} : uint32_t{GRJIT_EXIT_DEOPT});
+    EXPECT_EQ(e.st.deopts - before, c.enters ? 0 : 1);
+    EXPECT_EQ(e.st.rebuild, GRCORE_OK);
+  }
+}
+
+TEST(Calls, CodeInstalledInASlotMustBeTheFunctionTheSlotIsForAndTakeItsParameterCount) {
+  CALLS_ONLY_ON_X86_64_SYSV();
+  Engine e;
+  int c2, c2caller, c8, c8caller;
+  add_args_pair(e, 2, &c2, &c2caller);
+  add_args_pair(e, 8, &c8, &c8caller);
+  ASSERT_TRUE(e.compile_fn(c8));
+  e.discard(c2); // c2's slot is empty
+  ASSERT_EQ(e.slots[static_cast<size_t>(c2)]->entry, 0u);
+  const CompiledFn & code = e.code_of(c8);
+  GRCORE_EntrySlot * slot = e.slots[static_cast<size_t>(c2)];
+  GRCORE_Code * h = code.handle;
+  EXPECT_EQ(grjit_entry_slot_install(e.ctx, slot, h, code.code, static_cast<u64>(c2), 2), GRJIT_ERR_INVALID)
+      << "another function";
+  EXPECT_EQ(grjit_entry_slot_install(e.ctx, slot, h, code.code, static_cast<u64>(c8), 2), GRJIT_ERR_INVALID)
+      << "the right token and the wrong parameter count";
+  EXPECT_EQ(grjit_entry_slot_install(e.ctx, slot, h, nullptr, static_cast<u64>(c8), 8), GRJIT_ERR_INVALID);
+  EXPECT_EQ(slot->entry, 0u) << "a refusal installs nothing";
+  // A function that is not callable has no internal entry to install at all.
+  B plain("plain", 0);
+  plain.at(plain.block());
+  plain.ret();
+  Fn pf(plain.finish());
+  Compiled pc(pf, e.pages());
+  ASSERT_TRUE(pc);
+  EXPECT_EQ(grjit_entry_slot_install(e.ctx, slot, h, pc.code, 0, 0), GRJIT_ERR_INVALID);
+  EXPECT_EQ(slot->entry, 0u);
+  EXPECT_EQ(grjit_entry_slot_install(e.ctx, slot, h, code.code, static_cast<u64>(c8), 8), GRJIT_OK)
+      << "the control: its own token and count";
+  EXPECT_EQ(slot->entry, code.internal);
+  EXPECT_EQ(grjit_code_token(code.code), static_cast<u64>(c8));
+  ASSERT_EQ(grcore_entry_slot_clear(e.ctx, slot), GRCORE_OK);
+}
+
+/* ---- A refused rebuild is a distinct, unmissable exit -------------------------- */
+
+TEST(Calls, ARebuildTheEngineRefusesIsAFatalExitWithNothingWrittenAndNeverAnInterpreterRun) {
+  CALLS_ONLY_ON_X86_64_SYSV();
+  for (int refuse : {0, 1}) {
+    SCOPED_TRACE(refuse);
+    Engine e;
+    int g = add_gchain(e, /*fail_at=*/3);
+    e.refuse_rebuild_with = refuse ? 77u : 0u;
+    Outcome o = e.run_compiled(g, {10});
+    if (!refuse) {
+      ASSERT_TRUE(o.finished);
+      EXPECT_EQ(o.value, 55u);
+      EXPECT_FALSE(o.rebuild_failed);
+      continue;
+    }
+    EXPECT_TRUE(o.rebuild_failed);
+    EXPECT_FALSE(o.finished) << "the interpreter is not run on frames nothing rebuilt";
+    EXPECT_EQ(o.exit, uint32_t{GRJIT_EXIT_REBUILD_FAILED});
+    EXPECT_EQ(o.failed_with, 77u) << "the hook's answer arrives in out[0]";
+    EXPECT_EQ(e.st.deopts, 1) << "the hook was asked once, and every frame then returned";
+    ASSERT_EQ(o.pcs_after_failure.size(), 8u) << "the entry and seven callees were pushed (n = 10 down to 3)";
+    for (u64 pc : o.pcs_after_failure) {
+      EXPECT_EQ(pc, 0u) << "no guest frame was written";
+    }
+    EXPECT_EQ(grcore_stack_frame_count(e.stack), 0u) << "the engine unwound what the run pushed";
+  }
+}
+
+TEST(Calls, ARebuildTheEngineRefusesAtANativeStackOverflowIsTheSameFatalExit) {
+  CALLS_ONLY_ON_X86_64_SYSV();
+  // The overflow stub calls the deopt hook from its own code, apart from the
+  // guard and call exits, so it is a separate place to ignore the answer.
+  for (int refuse : {0, 1}) {
+    SCOPED_TRACE(refuse);
+    Engine e(GRCORE_UNLIMITED, /*native_bytes=*/6000);
+    int rec = add_rec(e);
+    e.refuse_rebuild_with = refuse ? 77u : 0u;
+    Outcome o = e.run_compiled(rec, {400});
+    if (!refuse) {
+      ASSERT_TRUE(o.finished);
+      EXPECT_EQ(o.exit, uint32_t{GRJIT_EXIT_DEOPT});
+      EXPECT_FALSE(o.rebuild_failed);
+      continue;
+    }
+    EXPECT_TRUE(o.rebuild_failed);
+    EXPECT_FALSE(o.finished);
+    EXPECT_EQ(o.exit, uint32_t{GRJIT_EXIT_REBUILD_FAILED});
+    EXPECT_EQ(o.failed_with, 77u);
+    EXPECT_EQ(e.st.deopts, 1);
+  }
+}
+
+/* ---- CALL_PTR, in chains ------------------------------------------------------------ */
+
+namespace {
+
+/* gchain through code pointers: every call is `ENTRYOF p, g; CALLP r, p, g, ...`. */
+int add_gchain_ptr(Engine & e, int64_t fail_at, bool with_obj = false) {
+  int g = e.reserve();
+  P p("gchain_ptr", {GRJIT_TYPE_I64});
+  int n = 0, zero = p.local(), one = p.local(), k = p.local(), hit = p.local(),
+      ok = p.local(), t = p.local(), nn = p.local(), r = p.local(), sum = p.local(),
+      ptr = p.local(GRJIT_TYPE_PTR), obj = p.local(GRJIT_TYPE_REF), v = p.local();
+  p.cnst(zero, 0);
+  p.cnst(one, 1);
+  p.cnst(k, fail_at);
+  if (with_obj) {
+    p.nw(obj, 3);
+  }
+  p.bin(K::EQ, hit, n, k);
+  p.bin(K::EQ, ok, hit, zero);
+  p.guard(ok);
+  p.bin(K::EQ, t, n, zero);
+  int br = p.brz(t);
+  if (with_obj) {
+    p.collect();
+  }
+  p.ret(zero);
+  p.patch(br, p.here());
+  p.bin(K::SUB, nn, n, one);
+  p.entryof(ptr, g);
+  p.callp(r, ptr, g, {nn});
+  if (with_obj) {
+    p.collect();
+    p.get(v, obj);
+    p.bin(K::ADD, sum, r, v);
+    p.bin(K::ADD, sum, sum, n);
+  } else {
+    p.bin(K::ADD, sum, r, n);
+  }
+  p.ret(sum);
+  e.set(g, p.done());
+  return g;
+}
+
+} // namespace
+
+TEST(Calls, AGuardBelowCodePointerCallsDeoptimizesThroughEveryFrame) {
+  CALLS_ONLY_ON_X86_64_SYSV();
+  Engine e;
+  int g = add_gchain_ptr(e, /*fail_at=*/7);
+  ASSERT_TRUE(e.compile_fn(g));
+  Outcome o = e.run_compiled(g, {10});
+  ASSERT_TRUE(o.finished) << "failed=" << o.failed;
+  EXPECT_EQ(o.value, 55u);
+  EXPECT_EQ(o.exit, uint32_t{GRJIT_EXIT_DEOPT});
+  EXPECT_EQ(e.st.deopts, 1);
+  EXPECT_EQ(e.st.deopt_frames, 4) << "n = 10, 9, 8 waiting at their calls, and n = 7";
+  EXPECT_EQ(e.st.rebuild, GRCORE_OK);
+  EXPECT_EQ(o.frames_left, 0u);
+}
+
+TEST(Calls, AFiftyDeepChainOfCodePointerCallsIsSeenPreciselyWithAReferenceLiveAcrossEachCall) {
+  CALLS_ONLY_ON_X86_64_SYSV();
+  Engine e;
+  e.torture = true; // a moving collection at every push, new object and collect
+  int g = add_gchain_ptr(e, /*fail_at=*/-1, /*with_obj=*/true);
+  ASSERT_TRUE(e.compile_fn(g));
+  size_t compiled_frames = 0;
+  size_t slots_seen = 0;
+  bool bottom = false;
+  e.on_collect = [&](Engine & en) {
+    if (bottom) {
+      return;
+    }
+    bottom = true;
+    GRCORE_CompiledWalk w;
+    GRCORE_CompiledFrame f;
+    ASSERT_EQ(grcore_compiled_walk_begin(en.ctx, &w), GRCORE_OK);
+    while (grcore_compiled_walk_next(&w, &f) == GRCORE_CWALK_FRAME) {
+      compiled_frames++;
+    }
+    GRCORE_RootVisitor rv = {};
+    rv.user = &slots_seen;
+    rv.slot = [](void * user, uint64_t *) { ++*static_cast<size_t *>(user); };
+    ASSERT_EQ(grcore_context_enumerate_roots(en.ctx, &rv), GRCORE_OK);
+  };
+  Outcome o = e.run_compiled(g, {49});
+  ASSERT_TRUE(o.finished);
+  EXPECT_EQ(o.value, 3u * 49u + 49u * 50u / 2u) << "the bottom frame adds nothing";
+  EXPECT_EQ(o.exit, uint32_t{GRJIT_EXIT_RETURNED});
+  EXPECT_EQ(compiled_frames, 50u);
+  EXPECT_EQ(slots_seen, 50u) << "one reference per frame, reported once";
+  EXPECT_EQ(e.heap.poisoned_reads, 0);
+  EXPECT_GT(e.heap.moved, 100);
+}
+
+TEST(Calls, APointerIntoCodeThatWasRetiredIsRefusedAndNeverEnteredEvenWhileItStillMaps) {
+  CALLS_ONLY_ON_X86_64_SYSV();
+  Engine e;
+  int target = add_inc(e);
+  ASSERT_TRUE(e.compile_fn(target));
+  int top = e.reserve();
+  {
+    // The pointer is taken, the code is retired (its slot cleared and its range
+    // unregistered, as a replacement does), and the call goes through the old
+    // pointer. The pages still map, because a JIT record is open, so entering
+    // would work: the only thing that refuses is the retired flag.
+    P p("stale", {GRJIT_TYPE_I64});
+    int ptr = p.local(GRJIT_TYPE_PTR), r = p.local();
+    p.entryof(ptr, target);
+    p.clearslot(target);
+    p.callp(r, ptr, target, {0});
+    p.ret(r);
+    e.set(top, p.done());
+  }
+  Outcome o = e.run_compiled(top, {41});
+  ASSERT_TRUE(o.finished);
+  EXPECT_EQ(o.value, 42u);
+  EXPECT_EQ(o.exit, uint32_t{GRJIT_EXIT_DEOPT}) << "refused at the call, finished by the interpreter";
+  EXPECT_EQ(e.st.deopts, 1);
+  EXPECT_EQ(*e.released, 1) << "and released once the activation left";
+}
+
+TEST(Calls, GeneratedCallGraphsMixingCodePointerCallsAndSlotCallsAgreeWithTheInterpreter) {
+  CALLS_ONLY_ON_X86_64_SYSV();
+  long deopted = 0, direct = 0;
+  for (unsigned seed = 1000; seed < 1100; seed++) {
+    SCOPED_TRACE(seed);
+    std::mt19937 rng(seed);
+    Engine e;
+    e.torture = seed % 2 == 0;
+    std::vector<int> fns;
+    int n = 2 + static_cast<int>(seed % 5);
+    generate(e, rng, n, &fns, /*mix_ptr=*/true);
+    for (int fn : fns) {
+      ASSERT_TRUE(e.compile_fn(fn)); // so every ENTRYOF has an entry to take
+    }
+    for (u64 x : {u64{0}, u64{3}, u64{15}, u64{40}}) {
+      Outcome i = e.run_interpreted(fns[n - 1], {x, x + 1});
+      ASSERT_TRUE(i.finished);
+      Outcome c = e.run_compiled(fns[n - 1], {x, x + 1});
+      ASSERT_TRUE(c.finished) << "failed=" << c.failed;
+      EXPECT_EQ(c.value, i.value);
+      EXPECT_EQ(c.frames_left, 0u);
+      (c.exit == GRJIT_EXIT_DEOPT ? deopted : direct)++;
+    }
+    EXPECT_EQ(e.heap.poisoned_reads, 0);
+  }
+  EXPECT_GT(deopted, 40);
+  EXPECT_GT(direct, 40);
+}
+
+TEST(Calls, AnInnerFunctionThatClearsItsOuterCallersSlotLeavesTheOuterCodeAliveUntilTheActivationLeaves) {
+  CALLS_ONLY_ON_X86_64_SYSV();
+  Engine e;
+  // top -> outer -> inner. inner clears OUTER's slot (retiring the code outer is
+  // running in), collects, and returns; outer then fails a guard, so the chain is
+  // rebuilt from frames whose code was retired under them.
+  int inner = e.reserve(), outer = e.reserve(), top = e.reserve();
+  {
+    P p("inner", {GRJIT_TYPE_I64});
+    int obj = p.local(GRJIT_TYPE_REF), v = p.local(), r = p.local();
+    p.nw(obj, 5);
+    p.clearslot(outer);
+    p.collect();
+    p.get(v, obj);
+    p.bin(K::ADD, r, v, 0);
+    p.ret(r);
+    e.set(inner, p.done());
+  }
+  {
+    P p("outer", {GRJIT_TYPE_I64});
+    int a = p.local(), zero = p.local(), r = p.local();
+    p.call(a, inner, {0});
+    p.cnst(zero, 0);
+    p.guard(zero); // fails: the chain is rebuilt
+    p.bin(K::ADD, r, a, 0);
+    p.ret(r);
+    e.set(outer, p.done());
+  }
+  {
+    P p("top", {GRJIT_TYPE_I64});
+    int a = p.local(), one = p.local(), r = p.local();
+    p.cnst(one, 1);
+    p.call(a, outer, {0});
+    p.bin(K::ADD, r, a, one);
+    p.ret(r);
+    e.set(top, p.done());
+  }
+  std::vector<int> released_at_collect;
+  e.on_collect = [&](Engine & en) { released_at_collect.push_back(*en.released); };
+  ASSERT_TRUE(e.compile_fn(inner));
+  ASSERT_TRUE(e.compile_fn(outer));
+  Outcome o = e.run_compiled(top, {10});
+  ASSERT_TRUE(o.finished) << "failed=" << o.failed;
+  EXPECT_EQ(o.value, 26u);
+  EXPECT_EQ(o.exit, uint32_t{GRJIT_EXIT_DEOPT});
+  EXPECT_EQ(e.st.rebuild, GRCORE_OK) << "the rebuild read frames in code that was retired";
+  EXPECT_EQ(e.st.deopt_frames, 2) << "top and outer";
+  ASSERT_EQ(released_at_collect.size(), 1u);
+  EXPECT_EQ(released_at_collect[0], 0) << "outer's code was still under its frame";
+  EXPECT_EQ(*e.released, 1) << "released when the activation left, and not before";
+  EXPECT_EQ(e.slots[static_cast<size_t>(outer)]->entry, 0u);
+  EXPECT_EQ(e.heap.poisoned_reads, 0);
+}
+
+TEST(Calls, CallableCodeBuiltForAnotherLayoutIsRefusedBeforeAnyOfItRuns) {
+  CALLS_ONLY_ON_X86_64_SYSV();
+  JitWorld w;
+  Fn f(callable_identity(GRJIT_TYPE_I64));
+  Compiled c(f, w.pages());
+  ASSERT_TRUE(c) << c.result;
+  uint64_t args[1] = {7};
+  uint64_t out[2] = {0xAAAA, 0xBBBB};
+  ASSERT_EQ(grjit_code_call(c.code, w.ctx, args, out), uint32_t{GRJIT_EXIT_RETURNED});
+  EXPECT_EQ(out[0], 7u);
+  // A core and a jit built from different versions disagree on where the
+  // walk-start cell and the limit word are; compiled code would store through
+  // the wrong offsets. The two are checked, each by itself.
+  uint32_t * offsets[2] = {&c.code->walk_cell_offset, &c.code->native_limit_offset};
+  for (uint32_t * field : offsets) {
+    uint32_t saved = *field;
+    *field += 8;
+    out[0] = 0xAAAA;
+    EXPECT_EQ(grjit_code_call(c.code, w.ctx, args, out), uint32_t{GRJIT_EXIT_REFUSED});
+    EXPECT_EQ(out[0], static_cast<uint64_t>(GRCORE_ERR_INVALID)) << "refused before anything ran";
+    *field = saved;
+  }
+  EXPECT_EQ(grjit_code_call(c.code, w.ctx, args, out), uint32_t{GRJIT_EXIT_RETURNED});
 }
 
 GRJIT_TEST_MAIN()

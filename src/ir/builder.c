@@ -477,6 +477,14 @@ GRJIT_Result grjit_builder_set_callable(
   return GRJIT_OK;
 }
 
+GRJIT_Result grjit_builder_set_token(GRJIT_Builder * builder, uint64_t token) {
+  if (builder == NULL) {
+    return GRJIT_ERR_INVALID;
+  }
+  builder->function->token = token;
+  return GRJIT_OK;
+}
+
 GRJIT_Result grjit_builder_call_slot(GRJIT_Builder * builder, GRJIT_VReg dst,
     uint64_t slot_address, uint64_t callee, const GRJIT_Operand * args,
     size_t arg_count, GRCORE_PollIdentity identity,

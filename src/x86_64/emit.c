@@ -266,6 +266,8 @@ static void emit_guest_call(GRJIT_Emit * e, const GRJIT_Op * op) {
      * an address that is not is never entered. */
     grjit_asm_load64(a, GRJIT_RDI, GRJIT_RBP, GRJIT_SLOT_CTX);
     grjit_asm_mov_rr(a, GRJIT_RSI, GRJIT_RAX);
+    grjit_asm_mov_ri(a, GRJIT_RDX, op->callee);
+    grjit_asm_mov_ri(a, GRJIT_RCX, n);
     grjit_asm_mov_ri(a, GRJIT_RAX, (uint64_t)(uintptr_t)grjit_call_target_ok);
     grjit_asm_call_r(a, GRJIT_RAX);
     grjit_asm_mov32_rr(a, GRJIT_RAX, GRJIT_RAX);
@@ -326,7 +328,7 @@ static void emit_guest_call(GRJIT_Emit * e, const GRJIT_Op * op) {
   grjit_emit_add_site_for(&e->c, (uint32_t)grjit_asm_size(a),
       GRCORE_SITE_GC_POINT_CALL, st->identity, live + 1, op->state, op);
   grjit_asm_test_rr(a, GRJIT_RDX, GRJIT_RDX);
-  grjit_asm_jcc(a, GRJIT_COND_NE, e->ret_deopted);
+  grjit_asm_jcc(a, GRJIT_COND_NE, e->ret_propagate);
   if (op->dst != GRJIT_NO_VREG) {
     store_result(e, op->dst, GRJIT_RAX);
   }
@@ -588,6 +590,12 @@ static void emit_adapter(GRJIT_Emit * e) {
   grjit_asm_bind(a, deopted);
   grjit_asm_store64(a, GRJIT_RCX, 0, GRJIT_RAX);
   grjit_asm_mov_ri(a, GRJIT_RAX, GRJIT_EXIT_DEOPT);
+  /* FAILED: the engine's hook refused the rebuild; out[0] is its answer. */
+  GRJIT_Label not_failed = grjit_asm_label(a);
+  grjit_asm_cmp_ri(a, GRJIT_RDX, (int32_t)GRJIT_STATUS_FAILED);
+  grjit_asm_jcc(a, GRJIT_COND_NE, not_failed);
+  grjit_asm_mov_ri(a, GRJIT_RAX, GRJIT_EXIT_REBUILD_FAILED);
+  grjit_asm_bind(a, not_failed);
   grjit_asm_bind(a, done);
   grjit_asm_add_rsp(a, 32);
   grjit_asm_pop(a, GRJIT_RBP);
@@ -610,14 +618,17 @@ static GRJIT_Result emit_callable(const GRJIT_Function * f, GRJIT_Emit * e,
   e->internal = grjit_asm_label(a);
   e->overflow = grjit_asm_label(a);
   e->ret_deopted = grjit_asm_label(a);
+  e->ret_failed = grjit_asm_label(a);
+  e->ret_propagate = grjit_asm_label(a);
   emit_adapter(e);
-  /* The internal entry on a 16-byte boundary with the tag just before it. */
+  /* The internal entry on a 16-byte boundary with the tag just before it: the
+   * magic and parameter count, then the function's token. */
   static const uint8_t trap = 0xCC;
-  while ((grjit_asm_size(a) + 8) % 16 != 0) {
+  while ((grjit_asm_size(a) + GRJIT_ENTRY_TAG_BYTES) % 16 != 0) {
     grjit_asm_raw(a, &trap, 1);
   }
-  const uint64_t tag = GRJIT_ENTRY_TAG;
-  grjit_asm_raw(a, &tag, sizeof tag);
+  const uint64_t tag[2] = {GRJIT_ENTRY_TAG_WORD(f->param_count), f->token};
+  grjit_asm_raw(a, tag, sizeof tag);
   grjit_asm_bind(a, e->internal);
   e->internal_offset = (uint32_t)grjit_asm_size(a);
 
@@ -659,6 +670,7 @@ static GRJIT_Result emit_callable(const GRJIT_Function * f, GRJIT_Emit * e,
   }
   emit_pending(e);
   grjit_emit_ret_deopted(e);
+  grjit_emit_ret_status(e);
   grjit_emit_overflow_stub(e);
   return e->c.error;
 }

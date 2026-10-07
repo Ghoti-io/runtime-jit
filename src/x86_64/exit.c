@@ -58,6 +58,14 @@ void grjit_emit_callable_epilogue(GRJIT_Emit * e) {
   grjit_asm_ret_imm(&e->as, (uint16_t)e->c.shape.incoming_bytes);
 }
 
+void grjit_emit_ret_status(GRJIT_Emit * e) {
+  GRJIT_Asm * a = &e->as;
+  grjit_asm_bind(a, e->ret_failed);
+  grjit_asm_mov_ri(a, GRJIT_RDX, GRJIT_STATUS_FAILED);
+  grjit_asm_bind(a, e->ret_propagate);
+  grjit_emit_callable_epilogue(e);
+}
+
 void grjit_emit_ret_deopted(GRJIT_Emit * e) {
   GRJIT_Asm * a = &e->as;
   grjit_asm_bind(a, e->ret_deopted);
@@ -74,6 +82,11 @@ static void call_deopt_hook(GRJIT_Emit * e, GRJIT_Label ret_label) {
   grjit_asm_mov_rr(a, GRJIT_RDI, GRJIT_RCX);
   grjit_asm_mov_ri(a, GRJIT_RAX, (uint64_t)(uintptr_t)e->c.f->hooks.deopt);
   grjit_asm_call_r(a, GRJIT_RAX);
+  /* A refusal of the rebuild (non-zero) is not a deoptimization: every frame
+   * returns FAILED with the answer, and the engine hears of it. */
+  grjit_asm_mov32_rr(a, GRJIT_RAX, GRJIT_RAX);
+  grjit_asm_test_rr(a, GRJIT_RAX, GRJIT_RAX);
+  grjit_asm_jcc(a, GRJIT_COND_NE, e->ret_failed);
 }
 
 void grjit_emit_call_slow_stub(GRJIT_Emit * e, const GRJIT_Pending * p) {
@@ -144,6 +157,9 @@ void grjit_emit_overflow_stub(GRJIT_Emit * e) {
   grjit_asm_mov_ri(a, GRJIT_RSI, 0);
   grjit_asm_mov_ri(a, GRJIT_RAX, (uint64_t)(uintptr_t)e->c.f->hooks.deopt);
   grjit_asm_call_r(a, GRJIT_RAX);
+  grjit_asm_mov32_rr(a, GRJIT_RAX, GRJIT_RAX);
+  grjit_asm_test_rr(a, GRJIT_RAX, GRJIT_RAX);
+  grjit_asm_jcc(a, GRJIT_COND_NE, e->ret_failed);
   grjit_asm_mov_ri(a, GRJIT_RAX, 0);
   grjit_asm_mov_ri(a, GRJIT_RDX, GRJIT_STATUS_DEOPTED);
   grjit_emit_callable_epilogue(e);

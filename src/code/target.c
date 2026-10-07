@@ -34,15 +34,16 @@
 
 #include <string.h>
 
-uint32_t grjit_call_target_ok(void * context, uint64_t target) {
+uint32_t grjit_call_target_ok(
+    void * context, uint64_t target, uint64_t callee, uint64_t arg_count) {
   GRCORE_CodeRange range;
   if (!grcore_code_lookup((const GRCORE_Context *)context, (uintptr_t)target, &range) ||
-      range.retired || target < range.start + sizeof(uint64_t)) {
+      range.retired || target < range.start + GRJIT_ENTRY_TAG_BYTES) {
     return 0;
   }
-  /* Every internal entry has the tag in the eight bytes before it, which
-   * is inside the range, since the entry is at least eight bytes in. */
-  uint64_t tag;
-  memcpy(&tag, (const void *)(uintptr_t)(target - sizeof tag), sizeof tag);
-  return tag == GRJIT_ENTRY_TAG ? 1u : 0u;
+  /* The tag is in the sixteen bytes before the entry, which are inside the
+   * range because the entry is at least that far in. */
+  uint64_t tag[2];
+  memcpy(tag, (const void *)(uintptr_t)(target - sizeof tag), sizeof tag);
+  return tag[0] == GRJIT_ENTRY_TAG_WORD(arg_count) && tag[1] == callee ? 1u : 0u;
 }

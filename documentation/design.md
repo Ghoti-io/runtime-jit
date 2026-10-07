@@ -542,14 +542,29 @@ the context. `push` pushes the callee's guest frame, counts guest depth and
 memory as the interpreter's own push does, and extends the reservation by the
 callee's maximum; it is the frame-push GC point. `pop` pops it after a normal
 return. `compile` compiles an empty slot's function and installs it, or marks
-the slot refused. `deopt` rebuilds the whole chain (`grcore_compiled_rebuild`).
+the slot refused. `deopt` rebuilds the whole chain (`grcore_compiled_rebuild`) and
+returns the rebuild's result: zero, or the code it refused with.
 The library knows no engine: the fixture in `tests/calls_fixture.h` implements
 them over `runtime-core`, and story 8 replaces it with Tang's.
+
+*Derived arguments.* A `PTR` argument that is derived from a `REF` (a pointer into
+an object) is copied into the arguments area like the others, so the area holds a
+second copy of it, and a collection the push hook triggers moves its base. The push
+site's map therefore carries, for each such argument, a derived entry at its area
+slot against the base's slot, as it does for a live derived register; without it
+the callee would be handed an address into the object's old place.
 
 *Where this differs from the story's wording.* `pop` cannot refuse. After a
 callee returned normally the call is complete, no frame state describes
 "complete but not yet popped", and a refusal would leave the interpreter to
 re-run the callee; so the hook returns nothing and must not reach a GC point.
+`deopt` is different, and is not void: the rebuild can refuse (a reservation too short, a
+frame that cannot be read), and compiled frames are already gone from the point of view
+of anyone who would carry on, so the refusal cannot be a quiet return. The hook returns
+its result; non-zero makes every frame return `FAILED`, never `DEOPTED`, and the adapter
+exit with `GRJIT_EXIT_REBUILD_FAILED`, a fatal exit of its own (`out[0]` is the code), which
+an engine cannot mistake for a deoptimization it should finish in the interpreter. A
+hook that cannot fail returns zero.
 A refusal of `push`, which leaves nothing pushed, is an exit through the exit
 state, where the interpreter makes the call itself and reaches the verdict it
 would have (a depth limit, a memory budget).
@@ -561,7 +576,7 @@ would have (a depth limit, a memory budget).
 | integer arguments | `rdi, rsi, rdx, rcx, r8, r9`, then the stack above the return address, in order, in whole 16-byte units |
 | context | `r10` (caller-saved, and no argument register) |
 | result | `rax` |
-| status | `rdx`: `RETURNED` (0) or `DEOPTED` (1); then `rax` is the cause, returned unchanged by every frame |
+| status | `rdx`: `RETURNED` (0), `DEOPTED` (1) or `FAILED` (2); after `DEOPTED`, `rax` is the cause, returned unchanged by every frame; after `FAILED`, it is the code the rebuild refused with |
 | callee-saved | none is used and none needs saving: `rbx`, `r12`-`r15` come back as they went in, and `rbp` is the frame link |
 | frame | `rbp`-linked as `a/compiled.h` requires; the metadata's frame size includes the arguments area |
 | stack arguments | **popped by the callee** (`ret imm16`) |
@@ -587,16 +602,25 @@ loads the arguments from `args`, sets `rbp` to the chain-end marker, calls the
 internal entry, clears the walk-start cell, and turns the status into an exit.
 For callable code `GRJIT_EXIT_DEOPT` means every compiled frame, this function's
 included, has been rebuilt into its guest frame, `out[0]` is the cause, and `out`
-holds no frame state. The internal entry follows, on a 16-byte boundary with an
-eight-byte tag before it.
+holds no frame state. The internal entry follows, on a 16-byte boundary with a
+sixteen-byte tag before it: a word that holds a magic number and the function's
+parameter count, then the engine's token for the function (`grjit_builder_set_token`).
+A `FAILED` status (below) reaches the adapter as the fatal exit
+`GRJIT_EXIT_REBUILD_FAILED`.
 
 **A call, in order.** (1) *Dispatch*: for a slot, load its word and compare it
 once: above one, call it; zero, ask the `compile` hook, which installs or marks
 the slot refused; one (`GRCORE_ENTRY_REFUSED`), exit without asking. For a code
 pointer, call `grjit_call_target_ok`, which requires the address to be inside
 registered, non-retired code and to have the tag the adapter leaves before every
-internal entry, so an unregistered address, the adapter, the middle of code and
-null are each refused and never entered. (2) *Arguments* are copied into the
+internal entry **with this call's parameter count and the callee's token**, so an
+unregistered address, the adapter, the middle of code, null, retired code, and a
+function compiled for another arity or another callee are each refused and never
+entered (an exit through the exit state, where the interpreter makes the call and
+reaches the verdict a call of that pointer would have). A slot is held to the same
+rule when code is put in it: `grjit_entry_slot_install` installs only code whose
+binding (token and parameter count) is the one the slot was made for, so a call
+through a slot needs no check at run time. (2) *Arguments* are copied into the
 frame's arguments area. (3) *Push*: the hook is handed the address of the area,
 whose `REF` arguments are in the push site's stack map, so a collection the push
 triggers has updated them by the time the hook reads them; this is why the area
@@ -673,7 +697,8 @@ library, over the `#include` lines and the shared object's `NEEDED` entries;
 refuses. `make check-gates` proves each by running the real scripts against a
 planted fixture that must fail, naming what it found, a control that must pass,
 and an empty tree that must fail rather than report success over nothing.
-`check-planted` is the same idea for the backend. The direction gate is not
+`check-planted` is the same idea for the backend, and `check-planted-calls` for the call protocol: it plants, in a scratch copy, the defects of the story
+(a frame missed in a deep rebuild, an early free under a waiting frame, a short reservation, a status not tested after a call through a pointer, references left out of a call site's map, the walk start not stored, retired code entered, a token or an arity not checked, a refused rebuild not noticed, a derived argument not recorded) and requires a test of this library or of `runtime-core` to fail on each. Its verdicts are CAUGHT, MISSED, TIMEOUT and BUILD FAILED, and only the first is a catch; it runs the unplanted tree first and requires it to pass, and `--self-test` runs it against edits of known outcome (one that changes nothing, one that does not compile, one that hangs) so a harness that calls everything a catch fails. The direction gate is not
 here: the headers are flat.
 
 ## Benchmarks
