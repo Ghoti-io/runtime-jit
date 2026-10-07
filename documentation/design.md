@@ -508,6 +508,162 @@ nothing to fuzz in this version. The differential generator, which is in
 `make test`, is the library's stand-in. The day a serialised form of the IR
 exists, the story that adds it adds a harness.
 
+## Calls between compiled functions (AD-28, CAP-1, CAP-4)
+
+Milestone 1's baseline JIT called only C helpers at a fixed address, so a compiled
+function could not call another and lang-tang left compiled code at every `CALL`.
+**Calls as deoptimization exits were milestone 1's defect**: `fib(15)` ran 12%
+slower with the JIT on than off, and `fib(22)` 1.2% slower (lang-tang's
+`design.md`, "Measured"), because every call left compiled code, deoptimized the
+caller into the interpreter, and re-entered the callee's compiled code from the
+top. The restriction was story 15's own rule ("no JIT frame calls a JIT frame"),
+not the spine's. This section is the protocol that removes it, on x86-64 SysV;
+arm64 and Win64 refuse the new operations with `GRJIT_ERR_UNSUPPORTED` until
+they have them, before emitting a byte (their emitted bytes, and the pins, are
+unchanged), and `grjit_backend_calls_available()` lets an engine ask once instead
+of finding out at its first compile.
+`runtime-core`'s `design.md` ("A, part 5") holds the other half: the walk, the
+rebuild, the native-stack limit and the entry slot.
+
+**The IR.** A function is *callable* (`grjit_builder_set_callable`) and carries
+four engine hooks. `CALL_SLOT` calls through an entry slot and `CALL_PTR`
+through a code pointer; each takes up to sixteen arguments (`I64`, `REF` or
+`PTR`), a result of any type or none, the engine's token for the callee, and
+**two frame states**: the guest frame as it stands while the callee runs (the
+interpreter resumes the caller there once the callee returns), which the stack
+maps and the chain rebuild use, and the guest frame as it stands before the call,
+which an exit at the call site uses. They differ for an engine whose callee
+frame is pushed by the call itself. Liveness makes three site sets per call (the
+push, the call and the exit), because what is live differs: the arguments are
+live at the push and not at the return address, and an exit leaves the frame.
+
+**The hooks** are C functions the engine supplies and compiled code calls with
+the context. `push` pushes the callee's guest frame, counts guest depth and
+memory as the interpreter's own push does, and extends the reservation by the
+callee's maximum; it is the frame-push GC point. `pop` pops it after a normal
+return. `compile` compiles an empty slot's function and installs it, or marks
+the slot refused. `deopt` rebuilds the whole chain (`grcore_compiled_rebuild`).
+The library knows no engine: the fixture in `tests/calls_fixture.h` implements
+them over `runtime-core`, and story 8 replaces it with Tang's.
+
+*Where this differs from the story's wording.* `pop` cannot refuse. After a
+callee returned normally the call is complete, no frame state describes
+"complete but not yet popped", and a refusal would leave the interpreter to
+re-run the callee; so the hook returns nothing and must not reach a GC point.
+A refusal of `push`, which leaves nothing pushed, is an exit through the exit
+state, where the interpreter makes the call itself and reaches the verdict it
+would have (a depth limit, a memory budget).
+
+**The internal convention** (x86-64 SysV; `backend/backend_internal.h`):
+
+| | |
+| --- | --- |
+| integer arguments | `rdi, rsi, rdx, rcx, r8, r9`, then the stack above the return address, in order, in whole 16-byte units |
+| context | `r10` (caller-saved, and no argument register) |
+| result | `rax` |
+| status | `rdx`: `RETURNED` (0) or `DEOPTED` (1); then `rax` is the cause, returned unchanged by every frame |
+| callee-saved | none is used and none needs saving: `rbx`, `r12`-`r15` come back as they went in, and `rbp` is the frame link |
+| frame | `rbp`-linked as `a/compiled.h` requires; the metadata's frame size includes the arguments area |
+| stack arguments | **popped by the callee** (`ret imm16`) |
+
+*Who pops the stack arguments* was decided with story 5's tail call in mind. A
+tail call to a callee with more stack arguments than its caller has must reuse
+the caller's frame in constant stack. With the callee popping its own arguments,
+the tail-calling function knows its caller expects exactly its own incoming area
+popped, moves the return address and builds the callee's arguments below it, and
+the final `ret` pops the callee's area, leaving the stack where the original
+caller expects it; with the caller popping, the original caller would have to
+know what the tail callee takes, which it cannot (indirect calls). The cost is
+that the caller makes the area with a `sub rsp` before each call that has stack
+arguments, which a caller-pops frame would preallocate once; calls with six or
+fewer arguments, which is nearly all of them, have none. A callee's parameter
+count and its callers' argument count must agree (an engine's types do that).
+
+**The entry adapter** is `GRJIT_EntryFn` for a callable function, unchanged for
+a caller, and it is first in the code, so `grjit_code_entry` is still the start of
+the mapping. It saves `rbp`, keeps `out` and the context in its own frame, runs
+the entry hook (so a refusal is still `GRJIT_EXIT_REFUSED` and still the hook's),
+loads the arguments from `args`, sets `rbp` to the chain-end marker, calls the
+internal entry, clears the walk-start cell, and turns the status into an exit.
+For callable code `GRJIT_EXIT_DEOPT` means every compiled frame, this function's
+included, has been rebuilt into its guest frame, `out[0]` is the cause, and `out`
+holds no frame state. The internal entry follows, on a 16-byte boundary with an
+eight-byte tag before it.
+
+**A call, in order.** (1) *Dispatch*: for a slot, load its word and compare it
+once: above one, call it; zero, ask the `compile` hook, which installs or marks
+the slot refused; one (`GRCORE_ENTRY_REFUSED`), exit without asking. For a code
+pointer, call `grjit_call_target_ok`, which requires the address to be inside
+registered, non-retired code and to have the tag the adapter leaves before every
+internal entry, so an unregistered address, the adapter, the middle of code and
+null are each refused and never entered. (2) *Arguments* are copied into the
+frame's arguments area. (3) *Push*: the hook is handed the address of the area,
+whose `REF` arguments are in the push site's stack map, so a collection the push
+triggers has updated them by the time the hook reads them; this is why the area
+exists, and a hook must read its arguments after any collection it causes.
+(4) *Call*, with the stack arguments made just before it. (5) *Test the status*:
+`DEOPTED` returns `DEOPTED` through this frame, untouched, because the chain was
+rebuilt before any frame returned. (6) *Store the result, then pop.* Dispatch
+comes before the push so that no push is ever undone: a callee that cannot be
+entered costs a compare and an exit, never a pushed-and-popped guest frame.
+Every way out before step (4) is an exit through the exit state.
+
+**Stack maps and the walk start.** Every call that can reach a GC point in a
+callable function stores its frame base and the return address of the call in
+the context's cell first (`lea rax, [rip + after_call]`, two stores), so a walk
+from the helper, the push hook or a poll finds this frame and the compiled
+frames below it by the rule of `a/compiled.h`. A guard's exit, a call's exit and
+a poll's deoptimization are sites at the return address of the hook call that
+starts the rebuild, so the one rebuild reads each frame at the site it is
+stopped at. Non-callable functions store nothing and are byte-for-byte what
+they were.
+
+**Chain deoptimization.** A guard that fails, a poll whose helper answers
+non-zero (a pause, a step, a breakpoint, an unwind: the helper's answer is the
+cause), an exit at a call site, and a native stack that would run out all call
+the `deopt` hook once, which rebuilds every compiled frame down to the innermost
+activation record into its guest frame; then each frame returns `DEOPTED` to its
+caller, nothing is inserted and no return address is patched, and the adapter
+turns it into `GRJIT_EXIT_DEOPT`. An unwind passes the engine's survivors to the
+rebuild, which converts only those.
+
+**The native stack, in bytes.** Each callable function's prologue computes the
+lowest address its frame will use and compares it with the context's limit word
+(`a/layout.h`; `runtime-core` sets it at every run, resume and re-entry from the
+byte budget). Below it, a stub, entered with only `push rbp; mov rbp, rsp` done,
+stores the caller's base and return address as the walk start (or clears it when
+the caller is the adapter, whose frame link is the marker) and calls `deopt`.
+The callee's own guest frame, which the caller's push hook made, is at its entry
+and complete, so the interpreter runs the callee from it with its arguments.
+
+**Rejected.** *Calls as deopt exits*: milestone 1's defect, above. *A C-ABI call
+between compiled functions*: it passes the status through an `out` pointer and
+needs callee-saved registers or a spill per call, and the adapter then exists
+for nothing; the C ABI is used only at the entry and at natives and helpers.
+*A shadow stack of frame records*: a store per call on the path this feature
+exists to make fast, and a second source of truth. *Callee-saved registers for
+references*: AD-17 forbids it (a moving collector must update them). *A patched
+return address* to a stub that pops a side record: breaks the return predictor
+on every call and leaves a native unwinder or profiler looking at addresses in
+no registered code. *Caller-pops stack arguments*: above.
+
+**Measured.** (CAP-6; 2026-10-06, GCC 14.2, the machine of "Benchmarks" but
+loaded by other jobs, so read the ratios and not the nanoseconds; minimum of 5
+repeats, three runs.) The loop of "Benchmarks" calling a callable function
+through an entry slot, with `push` and `pop` doing nothing, so the figure is the
+convention, the status test and the hooks' two C calls and not an engine:
+`loop-compiled-call` 4.65 to 4.69 ns per iteration, against 0.74 to 0.77 for the
+plain loop and 1.74 to 1.76 for the loop calling a no-op C helper (calibration
+1.35 that day, against 1.14 on the day of the table above). So a compiled call and
+return through a slot, hooks included, costs about 3.9 ns, 2.9 times the
+calibration step and 2.2 times a helper call; an engine's `push` and `pop` are
+what dominate it in practice, and `fib` against the interpreter (lang-tang's
+measurements) is story 8's. A retired function costs one page
+(4,163 bytes with bookkeeping) while a compiled run stays open: 200 replacements
+under one open JIT record held 832,640 bytes, 400 retired references, all
+released when it left (`Calls.RepeatedReplacementUnderOneLongLivedActivation...`
+prints it; runtime-core's `design.md` says why no bound or epoch is added).
+
 ## Gates
 
 `make check-labels` requires every header to carry exactly one `@stability free`
@@ -553,10 +709,12 @@ numbers; the calibration row is what to read them against.
   are story 15's, and exist.)
 - **Rebuilding interpreter frames from compiled ones** is the engine's, and
   `lang-tang` does it with `runtime-core`'s `a/deopt.h` at every poll and on
-  every guard exit. Walking native frames for roots is still not here: no frame
-  walk of native frames exists in `runtime-core`, and `lang-tang` is built so that
-  it needs none (compiled code has no GC point except a poll that first writes
-  the guest frame).
+  every guard exit; for a chain of compiled frames it is `grcore_compiled_rebuild`
+  through the `deopt` hook (above). Walking native frames for roots is
+  `runtime-core`'s walk (`a/compiled.h`), which a callable function feeds by
+  storing its walk start before every call that can reach a GC point.
+- **Calls on arm64 and Win64**, tail calls and calls to natives: story 7, story 5
+  and story 6 of the calls spec.
 - **Windows arm64 and macOS.** No backend: `grjit_backend_available()` is false,
   `grjit_compile` returns `GRJIT_ERR_UNSUPPORTED`, and every test that needs
   compiled code is reported SKIPPED (`GRJIT_REQUIRE_BACKEND`), the encoders and

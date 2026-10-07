@@ -34,7 +34,10 @@ emits bytes, and a small simulator in the tests executes what it emits); running
 its code for real is `tools/xarch/jit-arm64.sh` in the workspace, under
 `qemu-aarch64` (a regression in the arm64 branch of `grjit_compile` passes
 `make test` and fails only that script, so `tools/m1-prerelease.sh` runs it,
-and the Windows run, as the step before a release). Every header is labelled `free`: a consumer requires
+and the Windows run, as the step before a release). Calls between compiled
+functions (a callable function, `CALL_SLOT` and `CALL_PTR`, AD-28) are emitted for
+Linux x86-64 SysV only: `grjit_backend_calls_available()` says so, and the other
+targets refuse them with `GRJIT_ERR_UNSUPPORTED` before emitting a byte. Every header is labelled `free`: a consumer requires
 the exact version it was built against.
 
 ## Example
@@ -94,7 +97,7 @@ this library:
 
 | Target | Does |
 | --- | --- |
-| `test` | build, `check-symbols`, `check-aliasing` (gcc only), `check-stamps`, the gates below, the planted-defect builds, the examples, the unit tests (the differential among them), and one smoke run of the benchmark |
+| `test` | build, `check-symbols`, `check-aliasing` (gcc only), `check-stamps`, the gates below, the planted-defect builds, the examples, the unit tests (the differential and the call tests among them), and one smoke run of the benchmark |
 | `examples` | build each program under `examples/` and run it; a failing example fails `test` |
 | `check-labels` | fail if a public header has no `@stability free` label (every header here is `free`) |
 | `check-edges` | fail on any `#include` or shared-object dependency on a Ghoti library other than `cutil`, `runtime-core` and this one |
@@ -115,6 +118,10 @@ backends (the Windows one with its unwind registration) and their assemblers, th
 benchmark harness are in, and so are the parts that need an engine: wiring it
 into `lang-tang` (story 15), tier-up, compiled-code reference counting and the
 rebuilding of interpreter frames from compiled ones at a poll and at a guard
-exit (the last is the engine's, done with `runtime-core`'s `a/deopt.h`). Not
-here: Windows arm64 and macOS. `documentation/design.md` says why each is where
+exit (the last is the engine's, done with `runtime-core`'s `a/deopt.h`), and,
+on x86-64 SysV, calls between compiled functions: a callable function with an
+internal entry, calls through an entry slot or a code pointer, stack maps at the
+call sites, a chain deoptimization and a native-stack check in bytes (AD-28).
+Not here: those calls on arm64 and Win64, tail calls, calls to natives, Windows
+arm64 and macOS. `documentation/design.md` says why each is where
 it is.
