@@ -1617,6 +1617,71 @@ TEST(Natives, ANativeThatLeavesAPausePendingAndReturnsDeoptRebuildsTheChainAndTh
   EXPECT_EQ(e.st.pushes, e.st.pops);
 }
 
+TEST(Natives, APauseAFiftyDeepChainDownResumesOnAnotherThreadWithEveryFrameRebuiltAndTheInterpretersResult) {
+  for (long depth : {1L, 50L}) {
+    SCOPED_TRACE(depth);
+    Engine e;
+    Nat n = register_natives(e);
+    // deep(n, x) = n == 0 ? log(pause(x)) + 1 : deep(n - 1, x) + 2, with a poll after the native at the bottom: the
+    // native returns DEOPT with a pause pending, the whole chain of compiled frames is rebuilt, and the
+    // interpreter pauses at the poll.
+    int deep = e.reserve();
+    {
+      P p("deep", {GRJIT_TYPE_I64, GRJIT_TYPE_I64});
+      int nn = 0, x = 1, zero = p.local(), one = p.local(), two = p.local(), t = p.local(), n1 = p.local(),
+          r = p.local(), v = p.local(), w = p.local();
+      p.cnst(zero, 0);
+      p.cnst(one, 1);
+      p.cnst(two, 2);
+      p.bin(K::EQ, t, nn, zero);
+      int more = p.brz(t);
+      p.native(v, n.pause, {x});
+      p.poll();
+      p.native(w, n.log, {v});
+      p.bin(K::ADD, w, w, one);
+      p.ret(w);
+      p.patch(more, p.here());
+      p.bin(K::SUB, n1, nn, one);
+      p.call(r, deep, {n1, x});
+      p.bin(K::ADD, r, r, two);
+      p.ret(r);
+      e.set(deep, p.done());
+    }
+    const u64 d = static_cast<u64>(depth);
+    e.trace.clear();
+    Outcome ref = e.run_interpreted(deep, {d, 9});
+    ASSERT_TRUE(ref.paused);
+    EXPECT_EQ(ref.frames_left, d + 1);
+    Outcome ref_done = e.resume();
+    ASSERT_TRUE(ref_done.finished);
+    const auto ref_trace = e.trace;
+    e.st = Stats{};
+    e.trace.clear();
+    Outcome o = e.run_compiled(deep, {d, 9});
+    ASSERT_TRUE(o.paused);
+    EXPECT_FALSE(o.finished);
+    EXPECT_EQ(o.exit, uint32_t{GRJIT_EXIT_DEOPT});
+    EXPECT_EQ(e.st.deopt_frames, depth + 1) << "every frame of the chain was rebuilt";
+    EXPECT_EQ(o.frames_left, d + 1) << "the guest frames are what the host holds while paused";
+    EXPECT_EQ(e.trace, (std::vector<int64_t>{9})) << "the native has run, once";
+    EXPECT_EQ(e.st.status_exits, 1);
+    ASSERT_EQ(grcore_context_release(e.ctx), GRCORE_OK);
+    Outcome resumed;
+    std::thread t([&] {
+      EXPECT_EQ(grcore_context_acquire(e.ctx), GRCORE_OK);
+      resumed = e.resume();
+      EXPECT_EQ(grcore_context_release(e.ctx), GRCORE_OK);
+    });
+    t.join();
+    ASSERT_EQ(grcore_context_acquire(e.ctx), GRCORE_OK);
+    ASSERT_TRUE(resumed.finished);
+    EXPECT_EQ(resumed.value, ref_done.value) << "what the uninterrupted run answers";
+    EXPECT_EQ(e.trace, ref_trace);
+    EXPECT_EQ(resumed.frames_left, 0u);
+    EXPECT_EQ(e.st.pushes, e.st.pops);
+  }
+}
+
 /* ---- Re-entry: a native that runs guest code, nested ----------------------------------------- */
 
 namespace {
