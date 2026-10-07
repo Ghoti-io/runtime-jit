@@ -103,8 +103,8 @@ this library:
 | `check-labels` | fail if a public header has no `@stability free` label (every header here is `free`) |
 | `check-edges` | fail on any `#include` or shared-object dependency on a Ghoti library other than `cutil`, `runtime-core` and this one |
 | `check-gates` | run each gate against a planted defect and a control, and against an empty tree, and fail unless each behaves |
-| `check-planted` | build the library with a planted backend defect (`SHR` and `SAR` swapped; every stack-map slot 8 bytes off; a live reference left out; and in the Windows flavour a callee-saved register used, no shadow space, an unwind table never registered; for calls, a reference left out of a call site's map, a callee-saved register clobbered, a native-stack check that omits the frame; for tail calls, a stack argument not copied, the hook's arguments area left out of its map, no padding) and require the differential, the read-back, the call tests, the tail-call tests or the Win64 structural tests to fail on it, and to pass without it |
-| `check-planted-calls` | plant, in a scratch copy of `runtime-core` or of this library, the defects of the call protocol (a frame missed in a rebuild, an early free, a short reservation, no status test after a pointer call, a reference left out of a call site's map, the walk start not stored, retired code entered, a token or an arity not checked, a refused rebuild ignored, a derived argument not recorded; for tail calls, a refused hook ignored, the walk start not stored before the hook, the return address left where it was, the verifier not needing the hook) and require a test to fail on each; first run it against edits of known outcome so that a missed one, a build failure and a hang each show as what they are, not as a catch |
+| `check-planted` | build the library with a planted backend defect (`SHR` and `SAR` swapped; every stack-map slot 8 bytes off; a live reference left out; and in the Windows flavour a callee-saved register used, no shadow space, an unwind table never registered; for calls, a reference left out of a call site's map, a callee-saved register clobbered, a native-stack check that omits the frame; for tail calls, a stack argument not copied, the hook's arguments area left out of its map, no padding; for calls to natives, the walk start stored after the call, the stack arguments not popped, their area not rounded, the native-stack check without it, an argument one word too high) and require the differential, the read-back, the call tests, the tail-call tests, the native-call tests or the Win64 structural tests to fail on it, and to pass without it |
+| `check-planted-calls` | plant, in a scratch copy of `runtime-core` or of this library, the defects of the call protocol (a frame missed in a rebuild, an early free, a short reservation, no status test after a pointer call, a reference left out of a call site's map, the walk start not stored, retired code entered, a token or an arity not checked, a refused rebuild ignored, a derived argument not recorded; for tail calls, a refused hook ignored, the walk start not stored before the hook, the return address left where it was, the verifier not needing the hook; for calls to natives, a status not tested, the status exit built from the state before the call, the result stored after the status test, the cause without the native bit, the stack area not rounded or not popped, an argument at the wrong offset, references or derived pointers left out of a native site's map, the stack check without the area or without the native's use, the verifier not checking an arity, a type or a state, and the two early frees run against the native tests alone) and require a test to fail on each; first run it against edits of known outcome so that a missed one, a build failure and a hang each show as what they are, not as a catch |
 | `bench` | run the benchmark harness in full; it prints a calibration result first |
 | `test-asan`, `test-tsan`, `test-valgrind-quiet` | the same tests under ASan+UBSan, ThreadSanitizer and Valgrind |
 | `coverage` | instrumented run and line report |
@@ -124,8 +124,12 @@ exit (the last is the engine's, done with `runtime-core`'s `a/deopt.h`), and,
 on x86-64 SysV, calls between compiled functions: a callable function with an
 internal entry, calls through an entry slot or a code pointer, stack maps at the
 call sites, a chain deoptimization and a native-stack check in bytes (AD-28),
-and tail calls through an entry slot or a code pointer that replace the caller's
-frame, native and guest, in constant stack (AD-28).
-Not here: those calls and tail calls on arm64 and Win64, calls to natives,
+tail calls through an entry slot or a code pointer that replace the caller's
+frame, native and guest, in constant stack (AD-28), and calls to registered, typed
+natives (`natives.h`): a C call by the platform's ABI with the context first, a
+status that leaves compiled code through the chain deopt with the state after the
+call, a native-stack check in bytes, and the walk start stored first, so a
+collection under the native sees every compiled frame below it (AD-28, AD-17).
+Not here: those calls, tail calls and native calls on arm64 and Win64,
 Windows arm64 and macOS. `documentation/design.md` says why each is where
 it is.

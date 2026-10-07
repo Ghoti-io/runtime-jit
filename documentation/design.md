@@ -878,6 +878,241 @@ hook call and neither makes a stack frame nor pops one. An engine's `tail` hook 
 and a push of guest frames, an extension and a retraction) is what dominates it in
 practice, as `push` and `pop` do a call.
 
+## Calls to natives (AD-28, AD-17, CAP-7)
+
+A compiled function could call another compiled function (above) and tail-call one,
+but the only way it reached C was `GRJIT_OP_CALL`: a helper at a fixed address, at
+most six integer arguments, no result status, no signature, no native-stack
+accounting, and no way to say "this one may allocate, pause, fail or re-enter guest
+code". lang-tang's library calls therefore still left compiled code. This is the call
+that does not. It is x86-64 SysV only, as calls and tail calls are: arm64 and Win64
+refuse a function with one (`GRJIT_ERR_UNSUPPORTED`, before a byte), and the three pins
+and the callable pin do not move (story 7 gives them the call; the register
+assignment differs and Win64 returns a 16-byte struct through a hidden pointer, so
+the *emission* adapts there and the descriptor does not).
+
+**`CALL` and `CALL_NATIVE` are two operations, decided.** `CALL` stays the *trusted
+helper*: the engine's `gc_store`, a barrier, the poll's slow path. It is a leaf or a
+GC point, returns one word, takes at most six integer arguments, has no signature, no
+stack accounting and no exit, and never re-enters guest code. `CALL_NATIVE` is the
+engine's native: registered and typed, up to sixteen arguments, an optional status, a
+native-stack check, and an exit state. Extending `CALL` would have changed its
+verifier rules, its arm64 and Win64 emission and its bytes (the pins), for the sake of
+every caller of the helper.
+
+**The table and the verifier.** `GRJIT_NativeTable` (create, add, count, get, free;
+`natives.h`) holds `GRJIT_NativeDesc`: the function's address, the parameter types
+(`I64`, `REF`, `PTR`, from none to `max_native_arguments`, default and ceiling 16, not
+counting the context), the result type (the three, or none), flags (`STATUS`,
+`REENTERS`) and `stack_bytes`, the most native stack the native itself uses before it
+calls anything that checks (at most `max_native_stack_bytes`, default 64 KiB). It is
+append-only, descriptors are copied and individually allocated (so a pointer to one
+stays valid and an id never changes), and a refused `add` changes nothing (a
+parameter list that is NULL with a count, an unknown flag, a type that is no type: all
+`INVALID`; too many parameters or too much stack: `LIMIT`; a failed allocation in any
+arm: `OOM`, the table as it was). A native with a floating-point or variadic signature
+*cannot be described*: the three types are the three words. The builder is given a
+table (`grjit_builder_set_natives`) and keeps the pointer, not a copy: the table
+must outlive the function's verification and compilation, and the code copies what it
+needs, so it need not outlive the code (the native must). The verifier refuses,
+naming the operation: an id the table does not hold, a function that is not callable
+(a native call can leave through the `deopt` hook, which only a callable function
+has), a wrong argument count, a register argument whose type is not the parameter's (an
+immediate is accepted for any type), a destination of the wrong type or for a native
+with no result, a state of the wrong length, a status native without its state after
+the call and a state after the call for a native without a status. The emitter checks
+the arity again against the descriptor and refuses with `INTERNAL`: a descriptor cannot
+change under a verified function, so that is the library's own invariant. **There is no
+run-time target check, and that is deliberate**: a native's address is a constant of its
+descriptor, baked into the code at compile time, never a value the code loads, so there
+is nothing a forged or unregistered target could be at run time. (A call through a code
+pointer to *compiled* code needs the check because the pointer is a run-time value;
+that is `grjit_call_target_ok`, above.) A native called through a runtime pointer is
+excluded by the interface for the same reason.
+
+**The C signature.** `uint64_t fn(void * context, a0, a1, ...)`, or with `STATUS`
+`GRJIT_NativeResult fn(void * context, ...)`, where the result is `{ uint64_t value;
+uint64_t status; }`. The context is the pointer the code was called with and is the
+*implicit first argument*: natives allocate, poll and re-enter through it, so it is not
+an operand. On SysV the pair comes back in `rax:rdx` with no hidden pointer; the tests
+call real C functions of this exact signature, from C and from compiled code, so the ABI
+is measured and not assumed.
+
+**The call sequence**, in order, and after it nothing is reordered (the printed IR and
+the emitted bytes of one call with eight arguments and a status, `native #0` of
+`stack_bytes` 256 at a made-up address):
+
+```
+v2 = call_native #0(v0, v1, v0, #77, v0, v0, v0, v0) state fn=1 off=2 [v0, v1] after state fn=1 off=3 [v2, v1]
+
+lea  rax, [rsp - 0x120]            ; S + stack_bytes = 0x20 + 0x100
+mov  rcx, [rbp - 8]                ; the context, from its frame slot
+cmp  rax, [rcx + 0x100]            ; the context's native-stack limit word (zero: none)
+jb   exit_before                   ; unsigned: below it, an exit; the native is not called
+lea  rax, [rip + ret]              ; the walk start, FIRST: before the area is made,
+mov  rcx, [rbp - 8]                ;   before any argument is moved, before the call
+mov  [rcx + cell], rbp
+mov  [rcx + cell + 8], rax
+sub  rsp, 0x20                     ; N = 9 words (the context and eight), six in registers,
+mov  rax, [rbp - 0x20]             ;   three on the stack: S = round_up_16(24) = 32
+mov  [rsp], rax                    ; stack argument 0 .. 2 at [rsp + 8 i], ascending
+mov  [rsp + 8], rax
+mov  [rsp + 0x10], rax
+mov  rdi, [rbp - 8]                ; the context, reloaded
+mov  rsi, [rbp - 0x20]             ; arguments 0 .. 4 in rsi, rdx, rcx, r8, r9
+mov  rdx, [rbp - 0x28]
+mov  rcx, [rbp - 0x20]
+mov  r8d, 0x4d                     ; an immediate
+mov  r9, [rbp - 0x20]
+mov  rax, 0x1122334455667788       ; the call goes through rax, loaded with the address
+call rax
+ret:                               ; the return address is the site
+add  rsp, 0x20                     ; popped by the caller (C ABI)
+mov  [rbp - 0x30], rax             ; the result is stored BEFORE the status is looked at
+test rdx, rdx
+jne  exit_after                    ; a status stub: cause = 1<<32 | (status & 0xffffffff)
+```
+
+Every operand is read from a frame slot or is an immediate, so the order of the loads
+cannot clobber one, and nothing is assumed preserved: the context, every operand and
+every live value are read from the frame again after the call (`r10`, `rax`, `rcx`,
+`rdx`, `rsi`, `rdi` and `r8` to `r11` are all taken to be clobbered; the test's native
+clobbers every one of them and the vector registers, and the caller's values and the
+next call's context come back intact). `rsp` is 16-aligned at the call because it is
+aligned in every callable frame and the area is the only thing that moves it, in whole
+sixteens; the stub that records the stack pointer at the native's entry shows
+`(rsp + 8) % 16 == 0` for every count of stack arguments from zero to eleven, and the
+same `rsp` after ten calls in a row.
+
+**The native-stack check** is `lea rax, [rsp - (S + stack_bytes)]` against the
+context's limit word, unsigned: the lowest address the native may reach is where the
+stack pointer will be at its entry, past its return address, less its own declared use.
+Below the limit is an *exit before the call*: a `GRCORE_SITE_GUARD` site in the call's
+state, the same stub and `deopt` hook as a call's exit, the native not called, the
+interpreter continuing and making the call itself. The check is exact to the byte: the
+test measures the native's entry stack pointer with a stub that records it, derives the
+budget at which the call just fits, and runs a budget one byte either side for every
+argument count from zero to sixteen and for two declared uses, requiring the exit one
+byte short and the call at and above; a planted check that leaves out the stack-argument
+area, and one that leaves out the declared use, are each caught.
+
+**The site** is a `GRCORE_SITE_GC_POINT_CALL` site of this frame at the return address,
+with the call's state's identity (the interpreter's state with the call still to be
+made, which is what a debugger stopped in a native shows), a stack map naming every
+reference and derived pointer live *after* the call with the result's destination
+excluded, and the frame state. The arguments are *not* mapped: a native receives raw
+words, and a reference it holds across a GC point is the native's to protect (below).
+No new site kind, and the metadata format version stays 1. **Liveness makes two site
+sets per native call, three with a status**, in this order: the call, the exit before
+it, and the exit after. The call's set is what is live after it, less its result, plus
+what *either* state names but the result: the state after the call is read from the
+frame by the exit, so a collection the native triggers must have updated every register
+it names (`NativeIr.ANativeWithAStatusMakesThreeSites...` gives each set). An exit leaves
+the frame, so each exit's set is only what its own state names.
+
+**Status and chain deopt.** `GRJIT_NATIVE_OK` is 0. Any other status means: the call is
+complete, `dst` is valid, and compiled code leaves now, through the same chain deopt as
+a guard. The status exit is a `GRCORE_SITE_GUARD` site at the return address of the
+`deopt` hook call, in the **state after the call** (the interpreter's state with the
+call done and the result in place), because the native has run and cannot be run again;
+a stub that built it from the state before the call would have the interpreter make the
+call, and the test that counts what the natives logged sees it run twice (and the harness
+plants exactly that). The hook is called once with `cause = GRJIT_CAUSE_NATIVE | status`
+(bit 32: a poll's cause is 32 bits, so the two cannot meet; the cause carries the status's
+low 32 bits and the test for leaving is on all 64, so a status of `1 << 40` leaves with
+cause `NATIVE | 0`), rebuilds the chain through `grcore_compiled_rebuild`, and every
+frame returns `DEOPTED`; the entry returns `GRJIT_EXIT_DEOPT` with the cause in `out[0]`.
+The library names `GRJIT_NATIVE_DEOPT` (leave compiled code; the interpreter continues
+after the call, as for a pause the native left pending or a nested run that left the
+state to the interpreter) and `GRJIT_NATIVE_UNWIND` (a guest unwind is in progress: the
+hook rebuilds only the survivors, `keep_frames`, and pops the rest without converting
+them, AD-27) and passes any other value through for the engine; **it never interprets a
+status beyond non-zero**. A refused rebuild is the fatal `GRJIT_EXIT_REBUILD_FAILED`, at
+both exits, and the tests show it with nothing written and the native run once (after)
+or never (before).
+
+**What the engine's hook does, played by the fixture.** For `UNWIND` it finds the nearest
+caller (not the frame that called the native, which is unwound too) whose function is a
+scope, rebuilds with `keep_frames` one past it, pops every frame above it and resumes it
+after its call with the scope's value; with no scope in the run nothing survives, and the
+hook pops down to, but not including, the run's entry frame, because `grcore_activation_leave`
+refuses to leave a rebuilt record with fewer guest frames than it began with: the entry
+frame goes after the record is left. A converting engine counts what was converted, and the
+test requires only the survivor's locals (4) for an unwind and all three frames' (8) for a
+`DEOPT` status.
+
+**What a native must do (AD-17, AD-23).** A native that can reach a GC point, which is
+every native a call reaches, holds each reference it was passed or creates only where the
+collector sees it: a registered root or handle, or its own C frame under a
+`GRCORE_ACTIVATION_NATIVE` record that gives that frame as a segment (conservative, so the
+object is pinned and not moved). It must not rely on an argument being updated: the
+arguments are copies in registers and on the stack, not roots, and the test that holds one
+across a collection without a record reads the collector's poison, which is also what shows
+that the pin in the test that has the record is the record's doing and not luck. **The
+library opens no activation record for a native**, because that would put a core call on every
+native call and a leaf-ish native needs none; and **a native called from compiled code pushes
+no guest frame**, because it is not a guest call (AD-28's "every guest call pushes" is about
+guest functions): an engine that wants a native record in its interpreter does it inside the
+shared wrapper, so both tiers do the same. A call extends no reservation and counts no guest
+depth, and the test requires the guest frame count, the guest depth and the reservation's
+capacity (a converting engine, so it is not zero) to be equal before and after ten native calls.
+The segment the fixture gives, and why no core helper makes it, is in `runtime-core`'s
+`design.md`.
+
+**Re-entry.** A native that runs guest code opens a `GRCORE_ACTIVATION_REENTRY` record
+(nested, so a pause verdict inside it becomes a limit unwind, AD-5) and, for compiled code,
+enters through the adapter as the engine does, with its own chain-end marker; the nested run's
+frames are walked from its own record, the cell having been moved into the record below at the
+native's first `grcore_activation_enter`, so a native that records an activation leaves the
+compiled run below it described. A nested run that deoptimizes rebuilds *its own* run, down to
+its own record; its frames return `DEOPTED` to its adapter, the native's wrapper finishes them in
+the interpreter, and the native returns `OK` or a status. The outer compiled frames are untouched
+until the native returns: the two-level test (a compiled chain of three, a native, a nested
+compiled chain of three whose native returns `DEOPT`) rebuilds the nested three only and the outer
+three finish compiled, and with `UNWIND` the nested run is unwound whole, the native under the
+outer chain returns `UNWIND`, and only the outer survivor is rebuilt. Code freed under a native:
+nested guest code that clears the entry slot of the outer function whose compiled frame waits
+under the native retires the code, which is released when the last JIT record leaves, not before
+(the early-free mutations of `runtime-core` are re-run against `testNatives` alone and are caught
+by it). The native-depth budget: a refused `grcore_activation_enter` makes the native return
+`UNWIND`, and a compiled outer run has one JIT record an interpreted one does not (AD-21), so the
+same nesting is reached with a budget one larger.
+
+**The pause**, as the fixture plays it: a native leaves a pause pending and returns `DEOPT`, the
+chain is rebuilt, the interpreter pauses at its next poll, and the run is resumed on another thread
+(`grcore_context_release` and `acquire`; under TSan the hand-over is what is checked) and prints what
+the uninterrupted run prints. Inside a nested run the same pending pause is a limit unwind: no pause
+reaches the host from inside, in either tier.
+
+**Rejected.** *Extending `CALL`* (above). *The status in a context word or in the poll's request word*:
+a second memory location every native must write and the call must read, and a stale value is a silent
+miss; a second return word is one `test rdx`. *No status*: a native could not report a fatal error or an
+unwind without a pending flag only the interpreter reads. *The library pushing a guest frame or opening
+an activation record per native*: a core call on every native, and most natives need neither. *Mapping
+the argument copies*: they are not roots, the native holds raw words, and a moving collector would
+update a copy that nothing reads. *A runtime-pointer native call*: a Wasm import is a descriptor known
+at instantiation; the address is a constant of the code, which is also why there is no run-time target
+check. *A walk start stored after the call*: a native's collection would find the previous call's
+(planted defect 15 shows exactly that, and the walk test reads it from inside the native).
+
+**Measured.** (2026-10-07, x86-64, GCC 14.2; the machine was loaded (load average 14, other
+sessions building), so only the rows beside each other mean anything; three runs, the best
+of them first, `make bench`'s minimum of five repeats, ns per loop iteration.) The same loop,
+`sum = inc(sum)`, in a callable function: the loop with no call 0.97 (1.13, 1.55 in the
+loaded runs); the existing `GRJIT_OP_CALL` to a leaf `NO_GC` helper 2.30 (4.05, 4.00);
+`CALL` as a `GC_POINT` (`loop-helper-gc`: the walk start stored, no check, no status)
+4.25 (4.45, 4.47); `CALL_NATIVE` without a status (`loop-native`) 4.25 (4.43, 4.39); with a
+status (`loop-native-status`) 4.62 (4.78, 5.58); a call and return between compiled
+functions through a slot (`loop-compiled-call`, hooks doing nothing) 6.07 (9.88, 10.38). So
+a native call over the loop's own work is about 3.3 ns, the same as the helper called as a
+GC point (the walk-start store and the C call are the cost; the stack check, three
+instructions and a predicted branch, does not show), about 1.0 more than the leaf helper that
+stores nothing, and the status costs about 0.4: a `test` and a branch on `rdx` and the
+second return word, which is the whole price of an error that is a value and never an
+unwinding through compiled code. Each loop checks that its sum is its iteration count. The
+cost of taking an exit (a status, or the stack check) is a `deopt` hook call and a chain
+rebuild, which is the engine's and is measured by its tests, not here.
+
 ## Gates
 
 `make check-labels` requires every header to carry exactly one `@stability free`
@@ -887,8 +1122,8 @@ library, over the `#include` lines and the shared object's `NEEDED` entries;
 refuses. `make check-gates` proves each by running the real scripts against a
 planted fixture that must fail, naming what it found, a control that must pass,
 and an empty tree that must fail rather than report success over nothing.
-`check-planted` is the same idea for the backend (including three planted defects of tail calls: the last stack argument not copied, the hook's site leaving the arguments area out of the stack map, no padding), and `check-planted-calls` for the call protocol: it plants, in a scratch copy, the defects of the story
-(a frame missed in a deep rebuild, an early free under a waiting frame, a short reservation, a status not tested after a call through a pointer, references left out of a call site's map, the walk start not stored, retired code entered, a token or an arity not checked, a refused rebuild not noticed, a derived argument not recorded; and for tail calls a refused hook ignored, the walk start not stored before the hook, the return address left where it was, the verifier not needing the hook) and requires a test of this library or of `runtime-core` to fail on each. Its verdicts are CAUGHT, MISSED, TIMEOUT and BUILD FAILED, and only the first is a catch; it runs the unplanted tree first and requires it to pass, and `--self-test` runs it against edits of known outcome (one that changes nothing, one that does not compile, one that hangs) so a harness that calls everything a catch fails. The direction gate is not
+`check-planted` is the same idea for the backend (including three planted defects of tail calls: the last stack argument not copied, the hook's site leaving the arguments area out of the stack map, no padding, and five of calls to natives: the walk start stored after the call, the stack arguments not popped, their area not rounded to sixteen, the native-stack check without that area, an argument one word too high), and `check-planted-calls` for the call protocol: it plants, in a scratch copy, the defects of the story
+(a frame missed in a deep rebuild, an early free under a waiting frame, a short reservation, a status not tested after a call through a pointer, references left out of a call site's map, the walk start not stored, retired code entered, a token or an arity not checked, a refused rebuild not noticed, a derived argument not recorded; and for tail calls a refused hook ignored, the walk start not stored before the hook, the return address left where it was, the verifier not needing the hook; and for calls to natives a status not tested, the status exit built from the state before the call, the result stored after the status test, the cause without the native bit, the stack area not rounded or the stack arguments not popped, an argument at the wrong offset, the references or the derived pointers left out of a native site's map, the stack check without the area or without the native's own use, the verifier not checking an arity, an argument's type, a destination's type or the state after a status call, and the two early frees of `runtime-core` run against `testNatives` alone) and requires a test of this library or of `runtime-core` to fail on each, the native ones each by `testNatives` or `testNative_ir` run alone. Its verdicts are CAUGHT, MISSED, TIMEOUT and BUILD FAILED, and only the first is a catch; it runs the unplanted tree first and requires it to pass, and `--self-test` runs it against edits of known outcome (one that changes nothing, one that does not compile, one that hangs) so a harness that calls everything a catch fails. The direction gate is not
 here: the headers are flat.
 
 ## Benchmarks
@@ -928,8 +1163,10 @@ numbers; the calibration row is what to read them against.
   through the `deopt` hook (above). Walking native frames for roots is
   `runtime-core`'s walk (`a/compiled.h`), which a callable function feeds by
   storing its walk start before every call that can reach a GC point.
-- **Calls and tail calls on arm64 and Win64**, and calls to natives: story 7 and
-  story 6 of the calls spec.
+- **Calls, tail calls and calls to natives on arm64 and Win64**: story 7 of the calls
+  spec. (A native with a floating-point or variadic signature cannot be described;
+  resumable natives, which are called only through an exit (AD-23), and the policy of
+  an opaque native under a pause are the engine's, story 9.)
 - **Windows arm64 and macOS.** No backend: `grjit_backend_available()` is false,
   `grjit_compile` returns `GRJIT_ERR_UNSUPPORTED`, and every test that needs
   compiled code is reported SKIPPED (`GRJIT_REQUIRE_BACKEND`), the encoders and
