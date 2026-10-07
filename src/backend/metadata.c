@@ -107,13 +107,12 @@ static size_t push_derived_args(const GRJIT_Function * f, const GRJIT_SiteRec * 
 }
 
 GRJIT_Result grjit_metadata_build(const GRJIT_Function * f,
-    const GRJIT_LiveSites * live, const GRJIT_SiteRec * recs, size_t count,
-    uint32_t frame_bytes, uint32_t code_bytes, const GRJIT_Allocator * a,
-    GRJIT_MetaStorage * out) {
+    const GRJIT_CallableShape * callable_shape, const GRJIT_LiveSites * live,
+    const GRJIT_SiteRec * recs, size_t count, uint32_t frame_bytes,
+    uint32_t code_bytes, const GRJIT_Allocator * a, GRJIT_MetaStorage * out) {
   memset(out, 0, sizeof *out);
   out->allocator = a;
-  GRJIT_CallableShape shape;
-  grjit_callable_shape(f, &shape);
+  const GRJIT_CallableShape shape = *callable_shape;
   size_t loc_total = 0;
   size_t der_total = 0;
   for (size_t i = 0; i < count; i++) {

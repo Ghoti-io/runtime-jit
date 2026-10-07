@@ -65,6 +65,19 @@ GRJIT_Arch grjit_native_arch(void) {
   return GRJIT_NATIVE;
 }
 
+/* The register arguments of a target's internal convention. */
+static unsigned internal_reg_args(GRJIT_Arch arch) {
+  switch (arch) {
+    case GRJIT_ARCH_ARM64:
+      return GRJIT_ARM64_INTERNAL_REG_ARGS;
+    case GRJIT_ARCH_X86_64_WIN64:
+      return GRJIT_WIN64_INTERNAL_REG_ARGS;
+    case GRJIT_ARCH_X86_64:
+      break;
+  }
+  return GRJIT_SYSV_INTERNAL_REG_ARGS;
+}
+
 bool grjit_backend_available(void) {
   return GRJIT_HAVE_BACKEND != 0;
 }
@@ -223,7 +236,7 @@ GRJIT_Result grjit_emit_for(GRJIT_Arch arch, const GRJIT_Function * function,
   /* Three fixed slots and one per register, rounded to keep the stack pointer
    * 16-aligned. */
   GRJIT_CallableShape shape;
-  grjit_callable_shape(function, &shape);
+  grjit_callable_shape(function, internal_reg_args(arch), &shape);
   size_t slots = function->vreg_count + GRJIT_FIXED_SLOTS + shape.extra_slots;
   size_t frame = (slots * 8 + 15) / 16 * 16;
   if (frame > limits.max_frame_bytes) {
@@ -264,7 +277,7 @@ GRJIT_Result grjit_emit_for(GRJIT_Arch arch, const GRJIT_Function * function,
   if (r != GRJIT_OK) {
     goto done;
   }
-  r = grjit_metadata_build(function, &live, recs, rec_count, (uint32_t)frame,
+  r = grjit_metadata_build(function, &shape, &live, recs, rec_count, (uint32_t)frame,
       (uint32_t)code_bytes, a, &out->meta);
   if (r != GRJIT_OK) {
     goto done;

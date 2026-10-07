@@ -38,10 +38,11 @@
 #include <string.h>
 
 void grjit_emit_common_init(GRJIT_EmitCommon * c, const GRJIT_Function * f,
-    const GRJIT_Allocator * allocator, GRJIT_EntryHook hook,
+    unsigned reg_args, const GRJIT_Allocator * allocator, GRJIT_EntryHook hook,
     uint32_t request_offset, uint32_t frame_bytes, const GRJIT_LiveSites * live) {
   memset(c, 0, sizeof *c);
   c->f = f;
+  c->reg_args = reg_args;
   c->allocator = allocator;
   c->frame_bytes = frame_bytes;
   c->request_offset = request_offset;
@@ -53,17 +54,18 @@ void grjit_emit_common_init(GRJIT_EmitCommon * c, const GRJIT_Function * f,
     const GRCORE_JitLayout * layout = grcore_jit_layout();
     c->walk_cell_offset = layout->walk_cell_offset;
     c->native_limit_offset = layout->native_limit_offset;
-    grjit_callable_shape(f, &c->shape);
+    grjit_callable_shape(f, reg_args, &c->shape);
   }
 }
 
-void grjit_callable_shape(const GRJIT_Function * f, GRJIT_CallableShape * out) {
+void grjit_callable_shape(
+    const GRJIT_Function * f, unsigned reg_args, GRJIT_CallableShape * out) {
   memset(out, 0, sizeof *out);
   if (!f->callable) {
     return;
   }
   /* Whole 16-byte units, so the stack stays 16-aligned across the call. */
-  out->incoming_bytes = grjit_stack_arg_bytes(f->param_count);
+  out->incoming_bytes = grjit_stack_arg_bytes(f->param_count, reg_args);
   for (size_t b = 0; b < f->block_count; b++) {
     for (size_t i = 0; i < f->blocks[b].count; i++) {
       const GRJIT_Op * op = &f->blocks[b].ops[i];
@@ -79,7 +81,7 @@ void grjit_callable_shape(const GRJIT_Function * f, GRJIT_CallableShape * out) {
          * the area, which holds the sources, must end at or below it: the area
          * ends `pad + vreg_count + 3` slots below the frame base and `ra'` is
          * `8 + in_A - in_T` above it. */
-        int64_t in_t = grjit_stack_arg_bytes(op->arg_count);
+        int64_t in_t = grjit_stack_arg_bytes(op->arg_count, reg_args);
         int64_t want = (in_t - (int64_t)out->incoming_bytes) / 8 - ((int64_t)f->vreg_count + 4);
 #if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 13
         /* Planted defect 13 (tests only): no padding, so the staging area

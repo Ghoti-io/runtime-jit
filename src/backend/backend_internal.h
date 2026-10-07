@@ -133,8 +133,13 @@ typedef struct GRJIT_SiteRec {
 #define GRJIT_ENTRY_TAG_WORD(params) \
   ((UINT64_C(0x4752494E) << 32) | (uint64_t)(uint32_t)(params))
 #define GRJIT_ENTRY_TAG_BYTES 16u
-/** The most arguments passed in registers by the internal convention. */
-#define GRJIT_INTERNAL_REG_ARGS 6u
+/** The most arguments an internal convention passes in registers, by target:
+ *  `rdi, rsi, rdx, rcx, r8, r9` on x86-64 SysV, `x0`-`x7` on arm64. (Win64's,
+ *  four, is story 7b's; the shape and the stack-argument area take the count as
+ *  a parameter so that each backend's own is the one used.) */
+#define GRJIT_SYSV_INTERNAL_REG_ARGS 6u
+#define GRJIT_ARM64_INTERNAL_REG_ARGS 8u
+#define GRJIT_WIN64_INTERNAL_REG_ARGS 4u
 
 /** How a callable function's frame is shaped. */
 typedef struct GRJIT_CallableShape {
@@ -149,11 +154,12 @@ typedef struct GRJIT_CallableShape {
   uint32_t incoming_bytes; ///< Bytes of stack arguments its callers push.
 } GRJIT_CallableShape;
 
-/** The bytes of stack arguments the internal convention puts above the
- *  return address for `n` arguments: the ones past the sixth, in whole 16-byte
- *  units so the stack stays aligned. */
-static inline uint32_t grjit_stack_arg_bytes(size_t n) {
-  size_t stack_args = n > GRJIT_INTERNAL_REG_ARGS ? n - GRJIT_INTERNAL_REG_ARGS : 0;
+/** The bytes of stack arguments the internal convention puts for `n` arguments
+ *  when `reg_args` of them travel in registers (the target's count): the rest, in
+ *  whole 16-byte units so the stack stays aligned. They are above the return
+ *  address on x86-64 and at the stack pointer at the call on arm64. */
+static inline uint32_t grjit_stack_arg_bytes(size_t n, unsigned reg_args) {
+  size_t stack_args = n > reg_args ? n - reg_args : 0;
   return (uint32_t)((stack_args * 8 + 15) / 16 * 16);
 }
 
@@ -168,8 +174,9 @@ static inline uint32_t grjit_stack_arg_bytes(size_t n) {
 uint32_t grjit_call_target_ok(
     void * context, uint64_t target, uint64_t callee, uint64_t arg_count);
 
-/** The shape of `f`, which need not be callable (then all zero). */
-void grjit_callable_shape(const GRJIT_Function * f, GRJIT_CallableShape * out);
+/** The shape of `f`, which need not be callable (then all zero), for a target
+ *  whose internal convention passes `reg_args` arguments in registers. */
+void grjit_callable_shape(const GRJIT_Function * f, unsigned reg_args, GRJIT_CallableShape * out);
 
 /** The frame offset of argument `k` in the arguments area of a function with
  *  `vreg_count` registers and `area` slots in it: the area follows the registers'
@@ -205,6 +212,7 @@ typedef struct GRJIT_Pending {
 /** The part of a compile's state that is the same for every backend. */
 typedef struct GRJIT_EmitCommon {
   const GRJIT_Function * f;
+  unsigned reg_args;           ///< Register arguments of the internal convention.
   const GRJIT_Allocator * allocator;
   uint32_t frame_bytes;
   uint32_t request_offset;
@@ -226,7 +234,7 @@ typedef struct GRJIT_EmitCommon {
 
 /** Starts a compile's common state (zeroes it, then fills it). */
 void grjit_emit_common_init(GRJIT_EmitCommon * c, const GRJIT_Function * f,
-    const GRJIT_Allocator * allocator, GRJIT_EntryHook hook,
+    unsigned reg_args, const GRJIT_Allocator * allocator, GRJIT_EntryHook hook,
     uint32_t request_offset, uint32_t frame_bytes, const GRJIT_LiveSites * live);
 
 /** Records a site at `offset`. Sets `error` on out-of-memory. */
@@ -261,9 +269,9 @@ typedef struct GRJIT_MetaStorage {
 /** Builds the table from the recorded sites, which must be sorted by offset.
  *  On failure nothing is left allocated. */
 GRJIT_Result grjit_metadata_build(const GRJIT_Function * function,
-    const GRJIT_LiveSites * live, const GRJIT_SiteRec * recs, size_t count,
-    uint32_t frame_bytes, uint32_t code_bytes, const GRJIT_Allocator * allocator,
-    GRJIT_MetaStorage * out);
+    const GRJIT_CallableShape * shape, const GRJIT_LiveSites * live,
+    const GRJIT_SiteRec * recs, size_t count, uint32_t frame_bytes,
+    uint32_t code_bytes, const GRJIT_Allocator * allocator, GRJIT_MetaStorage * out);
 
 /** Frees what ::grjit_metadata_build allocated. */
 void grjit_metadata_free(GRJIT_MetaStorage * storage);

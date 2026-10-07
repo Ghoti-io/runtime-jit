@@ -30,6 +30,12 @@
 
 using namespace fx;
 
+#if FX_ASM_AARCH64
+static_assert(kInternalRegArgs == GRJIT_ARM64_INTERNAL_REG_ARGS, "the test's count is the library's");
+#else
+static_assert(kInternalRegArgs == GRJIT_SYSV_INTERNAL_REG_ARGS, "the test's count is the library's");
+#endif
+
 /* Native calls are emitted for x86-64 SysV only (arm64 and Win64 are story 7's).
  * Where they are not, the suite does not skip, which would count as tests that
  * proved nothing: it shows the refusal instead, which is what those targets
@@ -2799,7 +2805,7 @@ TEST(Natives, AReferenceAndADerivedPointerLiveAcrossANativeInAFramePaddedForAWid
   {
     GRJIT_Function * f = e.build_ir(narrow);
     GRJIT_CallableShape shape;
-    grjit_callable_shape(f, &shape);
+    grjit_callable_shape(f, kInternalRegArgs, &shape);
     EXPECT_GT(shape.pad, 0u) << "a no-parameter caller of a sixteen-argument callee needs padding";
     grjit_function_destroy(f);
   }

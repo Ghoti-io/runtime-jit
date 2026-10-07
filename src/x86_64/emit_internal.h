@@ -48,10 +48,50 @@
 extern "C" {
 #endif
 
+/** The registers of the internal convention between compiled functions
+ *  (backend_internal.h): the arguments, the context, and the scratch registers
+ *  the call and tail-call sequences are written against. */
+typedef struct GRJIT_X86Internal {
+  const GRJIT_Reg * args;   ///< The register arguments, in order.
+  unsigned reg_args;        ///< How many (`GRJIT_*_INTERNAL_REG_ARGS`).
+  GRJIT_Reg ctx;            ///< The context, caller-saved and no argument register.
+  GRJIT_Reg scratch;        ///< A register no argument uses: the tail call's return
+                            ///< address and entry, the adapter's pointer to `args`.
+  GRJIT_Reg tail_copy;      ///< The temporary a tail call copies a stack argument through.
+  GRJIT_Reg status;         ///< The status the callee returns (the result is `rax`).
+  GRJIT_Reg c_ret2;         ///< Where a C callee puts the second word of a two-word
+                            ///< result (a native's status): `rdx`.
+} GRJIT_X86Internal;
+
+/** One x86-64 calling convention's registers: the C ABI's, which a helper, a
+ *  hook or a native is called by, and the internal convention's, which a
+ *  callable function is written against. Win64 has the C column and no internal
+ *  one (`internal` is NULL) until story 7b; a callable function is refused for
+ *  it before the emitter runs. */
+typedef struct GRJIT_X86Abi {
+  const GRJIT_Reg * c_args;        ///< The C ABI's integer argument registers.
+  unsigned c_reg_args;             ///< How many.
+  uint32_t shadow_bytes;           ///< The callee's shadow space, which is where the first
+                                   ///< C stack argument is at `rsp`: 32 on Win64, else 0.
+  const GRJIT_X86Internal * internal;
+} GRJIT_X86Abi;
+
+extern const GRJIT_X86Abi grjit_x86_abi_sysv;
+extern const GRJIT_X86Abi grjit_x86_abi_win64;
+
+/** The `k`th C-ABI argument register, an internal-convention argument register, the
+ *  context register and the status register of an emitter `e`. */
+#define C_ARG(e, k) ((e)->abi->c_args[k])
+#define IARG(e, k) ((e)->abi->internal->args[k])
+#define ICTX(e) ((e)->abi->internal->ctx)
+#define ISCRATCH(e) ((e)->abi->internal->scratch)
+#define ISTATUS(e) ((e)->abi->internal->status)
+
 /** One compile's state: the common part, the assembler and the labels. */
 typedef struct GRJIT_Emit {
   GRJIT_EmitCommon c;
   GRJIT_Asm as;
+  const GRJIT_X86Abi * abi; ///< The target's registers.
   GRJIT_Label * blocks;
   GRJIT_Label refuse;
   bool win64;              ///< The Microsoft x64 flavour (see ::GRJIT_WIN64_OUTGOING).

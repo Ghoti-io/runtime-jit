@@ -69,6 +69,15 @@ constexpr uint64_t kNativeEntrySpBias = 8;
 constexpr uint64_t kNativeEntrySpBias = 0;
 #endif
 
+/** The register arguments of the internal convention between compiled functions
+ *  on this target (the library's `GRJIT_*_INTERNAL_REG_ARGS`; the tests that include
+ *  `backend_internal.h` assert they agree). */
+#if FX_ASM_AARCH64
+constexpr unsigned kInternalRegArgs = 8;
+#else
+constexpr unsigned kInternalRegArgs = 6;
+#endif
+
 /** The register words an AAPCS64 or SysV C callee can receive in registers,
  *  counting the context (which is a native's first): six on x86-64 SysV, eight on
  *  arm64. */

@@ -61,7 +61,7 @@ void grjit_emit_callable_epilogue(GRJIT_Emit * e) {
 void grjit_emit_ret_status(GRJIT_Emit * e) {
   GRJIT_Asm * a = &e->as;
   grjit_asm_bind(a, e->ret_failed);
-  grjit_asm_mov_ri(a, GRJIT_RDX, GRJIT_STATUS_FAILED);
+  grjit_asm_mov_ri(a, ISTATUS(e), GRJIT_STATUS_FAILED);
   grjit_asm_bind(a, e->ret_propagate);
   grjit_emit_callable_epilogue(e);
 }
@@ -70,16 +70,16 @@ void grjit_emit_ret_deopted(GRJIT_Emit * e) {
   GRJIT_Asm * a = &e->as;
   grjit_asm_bind(a, e->ret_deopted);
   /* `rax` is the cause, and every frame returns it unchanged. */
-  grjit_asm_mov_ri(a, GRJIT_RDX, GRJIT_STATUS_DEOPTED);
+  grjit_asm_mov_ri(a, ISTATUS(e), GRJIT_STATUS_DEOPTED);
   grjit_emit_callable_epilogue(e);
 }
 
 /* The deopt hook (ctx, cause) after the walk start is stored for the site that
- * ends at `ret_label`; the cause is in `rsi` already. */
+ * ends at `ret_label`; the cause is in the second C argument register already. */
 static void call_deopt_hook(GRJIT_Emit * e, GRJIT_Label ret_label) {
   GRJIT_Asm * a = &e->as;
   grjit_emit_store_walk_cell(e, ret_label);
-  grjit_asm_mov_rr(a, GRJIT_RDI, GRJIT_RCX);
+  grjit_asm_mov_rr(a, C_ARG(e, 0), GRJIT_RCX);
   grjit_asm_mov_ri(a, GRJIT_RAX, (uint64_t)(uintptr_t)e->c.f->hooks.deopt);
   grjit_asm_call_r(a, GRJIT_RAX);
   /* A refusal of the rebuild (non-zero) is not a deoptimization: every frame
@@ -97,8 +97,8 @@ void grjit_emit_call_slow_stub(GRJIT_Emit * e, const GRJIT_Pending * p) {
    * the callee and install it in the slot. */
   grjit_asm_cmp_ri(a, GRJIT_RAX, (int32_t)GRCORE_ENTRY_REFUSED);
   grjit_asm_jcc(a, GRJIT_COND_E, p->exit);
-  grjit_asm_load64(a, GRJIT_RDI, GRJIT_RBP, GRJIT_SLOT_CTX);
-  grjit_asm_mov_ri(a, GRJIT_RSI, p->op->callee);
+  grjit_asm_load64(a, C_ARG(e, 0), GRJIT_RBP, GRJIT_SLOT_CTX);
+  grjit_asm_mov_ri(a, C_ARG(e, 1), p->op->callee);
   grjit_asm_mov_ri(a, GRJIT_RAX, (uint64_t)(uintptr_t)e->c.f->hooks.compile);
   grjit_asm_call_r(a, GRJIT_RAX);
   grjit_asm_mov32_rr(a, GRJIT_RAX, GRJIT_RAX);
@@ -122,7 +122,7 @@ void grjit_emit_call_exit_stub(GRJIT_Emit * e, const GRJIT_Pending * p) {
   const GRJIT_FrameState * state = &e->c.f->states[exit_state];
   grjit_asm_bind(a, p->entry);
   GRJIT_Label ret = grjit_asm_label(a);
-  grjit_asm_mov_ri(a, GRJIT_RSI, 0);
+  grjit_asm_mov_ri(a, C_ARG(e, 1), 0);
   call_deopt_hook(e, ret);
   grjit_asm_bind(a, ret);
   /* The exit is a site like a guard's, at the return address of the hook call:
@@ -142,7 +142,7 @@ void grjit_emit_native_exit_stub(GRJIT_Emit * e, const GRJIT_Pending * p) {
   const GRJIT_FrameState * state = &e->c.f->states[p->op->state];
   grjit_asm_bind(a, p->entry);
   GRJIT_Label ret = grjit_asm_label(a);
-  grjit_asm_mov_ri(a, GRJIT_RSI, 0);
+  grjit_asm_mov_ri(a, C_ARG(e, 1), 0);
   call_deopt_hook(e, ret);
   grjit_asm_bind(a, ret);
   grjit_emit_add_site(&e->c, (uint32_t)grjit_asm_size(a), GRCORE_SITE_GUARD,
@@ -162,10 +162,10 @@ void grjit_emit_native_status_stub(GRJIT_Emit * e, const GRJIT_Pending * p) {
   const GRJIT_FrameState * state = &e->c.f->states[p->op->exit_state];
   grjit_asm_bind(a, p->entry);
   GRJIT_Label ret = grjit_asm_label(a);
-  grjit_asm_mov32_rr(a, GRJIT_RSI, GRJIT_RDX);
+  grjit_asm_mov32_rr(a, C_ARG(e, 1), e->abi->internal->c_ret2);
   grjit_asm_mov_ri(a, GRJIT_RAX, GRJIT_CAUSE_NATIVE);
-  grjit_asm_alu_rr(a, GRJIT_ALU_OR, GRJIT_RSI, GRJIT_RAX);
-  grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_OUT, GRJIT_RSI);
+  grjit_asm_alu_rr(a, GRJIT_ALU_OR, C_ARG(e, 1), GRJIT_RAX);
+  grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_OUT, C_ARG(e, 1));
   call_deopt_hook(e, ret);
   grjit_asm_bind(a, ret);
   grjit_emit_add_site(&e->c, (uint32_t)grjit_asm_size(a), GRCORE_SITE_GUARD,
@@ -189,24 +189,24 @@ void grjit_emit_overflow_stub(GRJIT_Emit * e) {
   grjit_asm_mov_ri64(a, GRJIT_RAX, (uint64_t)GRCORE_COMPILED_CHAIN_END);
   grjit_asm_alu_rr(a, GRJIT_ALU_CMP, GRJIT_RCX, GRJIT_RAX);
   grjit_asm_jcc(a, GRJIT_COND_E, none);
-  grjit_asm_store64(a, GRJIT_R10, (int32_t)e->c.walk_cell_offset, GRJIT_RCX);
+  grjit_asm_store64(a, ICTX(e), (int32_t)e->c.walk_cell_offset, GRJIT_RCX);
   grjit_asm_load64(a, GRJIT_RCX, GRJIT_RBP, 8);
-  grjit_asm_store64(a, GRJIT_R10, (int32_t)e->c.walk_cell_offset + 8, GRJIT_RCX);
+  grjit_asm_store64(a, ICTX(e), (int32_t)e->c.walk_cell_offset + 8, GRJIT_RCX);
   grjit_asm_jmp(a, go);
   grjit_asm_bind(a, none);
   grjit_asm_mov_ri(a, GRJIT_RCX, 0);
-  grjit_asm_store64(a, GRJIT_R10, (int32_t)e->c.walk_cell_offset, GRJIT_RCX);
-  grjit_asm_store64(a, GRJIT_R10, (int32_t)e->c.walk_cell_offset + 8, GRJIT_RCX);
+  grjit_asm_store64(a, ICTX(e), (int32_t)e->c.walk_cell_offset, GRJIT_RCX);
+  grjit_asm_store64(a, ICTX(e), (int32_t)e->c.walk_cell_offset + 8, GRJIT_RCX);
   grjit_asm_bind(a, go);
-  grjit_asm_mov_rr(a, GRJIT_RDI, GRJIT_R10);
-  grjit_asm_mov_ri(a, GRJIT_RSI, 0);
+  grjit_asm_mov_rr(a, C_ARG(e, 0), ICTX(e));
+  grjit_asm_mov_ri(a, C_ARG(e, 1), 0);
   grjit_asm_mov_ri(a, GRJIT_RAX, (uint64_t)(uintptr_t)e->c.f->hooks.deopt);
   grjit_asm_call_r(a, GRJIT_RAX);
   grjit_asm_mov32_rr(a, GRJIT_RAX, GRJIT_RAX);
   grjit_asm_test_rr(a, GRJIT_RAX, GRJIT_RAX);
   grjit_asm_jcc(a, GRJIT_COND_NE, e->ret_failed);
   grjit_asm_mov_ri(a, GRJIT_RAX, 0);
-  grjit_asm_mov_ri(a, GRJIT_RDX, GRJIT_STATUS_DEOPTED);
+  grjit_asm_mov_ri(a, ISTATUS(e), GRJIT_STATUS_DEOPTED);
   grjit_emit_callable_epilogue(e);
 }
 
@@ -220,9 +220,9 @@ void grjit_emit_poll_stub(GRJIT_Emit * e, const GRJIT_Pending * p) {
     GRJIT_Label deopt = grjit_asm_label(a);
     grjit_asm_bind(a, p->entry);
     grjit_emit_store_walk_cell(e, ret);
-    grjit_asm_mov_rr(a, GRJIT_RDI, GRJIT_RCX);
-    grjit_asm_mov_ri(a, GRJIT_RSI, state->identity.function);
-    grjit_asm_mov_ri(a, GRJIT_RDX, state->identity.offset);
+    grjit_asm_mov_rr(a, C_ARG(e, 0), GRJIT_RCX);
+    grjit_asm_mov_ri(a, C_ARG(e, 1), state->identity.function);
+    grjit_asm_mov_ri(a, C_ARG(e, 2), state->identity.offset);
     grjit_asm_mov_ri(a, GRJIT_RAX, (uint64_t)(uintptr_t)e->c.f->poll_helper);
     grjit_asm_call_r(a, GRJIT_RAX);
     grjit_asm_bind(a, ret);
@@ -239,7 +239,7 @@ void grjit_emit_poll_stub(GRJIT_Emit * e, const GRJIT_Pending * p) {
      * the slot the callable frame does not otherwise use. */
     grjit_asm_bind(a, deopt);
     grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_OUT, GRJIT_RAX);
-    grjit_asm_mov_rr(a, GRJIT_RSI, GRJIT_RAX);
+    grjit_asm_mov_rr(a, C_ARG(e, 1), GRJIT_RAX);
     call_deopt_hook(e, ret);
     grjit_asm_load64(a, GRJIT_RAX, GRJIT_RBP, GRJIT_SLOT_OUT);
     grjit_asm_jmp(a, e->ret_deopted);
@@ -278,7 +278,7 @@ void grjit_emit_guard_stub(GRJIT_Emit * e, const GRJIT_Pending * p) {
      * is at the return address of the hook call. */
     GRJIT_Label ret = grjit_asm_label(a);
     grjit_asm_bind(a, p->entry);
-    grjit_asm_mov_ri(a, GRJIT_RSI, 0);
+    grjit_asm_mov_ri(a, C_ARG(e, 1), 0);
     call_deopt_hook(e, ret);
     grjit_asm_bind(a, ret);
     grjit_emit_add_site(&e->c, (uint32_t)grjit_asm_size(a), GRCORE_SITE_GUARD,

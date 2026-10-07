@@ -363,7 +363,8 @@ static void reset_pass(GRJIT_A64Emit * e, const GRJIT_Function * f,
   e->blocks = NULL;
   grjit_a64_free(&e->as);
   grjit_emit_common_free(&e->c);
-  grjit_emit_common_init(&e->c, f, allocator, hook, request_offset, frame_bytes, live);
+  grjit_emit_common_init(&e->c, f, GRJIT_ARM64_INTERNAL_REG_ARGS, allocator, hook,
+      request_offset, frame_bytes, live);
 }
 
 GRJIT_Result grjit_a64_emit_function(const GRJIT_Function * f,
@@ -371,7 +372,8 @@ GRJIT_Result grjit_a64_emit_function(const GRJIT_Function * f,
     GRJIT_EntryHook hook, uint32_t request_offset, uint32_t frame_bytes,
     const GRJIT_LiveSites * live, GRJIT_A64Emit * e) {
   memset(e, 0, sizeof *e);
-  grjit_emit_common_init(&e->c, f, allocator, hook, request_offset, frame_bytes, live);
+  grjit_emit_common_init(&e->c, f, GRJIT_ARM64_INTERNAL_REG_ARGS, allocator, hook,
+      request_offset, frame_bytes, live);
   GRJIT_Result r = emit_pass(f, e, max_code_bytes, false);
   if (r == GRJIT_ERR_INTERNAL && grjit_a64_status(&e->as) == GRJIT_A64_FAR) {
     /* Some forward conditional branch is more than 1 MiB from its label. */
