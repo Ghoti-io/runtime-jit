@@ -455,6 +455,53 @@ TEST(NativeIr, EveryRefusalNamesTheOperationAndWhatIsWrong) {
   EXPECT_EQ(ok.first, GRJIT_OK) << ok.second;
 }
 
+TEST(NativeIr, TheStateAfterANativeCallIsCheckedForDefiniteAssignmentExceptTheResultTheCallAssigns) {
+  NativeTab t;
+  uint32_t stat = t.add(reinterpret_cast<const void *>(n_status), {TI}, TR, GRJIT_NATIVE_STATUS);
+  // A register nothing assigned, named only by the state after the call: refused.
+  auto unassigned = check(t, [&](B & b, Regs g) {
+    GRJIT_VReg late = b.reg(TR);
+    GRJIT_VReg res = b.reg(TR);
+    auto after = g.state();
+    after[1] = grjit_frame_slot_vreg(late);
+    b.call_native(res, stat, {V(g.x)}, kId, g.state(), kAfter, after);
+  });
+  EXPECT_EQ(unassigned.first, GRJIT_ERR_INVALID);
+  EXPECT_NE(unassigned.second.find("may not have been assigned"), std::string::npos) << unassigned.second;
+  // The result, which only the call assigns, named by the state after it: accepted (the value just stored).
+  auto result_only = check(t, [&](B & b, Regs g) {
+    GRJIT_VReg res = b.reg(TR);
+    auto after = g.state();
+    after[1] = grjit_frame_slot_vreg(res);
+    b.call_native(res, stat, {V(g.x)}, kId, g.state(), kAfter, after);
+  });
+  EXPECT_EQ(result_only.first, GRJIT_OK) << result_only.second;
+  // The same register named by the state BEFORE the call is not assigned yet there: refused.
+  auto before_names_it = check(t, [&](B & b, Regs g) {
+    GRJIT_VReg res = b.reg(TR);
+    auto before = g.state();
+    before[1] = grjit_frame_slot_vreg(res);
+    b.call_native(res, stat, {V(g.x)}, kId, before, kAfter, g.state());
+  });
+  EXPECT_EQ(before_names_it.first, GRJIT_ERR_INVALID);
+  // A register assigned only on one path, named by the state after the call: refused.
+  auto one_path = check(t, [&](B & b, Regs g) {
+    GRJIT_VReg some = b.reg(TR);
+    GRJIT_BlockId yes = b.block(), no = b.block(), join = b.block();
+    b.br_if(V(g.x), yes, no);
+    b.at(yes);
+    b.mov(some, V(g.r));
+    b.br(join);
+    b.at(no);
+    b.br(join);
+    b.at(join);
+    auto after = g.state();
+    after[1] = grjit_frame_slot_vreg(some);
+    b.call_native(GRJIT_NO_VREG, stat, {V(g.x)}, kId, g.state(), kAfter, after);
+  });
+  EXPECT_EQ(one_path.first, GRJIT_ERR_INVALID) << one_path.second;
+}
+
 TEST(NativeIr, ANativeCallNeedsACallableFunctionATableAndTheDeoptHook) {
   NativeTab t;
   uint32_t plain = t.add(reinterpret_cast<const void *>(n_plain), {}, TI);
