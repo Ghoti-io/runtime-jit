@@ -23,6 +23,13 @@
  * holds the claim that adding them left every byte of such a function as it
  * was. It is emitted for x86-64 SysV only, the one target that has calls.
  *
+ * A fifth covers callable functions with calls to natives (story 6): one for
+ * every combination of a parameter count, a native's arity, its status and its
+ * result type, in two shapes, measured after the emitter landed. It holds the
+ * claim that the bytes of a native call, and of everything around one, do not
+ * change without a commit that says why. The other two targets refuse such a
+ * function before a byte, which the same test shows for each.
+ *
  * Copyright 2026 by Corey Pennycuff
  */
 
@@ -197,6 +204,144 @@ Pin callable_pin(unsigned * pointer_calls) {
   return pin;
 }
 
+/* ---- Callable functions with calls to natives -------------------------------
+ *
+ * Parameters rotate through I64, REF and PTR; the native's parameters do too, so
+ * every argument is a register of the type the descriptor wants, or an immediate.
+ * The shapes: a call and a return; and a guard, a poll, a derived pointer and a
+ * reference live across the call, the result tested and a branch. The descriptors'
+ * addresses are made up (nothing is run) and their stack use varies. */
+
+constexpr unsigned kNativeParams[] = {0, 1, 3, 7};
+constexpr unsigned kNativeArgs[] = {0, 1, 4, 5, 6, 7, 10, 16};
+
+Pin native_pin(unsigned * functions, bool * all_refused_elsewhere) {
+  Pin pin;
+  unsigned id = 0;
+  GRJIT_CallHooks hooks{};
+  hooks.push = reinterpret_cast<decltype(hooks.push)>(0x30000);
+  hooks.pop = reinterpret_cast<decltype(hooks.pop)>(0x30100);
+  hooks.compile = reinterpret_cast<decltype(hooks.compile)>(0x30200);
+  hooks.deopt = reinterpret_cast<decltype(hooks.deopt)>(0x30300);
+  *all_refused_elsewhere = true;
+  for (unsigned params : kNativeParams) {
+    for (unsigned args : kNativeArgs) {
+      for (unsigned status = 0; status < 2; status++) {
+        for (unsigned result = 0; result < 4; result++) { // none, I64, REF, PTR
+          for (unsigned variant = 0; variant < 2; variant++, id++) {
+            const GRJIT_Type rotate[3] = {GRJIT_TYPE_I64, GRJIT_TYPE_REF, GRJIT_TYPE_PTR};
+            std::vector<GRJIT_Type> types;
+            for (unsigned i = 0; i < args; i++) {
+              types.push_back(rotate[(i + id) % 3]);
+            }
+            NativeTab t;
+            GRJIT_Type rt = result == 0 ? GRJIT_NATIVE_NO_RESULT : rotate[result - 1];
+            uint32_t nid = t.add(reinterpret_cast<const void *>(0x60000 + 16 * static_cast<uintptr_t>(id)), types, rt,
+                status != 0 ? GRJIT_NATIVE_STATUS : 0, (id % 5) * 100);
+            B b("pin", 4);
+            b.callable(hooks);
+            b.natives(t);
+            EXPECT_EQ(grjit_builder_set_token(b.b, 2000 + id), GRJIT_OK);
+            b.poll_helper(kFakePoll);
+            std::vector<GRJIT_VReg> p;
+            for (unsigned i = 0; i < params; i++) {
+              p.push_back(b.param(rotate[i % 3]));
+            }
+            GRJIT_VReg dst = rt == GRJIT_NATIVE_NO_RESULT ? GRJIT_NO_VREG : b.reg(rt);
+            GRJIT_VReg flag = b.reg(GRJIT_TYPE_I64);
+            GRJIT_VReg d = GRJIT_NO_VREG;
+            if (variant == 1 && params >= 2) {
+              d = b.reg(GRJIT_TYPE_PTR);
+              b.derived(d, p[1], 24);
+            }
+            GRJIT_BlockId b0 = b.block();
+            GRJIT_BlockId b1 = variant == 1 ? b.block() : 0;
+            GRJIT_BlockId b2 = variant == 1 ? b.block() : 0;
+            b.at(b0);
+            b.cnst(flag, 1);
+            const GRCORE_PollIdentity at{2, id};
+            const GRCORE_PollIdentity after{2, id + 1};
+            std::vector<GRJIT_FrameSlot> state = {grjit_frame_slot_constant(id),
+                params > 0 ? grjit_frame_slot_vreg(p[0]) : grjit_frame_slot_dead(),
+                params > 1 ? grjit_frame_slot_vreg(p[1]) : grjit_frame_slot_dead(),
+                dst != GRJIT_NO_VREG && dst < params ? grjit_frame_slot_vreg(dst) : grjit_frame_slot_dead()};
+            std::vector<GRJIT_FrameSlot> after_state = state;
+            after_state[0] = grjit_frame_slot_constant(id + 1);
+            if (dst != GRJIT_NO_VREG) {
+              after_state[3] = grjit_frame_slot_vreg(dst);
+            }
+            if (variant == 1) {
+              if (params > 0) {
+                b.guard(V(flag), at, state);
+              }
+              b.poll(at, state);
+              if (d != GRJIT_NO_VREG) {
+                b.bitcast(d, p[1]);
+                b.bin(GRJIT_OP_ADD, d, V(d), I(24));
+              }
+            }
+            std::vector<GRJIT_Operand> ops;
+            for (unsigned i = 0; i < args; i++) {
+              // A register of the right type if there is one, or an immediate.
+              GRJIT_Operand o = I(static_cast<int64_t>(i) * 5 + 2);
+              for (unsigned q = 0; q < params; q++) {
+                if (rotate[q % 3] == types[i] && (q + i) % 2 == 0) {
+                  o = V(p[q]);
+                  break;
+                }
+              }
+              if (i == 0 && d != GRJIT_NO_VREG && types[i] == GRJIT_TYPE_PTR) {
+                o = V(d);
+              }
+              ops.push_back(o);
+            }
+            if (status != 0) {
+              b.call_native(dst, nid, ops, at, state, after, after_state);
+            } else {
+              b.call_native(dst, nid, ops, at, state);
+            }
+            if (variant == 1) {
+              b.br_if(V(flag), b1, b2);
+              b.at(b1);
+              b.ret(dst != GRJIT_NO_VREG ? V(dst) : I(1));
+              b.at(b2);
+              b.ret(I(0));
+            } else {
+              b.ret(dst != GRJIT_NO_VREG ? V(dst) : I(1));
+            }
+            Fn f(b.finish());
+            char why[256];
+            EXPECT_EQ(grjit_function_verify(f, nullptr, why, sizeof why), GRJIT_OK) << id << why;
+            GRJIT_Emitted e;
+            GRJIT_Result res = grjit_emit_for(GRJIT_ARCH_X86_64, f, grjit_allocator_default(),
+                nullptr, nullptr, kRequestOffset, &e);
+            EXPECT_EQ(res, GRJIT_OK) << "function " << id << ": " << grjit_result_string(res);
+            if (res != GRJIT_OK) {
+              return pin;
+            }
+            for (size_t i = 0; i < e.size; i++) {
+              pin.hash = fold(pin.hash, e.bytes[i]);
+            }
+            pin.hash = fold(pin.hash, 0xFF);
+            pin.bytes += e.size;
+            grjit_emitted_free(&e);
+            for (GRJIT_Arch arch : {GRJIT_ARCH_ARM64, GRJIT_ARCH_X86_64_WIN64}) {
+              GRJIT_Emitted other;
+              if (grjit_emit_for(arch, f, grjit_allocator_default(), nullptr, nullptr, kRequestOffset, &other) !=
+                      GRJIT_ERR_UNSUPPORTED ||
+                  other.size != 0 || other.bytes != nullptr) {
+                *all_refused_elsewhere = false;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  *functions = id;
+  return pin;
+}
+
 } // namespace
 
 TEST(Pin, TheX86_64CodeOfTheGeneratedFunctionsIsByteForByteWhatWasRecorded) {
@@ -218,6 +363,20 @@ TEST(Pin, TheX86_64CodeOfCallableFunctionsWithCallsAndNoTailCallIsByteForByteWha
       static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
   EXPECT_EQ(pin.hash, 0x799b28304ef83871ull) << pin.bytes << " bytes";
   EXPECT_EQ(pin.bytes, 285044u);
+}
+
+TEST(Pin, TheX86_64CodeOfCallableFunctionsWithCallsToNativesIsByteForByteWhatWasRecorded) {
+  /* Measured after the emitter of calls to natives landed (story 6 of the calls
+   * spec), and held from then on. */
+  unsigned functions = 0;
+  bool refused = false;
+  Pin pin = native_pin(&functions, &refused);
+  std::printf("pin x86-64 natives: %u functions, %llu bytes, hash %016llx\n", functions,
+      static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
+  EXPECT_EQ(functions, 4u * 8u * 2u * 4u * 2u);
+  EXPECT_TRUE(refused) << "arm64 and Win64 refuse every one of them before a byte";
+  EXPECT_EQ(pin.hash, 0x0b3a441ceb03381full) << pin.bytes << " bytes";
+  EXPECT_EQ(pin.bytes, 355364u);
 }
 
 TEST(Pin, TheArm64CodeOfTheGeneratedFunctionsIsByteForByteWhatWasRecorded) {
