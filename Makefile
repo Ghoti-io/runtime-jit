@@ -754,13 +754,20 @@ endif
 # out of a stack map, and the Windows x86-64 flavour's three: 5: a callee-saved
 # register (rsi) used for the parameter loads, 6: no outgoing area, so a
 # callee's shadow space and the stack arguments land on the frame's slots, 7:
-# the unwind table written and never registered), and the test
+# the unwind table written and never registered; and the three of calls between
+# compiled functions: 8: a reference left out of the stack map of the site a
+# call to compiled code returns to, 9: a callee-saved register (rbx, r12) used
+# and not restored by the entry adapter and the internal entry, 10: the native
+# stack check that does not count the frame it is about to make), and the test
 # that is meant to catch it is built and run there. The test must FAIL, and
 # say what it saw; the same test in the ordinary tree passes (it is part of
 # `make test`). The ordinary tree never sees the macro.
 PLANT_DEFECTS := 1:testDifferential 2:testReadback 3:testReadback \
 	4:testDifferential:Differential.GeneratedFunctionsRunTheSameWhenArm64CodeIsSimulatedAndEvaluated \
-	5:testWin64:Win64Registers.* 6:testWin64:Win64Shape.* 7:testWin64:Win64Memory.*
+	5:testWin64:Win64Registers.* 6:testWin64:Win64Shape.* 7:testWin64:Win64Memory.* \
+	8:testCalls:Calls.AFiftyDeepChainWithACollectionAtTheBottomKeepsEveryFramesReferenceAndMovesIt \
+	9:testCalls:Calls.NoCalleeSavedRegisterIsEverChangedByCompiledCodeThroughTheEntryOrAChain \
+	10:testCalls:Calls.TheStackLimitIsMeasuredInBytesAndTheFirstFrameThatDoesNotFitIsTheOneRefused
 
 # The controls the script runs are built by this make, as prerequisites, and
 # not by the script's own sub-make. Under `make -j test` the sibling goals

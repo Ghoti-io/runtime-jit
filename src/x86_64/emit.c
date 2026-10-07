@@ -542,6 +542,12 @@ static void emit_adapter(GRJIT_Emit * e) {
   grjit_asm_store64(a, GRJIT_RSP, 24, GRJIT_RDX); /* out */
   grjit_asm_store64(a, GRJIT_RSP, 16, GRJIT_RDI); /* context */
   grjit_asm_store64(a, GRJIT_RSP, 8, GRJIT_RSI);  /* args */
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 9
+  /* Planted defect 9 (tests only): a callee-saved register is used and never
+   * restored. The caller's own value must survive the call. */
+  grjit_asm_mov_rr(a, GRJIT_RBX, GRJIT_RDX);
+  grjit_asm_mov_rr(a, GRJIT_R12, GRJIT_RSI);
+#endif
   if (e->c.hook != NULL) {
     grjit_asm_mov_ri(a, GRJIT_RAX, (uint64_t)(uintptr_t)e->c.hook);
     grjit_asm_call_r(a, GRJIT_RAX);
@@ -621,10 +627,19 @@ static GRJIT_Result emit_callable(const GRJIT_Function * f, GRJIT_Emit * e,
   /* The native-stack check, in bytes (AD-28): the lowest address this frame
    * will use, against the context's limit word (r10 holds the context). Below
    * it, the chain deopts at the call site and the interpreter continues. */
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 10
+  /* Planted defect 10 (tests only): the frame is not counted, so a function
+   * whose frame crosses the limit is let in. */
+  grjit_asm_mov_rr(a, GRJIT_RAX, GRJIT_RSP);
+#else
   grjit_asm_lea(a, GRJIT_RAX, GRJIT_RSP, -(int32_t)alloc);
+#endif
   grjit_asm_cmp_rm(a, GRJIT_RAX, GRJIT_R10, (int32_t)e->c.native_limit_offset);
   grjit_asm_jcc(a, GRJIT_COND_B, e->overflow);
   grjit_asm_sub_rsp(a, alloc);
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 9
+  grjit_asm_mov_rr(a, GRJIT_R12, GRJIT_R10);
+#endif
   grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_CTX, GRJIT_R10);
   for (size_t i = 0; i < f->param_count; i++) {
     if (i < GRJIT_INTERNAL_REG_ARGS) {

@@ -136,10 +136,21 @@ GRJIT_Result grjit_metadata_build(const GRJIT_Function * f,
      * pointer is based on is left out of the stack map. */
     bool dropped = false;
 #endif
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 8
+    /* Planted defect 8 (tests only): the first live REF of the site a call to
+     * another compiled function returns to is left out of its stack map. */
+    bool dropped_at_call = false;
+#endif
     for (size_t k = 0; k < sl->count; k++) {
       GRJIT_VReg v = sl->vregs[k];
       const GRJIT_VRegInfo * info = &f->vregs[v];
       if (info->type == GRJIT_TYPE_REF) {
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 8
+        if (!dropped_at_call && r->op != NULL && r->kind == GRCORE_SITE_GC_POINT_CALL) {
+          dropped_at_call = true;
+          continue;
+        }
+#endif
 #if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 3
         bool is_base = false;
         for (size_t j = 0; j < sl->count; j++) {

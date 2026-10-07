@@ -20,6 +20,12 @@
 #      outgoing area (shadow space)
 #   7  the Windows x86-64 unwind table written      -> testWin64
 #      and never registered
+#   8  one live REF left out of the stack map of    -> testCalls
+#      the site a call to compiled code returns to
+#   9  a callee-saved register (rbx, r12) used      -> testCalls
+#      and not restored by callable code
+#  10  the native-stack check that leaves out the   -> testCalls
+#      frame it is about to make
 #
 # An entry is `n:test` or `n:test:filter`. With a filter the test binary runs
 # only that gtest (control and planted alike), which is how defect 4 is caught
