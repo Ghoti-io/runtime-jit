@@ -8,7 +8,8 @@ built and the tests that should notice are run:
 
   CAUGHT       the build succeeded and a test failed, or the program was killed
                by a signal (code freed under a frame faults the process, which
-               is what an early free is)
+               is what an early free is; a test that hangs is aborted by the
+               tests' own watchdog, tests/test_helpers.h, which is a signal too)
   MISSED       the build succeeded and every test passed: the suite is blind to
                the defect, and this script fails
   TIMEOUT      the tests did not finish in time. NOT a catch: a hang says the
@@ -66,8 +67,9 @@ T = tempfile.mkdtemp(prefix='planted-calls-')
 P = os.path.join(T, 'prefix')
 
 
-def sh(cmd, cwd, timeout=None):
+def sh(cmd, cwd, timeout=None, extra_env=None):
     e = dict(os.environ, PKG_CONFIG_PATH=os.path.join(P, 'share', 'pkgconfig'))
+    e.update(extra_env or {})
     e.pop('LD_LIBRARY_PATH', None)
     try:
         r = subprocess.run(cmd, shell=True, cwd=cwd, env=e, stdout=subprocess.PIPE,
@@ -209,8 +211,11 @@ SELF = [
 P_HOLDS_MUTATED_CORE = False
 
 
-def build_and_run(core, jit, mutated_lib, timeout):
+def build_and_run(core, jit, mutated_lib, timeout, extra_env=None):
     """-> (verdict, detail). core and jit are the trees to build."""
+    # A mutated tree may hang a test; the tests' watchdog aborts it after this long
+    # (a signal, so a catch) well inside the harness's own timeout.
+    extra_env = dict({'GRJIT_TEST_WATCHDOG_SECONDS': '45'}, **(extra_env or {}))
     global P_HOLDS_MUTATED_CORE
     if mutated_lib == 'jit' and P_HOLDS_MUTATED_CORE:
         # The prefix still holds the core of the previous mutation: put the
@@ -237,7 +242,7 @@ def build_and_run(core, jit, mutated_lib, timeout):
     runs = ([(core, t) for t in CORE_TESTS] if mutated_lib == 'core' else []) + \
            [(jit, t) for t in JIT_TESTS]
     for tree, t in runs:
-        rc, out = sh('./build/linux/release/apps/%s --gtest_brief=1' % t, tree, timeout)
+        rc, out = sh('./build/linux/release/apps/%s --gtest_brief=1' % t, tree, timeout, extra_env)
         if rc == 'timeout':
             return 'TIMEOUT', t
         failed = sorted(set(re.findall(r'\[  FAILED  \] (\S+)', out)))
@@ -284,7 +289,9 @@ results = []
 if SELF_TEST:
     for name, expected, rel, old, new in SELF:
         core, jit = tree_pair('jit', rel, old, new)
-        verdict, detail = build_and_run(core, jit, 'jit', 20)
+        # The tests' own watchdog (tests/test_helpers.h) would abort the hang the self-test
+        # plants and turn it into a catch; it is off here so that a hang is seen as one.
+        verdict, detail = build_and_run(core, jit, 'jit', 20, {'GRJIT_TEST_WATCHDOG_SECONDS': '0'})
         good = verdict == expected
         ok = ok and good
         print('self-test: %-34s want %-12s got %-12s %s' % (name, expected, verdict, 'ok' if good else 'WRONG'),

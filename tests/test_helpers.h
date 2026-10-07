@@ -390,10 +390,60 @@ struct Compiled {
   } while (0)
 #endif
 
+/* A watchdog for every test: compiled code that is wrong can loop forever (a
+ * frame base left pointing at the wrong frame does), and a hang is neither a
+ * failure a test reports nor a result a harness can read as a catch. Each test
+ * is given `GRJIT_TEST_WATCHDOG_SECONDS` seconds (default 120; zero or the
+ * variable set to 0 turns it off, which tools/check-planted-calls.py does for its
+ * own self-test of a hang); on SIGALRM it names the test and aborts, so the run
+ * dies by a signal, which is a verdict. Not on Windows, which has no alarm. */
+#ifndef _WIN32
+#include <csignal>
+#include <unistd.h>
+namespace grjit_watchdog {
+inline const char * g_current = "";
+inline void on_alarm(int) {
+  const char * a = "\nWATCHDOG: a test did not finish in time and is aborted: ";
+  (void)!write(2, a, std::strlen(a));
+  (void)!write(2, g_current, std::strlen(g_current));
+  (void)!write(2, "\n", 1);
+  std::abort();
+}
+class Listener : public ::testing::EmptyTestEventListener {
+ public:
+  explicit Listener(unsigned seconds) : seconds_(seconds) {}
+  void OnTestStart(const ::testing::TestInfo & info) override {
+    name_ = std::string(info.test_suite_name()) + "." + info.name();
+    g_current = name_.c_str();
+    alarm(seconds_);
+  }
+  void OnTestEnd(const ::testing::TestInfo &) override { alarm(0); }
+ private:
+  unsigned seconds_;
+  std::string name_;
+};
+inline void install() {
+  unsigned seconds = 120;
+  if (const char * v = std::getenv("GRJIT_TEST_WATCHDOG_SECONDS")) {
+    seconds = static_cast<unsigned>(std::atoi(v));
+  }
+  if (seconds == 0) {
+    return;
+  }
+  std::signal(SIGALRM, on_alarm);
+  ::testing::UnitTest::GetInstance()->listeners().Append(new Listener(seconds));
+}
+} // namespace grjit_watchdog
+#define GRJIT_WATCHDOG_INSTALL() ::grjit_watchdog::install()
+#else
+#define GRJIT_WATCHDOG_INSTALL() ((void)0)
+#endif
+
 /// Every test file ends with this: each is its own executable.
 #define GRJIT_TEST_MAIN()                                                      \
   int main(int argc, char ** argv) {                                           \
     ::testing::InitGoogleTest(&argc, argv);                                    \
+    GRJIT_WATCHDOG_INSTALL();                                                  \
     return RUN_ALL_TESTS();                                                    \
   }
 
