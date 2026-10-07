@@ -769,7 +769,16 @@ endif
 # popped by the caller, 17: the stack-argument area not rounded to sixteen bytes,
 # 18: the native-stack check that leaves out the stack-argument area, 19: stack
 # argument k one word too high), and the test
-# that is meant to catch it is built and run there. The test must FAIL, and
+# that is meant to catch it is built and run there. Defects 20 to 29 are the arm64
+# emitter's own versions of the call, tail-call and native ones (the walk start stored
+# after a native call, a native's stack area not rounded or not popped, a callee that
+# does not pop, a tail call made as a call, the last stack argument of a tail call not
+# copied, a status tested on all of x1, the adapter leaving x29 the chain-end marker or
+# using x19, the native-stack check without its area, the prologue's check without its
+# frame): only arm64 code run under qemu-aarch64 can show them, so they are not in
+# the list below; tools/arm64-plants.txt names each with the test that catches it,
+# tools/xarch/jit-arm64.sh in the workspace runs them, and check-planted.sh lists them
+# by name at its end without counting them. The test must FAIL, and
 # say what it saw; the same test in the ordinary tree passes (it is part of
 # `make test`). The ordinary tree never sees the macro.
 PLANT_DEFECTS := 1:testDifferential 2:testReadback 3:testReadback \

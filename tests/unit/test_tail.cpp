@@ -239,7 +239,9 @@ TEST(Tail, ASelfRecursionAMillionDeepRunsInConstantNativeStackAndGuestDepth) {
   EXPECT_EQ(i.value, static_cast<u64>(kMillion) * (kMillion + 1) / 2);
   e.st = Stats{};
   Outcome c = e.run_compiled(loop, {static_cast<u64>(kMillion), 0});
-  ASSERT_TRUE(c.finished);
+  ASSERT_TRUE(c.finished) << "the compiled run did not finish: exit " << c.exit << ", " << e.st.deopts
+                          << " deoptimizations after " << e.st.tails
+                          << " tail calls (a frame kept by each would run out of the native budget)";
   EXPECT_EQ(c.value, i.value) << "the C reference and the interpreter agree";
   EXPECT_EQ(c.exit, uint32_t{GRJIT_EXIT_RETURNED}) << "never left compiled code";
   EXPECT_FALSE(c.interpreted_rest);

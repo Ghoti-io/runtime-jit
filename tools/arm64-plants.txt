@@ -1,0 +1,19 @@
+# The defects planted in the arm64 emitter, each caught by one test run alone under qemu-aarch64
+# (tools/xarch/jit-arm64.sh in the workspace), in a tree of its own, with its control passing first.
+# check-planted.sh lists them by name and does not count them (nothing here can run arm64 code).
+#
+#   id | GRJIT_TEST_PLANT_BUG | test program | gtest filter (the test that catches it) | extra defines | what is planted
+#
+# The catch must be an assertion that names what it saw: a crash, a hang or a build failure is not one.
+4|4|testDifferential|Differential.GeneratedFunctionsRunTheSameCompiledAndEvaluated||SHR and SAR swapped in the arm64 emitter
+20|20|testNatives|Natives.TheCallStoresItsFrameBaseAndReturnAddressBeforeTheNativeRunsOverAStaleCell||the walk start stored after a native call, not before it
+21|21|testNatives|Natives.TheStackIsSixteenAlignedAtTheNativesEntryAndTheSameAfterEveryCallForOddAndEvenStackArguments||a native's stack-argument area not rounded to sixteen bytes
+22|22|testNatives|Natives.TheStackIsSixteenAlignedAtTheNativesEntryAndTheSameAfterEveryCallForOddAndEvenStackArguments||a native's stack arguments not popped by the caller
+23|23|testCalls|Calls.TheStackPointerIsTheSameBeforeEveryCallAndAfterEveryReturnForEveryArityAndForm||a callee that does not pop its stack arguments
+24|24|testTail|Tail.ASelfRecursionAMillionDeepRunsInConstantNativeStackAndGuestDepth||a tail call made as a call, its frame kept
+25|25|testTail|Tail.APingPongBetweenANarrowAndAWideFunctionAMillionDeepLeavesTheStackWhereItWas||the last stack argument of a tail call not copied
+26|26|testNatives|Natives.TheStatusIsTheThirtyTwoBitsOfEdxAndGarbageAboveItNeitherLeavesNorChangesTheCause||a native's status tested on all of x1, not w1
+27|27|testCalls|Calls.NoCalleeSavedRegisterIsEverChangedByCompiledCodeThroughTheEntryOrAChain||the adapter gives the frame record back and leaves x29 the chain-end marker
+27b|27|testCalls|Calls.NoCalleeSavedRegisterIsEverChangedByCompiledCodeThroughTheEntryOrAChain|-DGRJIT_TEST_PLANT_FORM=2|a callee-saved register (x19) used by the adapter and not restored
+28|28|testNatives|Natives.TheNativeStackIsCheckedAtTheCallSiteForTheStackArgumentsAndTheNativesOwnUseToTheByte||a native's stack check leaving out the stack-argument area
+29|29|testCalls|Calls.TheStackLimitIsMeasuredInBytesAndTheFirstFrameThatDoesNotFitIsTheOneRefused||the prologue's stack check leaving out its own frame

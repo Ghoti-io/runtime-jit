@@ -49,6 +49,11 @@
 #  19  stack argument k of a native call one word   -> testNatives
 #      too high: the native reads the wrong words
 #
+# Defects 20 to 29 are in the arm64 emitter's calls, tail calls and natives and only arm64 code run
+# under qemu-aarch64 can show them; tools/arm64-plants.txt lists them (and 4 again) with the test that
+# catches each, tools/xarch/jit-arm64.sh runs them, and this script names them at its end without
+# counting them.
+#
 # An entry is `n:test` or `n:test:filter`. With a filter the test binary runs
 # only that gtest (control and planted alike), which is how defect 4 is caught
 # on every host: by the differential that executes the arm64 emitter's output
@@ -134,5 +139,13 @@ if [ "$failures" -ne 0 ]; then
 fi
 printf 'check-planted: all %d planted defects were caught, and each control passes\n' "$count"
 if [ "$(uname -m)" != "aarch64" ]; then
-  printf 'check-planted: SKIPPED on this host, by name: defect 4 caught by arm64 code run under qemu-aarch64 (needs a cross build; run by tools/xarch/jit-arm64.sh). The simulated catch above is not that.\n'
+  # What only arm64 code run under qemu-aarch64 can show, by name and not counted: tools/arm64-plants.txt
+  # lists each (the defect, the test that catches it) and tools/xarch/jit-arm64.sh runs them.
+  list="$(dirname "$0")/arm64-plants.txt"
+  if [ -f "$list" ]; then
+    names="$(grep -v '^#' "$list" | grep -v '^$' | awk -F'|' '{printf "%s%s", sep, $1; sep=", "}')"
+    printf 'check-planted: SKIPPED on this host, by name: defects %s, each caught by arm64 code run under qemu-aarch64 (needs a cross build; run by tools/xarch/jit-arm64.sh, and not counted here). The simulated catch of 4 above is not that.\n' "$names"
+  else
+    printf 'check-planted: SKIPPED on this host: tools/arm64-plants.txt is missing, so the arm64 catches (run by tools/xarch/jit-arm64.sh) are not listed\n'
+  fi
 fi
