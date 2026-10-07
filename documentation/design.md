@@ -854,10 +854,11 @@ recursion, for `even`/`odd` mutual recursion through slots and through code poin
 and for a ping-pong between a function of two parameters and one of sixteen, whose
 incoming area widens and narrows every time (`test_tail.cpp`; the figures it prints:
 `1000000 tail calls ... native sp 0x7f -> 0x7f, frame base 0x140 -> 0x140, guest
-frames 1 -> 1, guest depth 1 -> 1, reservation capacity 0 -> 0`, low 12 bits of the
-addresses, and a test with an engine whose extensions are not nothing, so that the
-capacity is a real zero-sum, and one that plants the hook keeping its extension and
-sees the capacity grow). *Cost*: `loop-tail-call` in `make bench`, a loop of
+frames 1 -> 1, guest depth 1 -> 1, reservation capacity 9 -> 9`, low 12 bits of the
+addresses; these runs use an engine whose I64 locals are converting, so the
+reservation's capacity is a real count (9 cells) and not zero, which would be constant for
+any program; and a test that plants the hook keeping its extension sees the capacity
+grow). *Cost*: `loop-tail-call` in `make bench`, a loop of
 `n == 0 ? sum : tail_call(n - 1, sum + 1)` through the function's own entry slot with
 the `tail` hook doing nothing, against the same loop's other forms:
 `loop-tail-call` 3.51 to 3.85 ns per iteration in the three quiet runs of four (6.2 and

@@ -230,7 +230,7 @@ TEST(Tail, EveryPairOfCallerParametersAndCalleeArgumentsFromZeroToSixteenArrives
 
 TEST(Tail, ASelfRecursionAMillionDeepRunsInConstantNativeStackAndGuestDepth) {
   TAIL_ONLY_ON_X86_64_SYSV();
-  Engine e(GRCORE_UNLIMITED, /*native_bytes=*/64 * 1024);
+  Engine e(GRCORE_UNLIMITED, /*native_bytes=*/64 * 1024, /*conv=*/true); // converting: the reservation is real
   int loop = add_countdown(e, kMillion);
   Outcome i = e.run_interpreted(loop, {static_cast<u64>(kMillion), 0});
   ASSERT_TRUE(i.finished);
@@ -253,6 +253,7 @@ TEST(Tail, ASelfRecursionAMillionDeepRunsInConstantNativeStackAndGuestDepth) {
   EXPECT_EQ(e.st.depths[0], e.st.depths[1]) << "guest depth";
   EXPECT_EQ(e.st.depths[0], 1u) << "the one frame, counted (a depth that read as a budget would be vacuous)";
   EXPECT_EQ(e.st.caps[0], e.st.caps[1]) << "reservation capacity";
+  EXPECT_GT(e.st.caps[0], 0u) << "a capacity that is really counted";
   EXPECT_EQ(e.st.pushes, e.st.pops);
   EXPECT_EQ(c.frames_left, 0u);
   // What constant means, for design.md: the figures at the first and the last probe.
@@ -335,6 +336,7 @@ void expect_constant(const Engine & e, size_t probes) {
   EXPECT_GE(e.st.depths.front(), 1u) << "a depth that is counted: at least the one frame";
   EXPECT_LT(e.st.depths.front(), 1000u) << "and not a budget read as one";
   EXPECT_EQ(e.st.caps.front(), e.st.caps.back()) << "reservation capacity";
+  EXPECT_GT(e.st.caps.front(), 0u) << "a capacity that is really counted: zero would be constant for any program";
 }
 
 } // namespace
@@ -344,7 +346,7 @@ TEST(Tail, MutualRecursionAMillionDeepThroughSlotsAndThroughPointersRunsInConsta
   for (int through_pointer = 0; through_pointer < 2; through_pointer++) {
     for (int64_t n : {kMillion, kMillion + 1}) {
       SCOPED_TRACE(testing::Message() << (through_pointer ? "pointer " : "slot ") << n);
-      Engine e(GRCORE_UNLIMITED, 64 * 1024);
+      Engine e(GRCORE_UNLIMITED, 64 * 1024, /*conv=*/true); // converting: the reservation is real
       int even, odd;
       add_even_odd(e, kMillion, through_pointer != 0, &even, &odd);
       ASSERT_TRUE(e.compile_fn(even));
@@ -427,7 +429,7 @@ void add_narrow_wide(Engine & e, int64_t first, int * narrow_out, int * wide_out
 
 TEST(Tail, APingPongBetweenANarrowAndAWideFunctionAMillionDeepLeavesTheStackWhereItWas) {
   TAIL_ONLY_ON_X86_64_SYSV();
-  Engine e(GRCORE_UNLIMITED, 64 * 1024);
+  Engine e(GRCORE_UNLIMITED, 64 * 1024, /*conv=*/true); // converting: the reservation is real
   int narrow, wide;
   add_narrow_wide(e, kMillion, &narrow, &wide);
   Outcome i = e.run_interpreted(narrow, {static_cast<u64>(kMillion), 0});
