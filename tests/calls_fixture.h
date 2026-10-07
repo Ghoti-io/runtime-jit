@@ -269,6 +269,9 @@ class Engine {
   bool interpreter_cannot_recover = false; // a refused rebuild: do not try to finish
   int discard_limit = 8;           // deopts after which a function's code is discarded
   bool lie_about_installing = false; // the compile hook says it installed and does not
+  TrackingAllocator * refuse_extend_with = nullptr; // refuses the allocation of the Nth extension
+  long refuse_extend_at = 0;
+  long extend_calls = 0;
   long refuse_push_at = 0;        // the Nth push is refused (an exit at the call site)
   long push_calls = 0;
 
@@ -706,7 +709,15 @@ inline uint32_t Engine::h_push(void *, uint64_t callee, const uint64_t * args, u
   size_t ext = e.C(callee).max_converting;
   size_t cut = static_cast<size_t>(e.short_by) < ext ? static_cast<size_t>(e.short_by) : ext;
   ext -= cut; // planted: a short extension
+  bool refuse_alloc = e.refuse_extend_with != nullptr && ++e.extend_calls == e.refuse_extend_at;
+  if (refuse_alloc) {
+    e.refuse_extend_with->calls = 0;
+    e.refuse_extend_with->fail_at = 1; // the first allocation the extension makes
+  }
   GRCORE_Result r = grcore_deopt_reservation_extend(e.ctx, e.reservation, ext);
+  if (refuse_alloc) {
+    e.refuse_extend_with->fail_at = 0;
+  }
   if (r != GRCORE_OK) {
     e.st.extend_result = r;
     e.st.refused_pushes++;

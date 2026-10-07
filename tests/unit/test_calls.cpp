@@ -1516,4 +1516,26 @@ TEST(Calls, TheBackendSaysWhetherItCanCompileCallsAndOnlyX86SysVCan) {
   }
 }
 
+TEST(Calls, AReservationExtensionTheAllocatorRefusesIsAnExitAtTheCallSiteAndNothingIsHalfDone) {
+  CALLS_ONLY_ON_X86_64_SYSV();
+  TrackingAllocator tracker;
+  Engine e(GRCORE_UNLIMITED, GRCORE_UNLIMITED, /*conv=*/true, tracker.get());
+  int g = add_gchain(e, /*fail_at=*/-1);
+  ASSERT_TRUE(e.compile_fn(g));
+  ASSERT_GT(e.code_of(g).max_converting, 0u);
+  e.refuse_extend_with = &tracker;
+  // The reservation grows by doubling, so the extensions of the first, second,
+  // fourth and eighth calls allocate; the fourth call's is refused.
+  e.refuse_extend_at = 4;
+  Outcome o = e.run_compiled(g, {20});
+  ASSERT_TRUE(o.finished);
+  EXPECT_EQ(o.value, 210u) << "the interpreter made the call and finished the run";
+  EXPECT_EQ(o.exit, uint32_t{GRJIT_EXIT_DEOPT});
+  EXPECT_NE(e.st.extend_result, GRCORE_OK);
+  EXPECT_EQ(e.st.refused_pushes, 1);
+  EXPECT_EQ(e.st.rebuild, GRCORE_OK) << "the rebuild never allocates, and it did not fail";
+  EXPECT_EQ(e.st.deopt_frames, 4) << "the entry and three callees; the fourth was never pushed";
+  EXPECT_EQ(o.frames_left, 0u);
+}
+
 GRJIT_TEST_MAIN()
