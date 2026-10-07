@@ -230,7 +230,7 @@ TESTFLAGS := `PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --libs --cfla
 # coverage clears this: --coverage links the gcov runtime, whose mangle_path
 # check-symbols is right to reject in a shipping library.
 TEST_GATES ?= check-symbols check-aliasing check-stamps check-labels \
-	check-edges check-gates check-planted examples
+	check-edges check-gates check-planted check-planted-calls examples
 
 VALGRIND_FLAGS := --leak-check=full --show-leak-kinds=definite,indirect,possible --track-origins=yes --error-exitcode=1 --suppressions=tests/valgrind.supp
 
@@ -364,7 +364,7 @@ $(APP_DIR)/examples/%$(EXE_EXTENSION): examples/%.c $(APP_DIR)/$(STATIC_TARGET) 
 	$(CC) $(CFLAGS) $(INCLUDE) -o $@ $< $(LDFLAGS) $(CORELIBRARY) $(CUTIL_LIBS)
 
 .PHONY: clean cloc docs docs-pdf examples coverage check-symbols check-stamps check-aliasing
-.PHONY: check-labels check-edges check-gates check-planted bench test-tsan
+.PHONY: check-labels check-edges check-gates check-planted check-planted-calls bench test-tsan
 .PHONY: all install test test-quiet test-asan test-valgrind test-valgrind-quiet test-watch uninstall watch
 .PHONY: all-debug install-debug test-debug test-valgrind-debug test-watch-debug uninstall-debug watch-debug
 
@@ -926,3 +926,27 @@ $(ASAN_FLAGS_STAMP): force-flags
 	@mkdir -p $(@D)
 	@printf '%s\n' '$(CC) $(CXX) $(ASAN_CFLAGS) $(ASAN_CXXFLAGS) $(ASAN_LDFLAGS) $(INCLUDE) $(ASAN_CORELIBRARY) $(RTCORE_LIBS) $(CUTIL_LIBS) $(TESTFLAGS)' > $@.new
 	@cmp -s $@.new $@ 2>/dev/null && rm -f $@.new || mv -f $@.new $@
+
+####################################################################
+# Planted defects in the call protocol
+####################################################################
+#
+# tools/check-planted-calls.py edits one line of runtime-core's or this library's
+# source in a scratch copy, rebuilds, and requires a test to fail, once for each
+# defect the calls story names (and for the ones its review added). It needs
+# runtime-core's checkout beside this one (CORE_SRC, default ../runtime-core) and
+# builds it, so it is a hard error, naming the fix, where that is missing. It
+# first shows itself able to fail (--self-test: an edit that changes nothing must
+# be MISSED, one that does not compile BUILD FAILED, one that hangs TIMEOUT), then
+# runs the defects.
+CORE_SRC ?= ../runtime-core
+
+ifeq ($(OS_NAME), Linux)
+check-planted-calls: $(APP_DIR)/$(STATIC_TARGET) ## Prove the call tests fail on each planted call-protocol defect (and that this check can fail)
+	@test -d "$(CORE_SRC)/src" || { echo "check-planted-calls: runtime-core is not at $(CORE_SRC); pass CORE_SRC=" >&2; exit 1; }
+	@python3 tools/check-planted-calls.py --prefix="$(PREFIX)" --core="$(CORE_SRC)" --self-test
+	@python3 tools/check-planted-calls.py --prefix="$(PREFIX)" --core="$(CORE_SRC)"
+else
+check-planted-calls: ## Skipped off Linux: it builds scratch trees with make and runs x86-64 tests
+	@printf 'check-planted-calls: skipped on this target (the calls protocol is x86-64 SysV; the Windows and arm64 builds refuse it by name)\n'
+endif
