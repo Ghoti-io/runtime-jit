@@ -465,6 +465,116 @@ static void emit_tail_call(GRJIT_Emit * e, const GRJIT_Op * op) {
   grjit_asm_jmp_r(a, GRJIT_R11);
 }
 
+/* A call to a registered native (AD-28, AD-17; natives.h for the contract). In
+ * order, and after it nothing is reordered:
+ *
+ *  1. the native-stack check: `lea rax, [rsp - (S + stack_bytes)]` against the
+ *     context's limit word (zero means none); below it is an exit before the call,
+ *     the native is not called and the interpreter makes the call itself. `S` is
+ *     the stack-argument area, below;
+ *  2. the walk start, first: the frame base and the return address of this call
+ *     go in the context's cell before the area is made, before any argument is
+ *     moved and before the call, so every GC point the native reaches sees this
+ *     frame and the compiled frames below it;
+ *  3. the arguments by the C ABI: with `N = 1 + n` words (the context first), the
+ *     first six in `rdi, rsi, rdx, rcx, r8, r9`, the rest, `k = N - 6`, at
+ *     `[rsp + 8 i]` in an area of `S = round_up_16(8 k)` bytes made by `sub rsp, S`,
+ *     so `rsp` is 16-aligned at the call. Every operand is read from a frame slot
+ *     or is an immediate, so the order of the loads cannot clobber one;
+ *  4. the call, through `rax`; the caller pops (`add rsp, S`);
+ *  5. the result is stored to `dst` before the status is looked at, so the state
+ *     after the call sees it; with a status, a non-zero `rdx` is the exit through
+ *     the state after the call;
+ *  6. nothing is assumed preserved: the context, every operand and every live value
+ *     is read from the frame again, and every caller-saved register is clobbered.
+ *
+ * The return address is the call's site: this frame in the call's state, with the
+ * stack map of what is live after the call (the result excluded). The arguments
+ * are not mapped: a native receives raw words, and what it holds across a GC point
+ * it protects itself. */
+static void emit_native_call(GRJIT_Emit * e, const GRJIT_Op * op) {
+  GRJIT_Asm * a = &e->as;
+  const GRJIT_Function * f = e->c.f;
+  const GRJIT_NativeDesc * d = grjit_native_table_get(f->natives, op->native);
+  if (d == NULL || d->param_count != op->arg_count) {
+    /* The verifier refused this already; a descriptor cannot change under a
+     * verified function (the table is append-only), so this is the library's own
+     * invariant. */
+    e->c.error = GRJIT_ERR_INTERNAL;
+    return;
+  }
+  const bool status = (d->flags & GRJIT_NATIVE_STATUS) != 0;
+  const size_t n = op->arg_count;
+  const size_t words = n + 1; /* the context first */
+  const size_t stack_words = words > GRJIT_INTERNAL_REG_ARGS ? words - GRJIT_INTERNAL_REG_ARGS : 0;
+  uint32_t area = (uint32_t)((stack_words * 8 + 15) / 16 * 16);
+  const size_t live = e->c.live_cursor;
+  e->c.live_cursor += status ? 3 : 2; /* the call, the exit before it, the status exit */
+  const GRJIT_FrameState * st = &f->states[op->state];
+
+  /* 1. The check. */
+  GRJIT_Label exit = grjit_asm_label(a);
+  {
+    GRJIT_Pending p;
+    memset(&p, 0, sizeof p);
+    p.kind = GRJIT_PENDING_NATIVE_EXIT;
+    p.entry = exit;
+    p.op = op;
+    p.live_index = live + 1;
+    grjit_emit_add_pending(&e->c, &p);
+  }
+  uint64_t need = (uint64_t)area + d->stack_bytes;
+  grjit_asm_lea(a, GRJIT_RAX, GRJIT_RSP, -(int32_t)need);
+  grjit_asm_load64(a, GRJIT_RCX, GRJIT_RBP, GRJIT_SLOT_CTX);
+  grjit_asm_cmp_rm(a, GRJIT_RAX, GRJIT_RCX, (int32_t)e->c.native_limit_offset);
+  grjit_asm_jcc(a, GRJIT_COND_B, exit);
+
+  /* 2. The walk start, before anything moves. */
+  GRJIT_Label ret = grjit_asm_label(a);
+  grjit_emit_store_walk_cell(e, ret);
+
+  /* 3. The arguments. */
+  if (area != 0) {
+    grjit_asm_sub_rsp(a, area);
+  }
+  for (size_t i = GRJIT_INTERNAL_REG_ARGS - 1; i < n; i++) {
+    /* IR argument i is C argument i + 1; the sixth C argument is the fifth IR one. */
+    load_operand(e, GRJIT_RAX, &op->args[i]);
+    grjit_asm_store64(a, GRJIT_RSP, (int32_t)(8 * (i - (GRJIT_INTERNAL_REG_ARGS - 1))), GRJIT_RAX);
+  }
+  grjit_asm_load64(a, GRJIT_RDI, GRJIT_RBP, GRJIT_SLOT_CTX);
+  for (size_t i = 0; i < n && i + 1 < GRJIT_INTERNAL_REG_ARGS; i++) {
+    load_operand(e, arg_regs[i + 1], &op->args[i]);
+  }
+
+  /* 4. The call; the return address is the site. */
+  grjit_asm_mov_ri(a, GRJIT_RAX, d->address);
+  grjit_asm_call_r(a, GRJIT_RAX);
+  grjit_asm_bind(a, ret);
+  grjit_emit_add_site_for(&e->c, (uint32_t)grjit_asm_size(a), GRCORE_SITE_GC_POINT_CALL,
+      st->identity, live, op->state, op);
+  if (area != 0) {
+    grjit_asm_add_rsp(a, area);
+  }
+
+  /* 5. The result before the status; a non-zero status leaves. */
+  if (op->dst != GRJIT_NO_VREG) {
+    store_result(e, op->dst, GRJIT_RAX);
+  }
+  if (status) {
+    GRJIT_Label leave = grjit_asm_label(a);
+    GRJIT_Pending p;
+    memset(&p, 0, sizeof p);
+    p.kind = GRJIT_PENDING_NATIVE_STATUS;
+    p.entry = leave;
+    p.op = op;
+    p.live_index = live + 2;
+    grjit_emit_add_pending(&e->c, &p);
+    grjit_asm_test_rr(a, GRJIT_RDX, GRJIT_RDX);
+    grjit_asm_jcc(a, GRJIT_COND_NE, leave);
+  }
+}
+
 static void emit_op(GRJIT_Emit * e, const GRJIT_Op * op, size_t block) {
   GRJIT_Asm * a = &e->as;
   switch (op->kind) {
@@ -591,8 +701,7 @@ static void emit_op(GRJIT_Emit * e, const GRJIT_Op * op, size_t block) {
       emit_tail_call(e, op);
       break;
     case GRJIT_OP_CALL_NATIVE:
-      /* The IR has it; the emitter is the next commit's. */
-      e->c.error = GRJIT_ERR_UNSUPPORTED;
+      emit_native_call(e, op);
       break;
     case GRJIT_OP_COUNT:
       e->c.error = GRJIT_ERR_INTERNAL;
@@ -652,6 +761,12 @@ static void emit_pending(GRJIT_Emit * e) {
         break;
       case GRJIT_PENDING_CALL_EXIT:
         grjit_emit_call_exit_stub(e, p);
+        break;
+      case GRJIT_PENDING_NATIVE_EXIT:
+        grjit_emit_native_exit_stub(e, p);
+        break;
+      case GRJIT_PENDING_NATIVE_STATUS:
+        grjit_emit_native_status_stub(e, p);
         break;
     }
   }

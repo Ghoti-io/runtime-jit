@@ -108,6 +108,11 @@ void grjit_emit_store_walk_cell(GRJIT_Emit * e, GRJIT_Label ret_label);
 void grjit_emit_call_slow_stub(GRJIT_Emit * e, const GRJIT_Pending * p);
 void grjit_emit_call_exit_stub(GRJIT_Emit * e, const GRJIT_Pending * p);
 void grjit_emit_overflow_stub(GRJIT_Emit * e);
+/** A native call's two exits: before the call (the state, cause zero) and after it
+ *  (the state after the call, the cause `GRJIT_CAUSE_NATIVE | status`, the status
+ *  in `rdx` on entry). */
+void grjit_emit_native_exit_stub(GRJIT_Emit * e, const GRJIT_Pending * p);
+void grjit_emit_native_status_stub(GRJIT_Emit * e, const GRJIT_Pending * p);
 void grjit_emit_ret_deopted(GRJIT_Emit * e);
 /** The other two returns: FAILED, and a callee's non-zero status passed on. */
 void grjit_emit_ret_status(GRJIT_Emit * e);

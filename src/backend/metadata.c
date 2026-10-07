@@ -183,7 +183,8 @@ GRJIT_Result grjit_metadata_build(const GRJIT_Function * f,
       const GRJIT_VRegInfo * info = &f->vregs[v];
       if (info->type == GRJIT_TYPE_REF) {
 #if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 8
-        if (!dropped_at_call && r->op != NULL && r->kind == GRCORE_SITE_GC_POINT_CALL) {
+        if (!dropped_at_call && r->op != NULL && r->kind == GRCORE_SITE_GC_POINT_CALL &&
+            (r->op->kind == GRJIT_OP_CALL_SLOT || r->op->kind == GRJIT_OP_CALL_PTR)) {
           dropped_at_call = true;
           continue;
         }

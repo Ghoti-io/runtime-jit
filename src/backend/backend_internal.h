@@ -186,7 +186,11 @@ typedef enum GRJIT_PendingKind {
   GRJIT_PENDING_POLL,
   GRJIT_PENDING_GUARD,
   GRJIT_PENDING_CALL_SLOW, ///< A call through an empty or refused slot.
-  GRJIT_PENDING_CALL_EXIT  ///< A call's exit before the call.
+  GRJIT_PENDING_CALL_EXIT, ///< A call's exit before the call.
+  GRJIT_PENDING_NATIVE_EXIT,   ///< A native call's exit before the call (its
+                               ///< native-stack check failed): in `op->state`.
+  GRJIT_PENDING_NATIVE_STATUS  ///< The exit a native's non-zero status takes: in
+                               ///< `op->exit_state`, the state after the call.
 } GRJIT_PendingKind;
 
 typedef struct GRJIT_Pending {

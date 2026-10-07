@@ -133,6 +133,47 @@ void grjit_emit_call_exit_stub(GRJIT_Emit * e, const GRJIT_Pending * p) {
   grjit_asm_jmp(a, e->ret_deopted);
 }
 
+/* A native call's exit before the call: the native-stack check failed, nothing
+ * has been moved or called, and the interpreter will make the call itself. It is
+ * the call exit's stub over the call's own state (the operation's `exit_state` is
+ * the state *after* the call, which is not this one). */
+void grjit_emit_native_exit_stub(GRJIT_Emit * e, const GRJIT_Pending * p) {
+  GRJIT_Asm * a = &e->as;
+  const GRJIT_FrameState * state = &e->c.f->states[p->op->state];
+  grjit_asm_bind(a, p->entry);
+  GRJIT_Label ret = grjit_asm_label(a);
+  grjit_asm_mov_ri(a, GRJIT_RSI, 0);
+  call_deopt_hook(e, ret);
+  grjit_asm_bind(a, ret);
+  grjit_emit_add_site(&e->c, (uint32_t)grjit_asm_size(a), GRCORE_SITE_GUARD,
+      state->identity, p->live_index, p->op->state);
+  grjit_asm_mov_ri(a, GRJIT_RAX, 0);
+  grjit_asm_jmp(a, e->ret_deopted);
+}
+
+/* The exit a native's non-zero status takes. The native has run and its result
+ * is in `dst`, so the state is the one *after* the call: the interpreter
+ * continues past it, and the native is never run twice. The status is in `rdx`;
+ * the cause is the native bit and its low thirty-two bits, and every frame
+ * returns it (the entry puts it in `out[0]`). The cause is kept in the frame's
+ * `out` slot, which a callable frame does not otherwise use, across the hook. */
+void grjit_emit_native_status_stub(GRJIT_Emit * e, const GRJIT_Pending * p) {
+  GRJIT_Asm * a = &e->as;
+  const GRJIT_FrameState * state = &e->c.f->states[p->op->exit_state];
+  grjit_asm_bind(a, p->entry);
+  GRJIT_Label ret = grjit_asm_label(a);
+  grjit_asm_mov32_rr(a, GRJIT_RSI, GRJIT_RDX);
+  grjit_asm_mov_ri(a, GRJIT_RAX, GRJIT_CAUSE_NATIVE);
+  grjit_asm_alu_rr(a, GRJIT_ALU_OR, GRJIT_RSI, GRJIT_RAX);
+  grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_OUT, GRJIT_RSI);
+  call_deopt_hook(e, ret);
+  grjit_asm_bind(a, ret);
+  grjit_emit_add_site(&e->c, (uint32_t)grjit_asm_size(a), GRCORE_SITE_GUARD,
+      state->identity, p->live_index, p->op->exit_state);
+  grjit_asm_load64(a, GRJIT_RAX, GRJIT_RBP, GRJIT_SLOT_OUT);
+  grjit_asm_jmp(a, e->ret_deopted);
+}
+
 void grjit_emit_overflow_stub(GRJIT_Emit * e) {
   GRJIT_Asm * a = &e->as;
   grjit_asm_bind(a, e->overflow);
