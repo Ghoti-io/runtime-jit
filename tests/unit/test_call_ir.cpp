@@ -365,6 +365,29 @@ TEST(CallIr, AnArgumentMustHaveBeenAssignedLikeAnyOtherUse) {
   EXPECT_NE(r.second.find("assigned"), std::string::npos) << r.second;
 }
 
+TEST(CallIr, ACodePointerThatNothingAssignedIsRefusedAsAnyUnassignedUse) {
+  auto r = check_call([](B & b, GRJIT_CallHooks & h, GRJIT_VReg x, GRJIT_VReg r) {
+    GRJIT_VReg p = b.reg(GRJIT_TYPE_PTR);
+    b.callable(h);
+    b.at(b.block());
+    b.call_ptr(r, V(p), 1, {V(x)}, kId, {grjit_frame_slot_vreg(x), grjit_frame_slot_dead()},
+        kExit, {grjit_frame_slot_vreg(x), grjit_frame_slot_dead()});
+    b.ret(V(r));
+  });
+  EXPECT_EQ(r.first, GRJIT_ERR_INVALID);
+  EXPECT_NE(r.second.find("assigned"), std::string::npos) << r.second;
+  auto ok = check_call([](B & b, GRJIT_CallHooks & h, GRJIT_VReg x, GRJIT_VReg r) {
+    GRJIT_VReg p = b.reg(GRJIT_TYPE_PTR);
+    b.callable(h);
+    b.at(b.block());
+    b.cnst(p, 0x1000);
+    b.call_ptr(r, V(p), 1, {V(x)}, kId, {grjit_frame_slot_vreg(x), grjit_frame_slot_dead()},
+        kExit, {grjit_frame_slot_vreg(x), grjit_frame_slot_dead()});
+    b.ret(V(r));
+  });
+  EXPECT_EQ(ok.first, GRJIT_OK) << ok.second;
+}
+
 TEST(CallIr, TheExitStatesRegistersAreUsesToo) {
   // A register that only the exit state names must be assigned before the call.
   auto r = check_call([](B & b, GRJIT_CallHooks & h, GRJIT_VReg x, GRJIT_VReg r) {

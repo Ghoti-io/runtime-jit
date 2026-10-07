@@ -307,6 +307,39 @@ TEST(TailIr, AnAddressForASlotAndNoneForAPointerAreRequiredOfTheOperation) {
   EXPECT_NE(r.second.find("slot"), std::string::npos) << r.second;
 }
 
+TEST(TailIr, ACodePointerThatNothingAssignedIsRefusedAsAnyUnassignedUse) {
+  auto r = check([](B & b, GRJIT_CallHooks & h, GRJIT_VReg x, GRJIT_VReg, GRJIT_VReg p) {
+    b.callable(h);
+    b.at(b.block());
+    b.tail_call_ptr(V(p), 99, {V(x)}, kId, st2(x)); // p was never assigned
+  });
+  EXPECT_EQ(r.first, GRJIT_ERR_INVALID);
+  EXPECT_NE(r.second.find("assigned"), std::string::npos) << r.second;
+  // The control: assigned on every path, it is well formed.
+  auto ok = check([](B & b, GRJIT_CallHooks & h, GRJIT_VReg x, GRJIT_VReg, GRJIT_VReg p) {
+    b.callable(h);
+    b.at(b.block());
+    b.cnst(p, 0x1000);
+    b.tail_call_ptr(V(p), 99, {V(x)}, kId, st2(x));
+  });
+  EXPECT_EQ(ok.first, GRJIT_OK) << ok.second;
+  // And assigned on one path only is refused too.
+  auto one_path = check([](B & b, GRJIT_CallHooks & h, GRJIT_VReg x, GRJIT_VReg, GRJIT_VReg p) {
+    b.callable(h);
+    GRJIT_BlockId b0 = b.block(), yes = b.block(), no = b.block(), join = b.block();
+    b.at(b0);
+    b.br_if(V(x), yes, no);
+    b.at(yes);
+    b.cnst(p, 0x1000);
+    b.br(join);
+    b.at(no);
+    b.br(join);
+    b.at(join);
+    b.tail_call_ptr(V(p), 99, {V(x)}, kId, st2(x));
+  });
+  EXPECT_EQ(one_path.first, GRJIT_ERR_INVALID) << one_path.second;
+}
+
 TEST(TailIr, ThePrinterShowsBothFormsWithTheirTokensAndTheOneState) {
   B b("caller", 2);
   GRJIT_CallHooks h = all_hooks();
