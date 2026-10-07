@@ -11,6 +11,8 @@
  * Copyright 2026 by Corey Pennycuff
  */
 
+#define FX_ASM_SENTINELS
+#include "../calls_asm.h"
 #include "../calls_fixture.h"
 
 #include "../../src/code/code_internal.h"
@@ -918,52 +920,9 @@ TEST(Calls, RepeatedReplacementUnderOneLongLivedActivationRetainsEachReplacedFun
 
 /* ---- Registers a callee must not touch ------------------------------------------ */
 
-#if defined(__x86_64__) && defined(__linux__)
-extern "C" void fx_call_with_sentinels(GRJIT_EntryFn entry, void * ctx, const uint64_t * args,
-    uint64_t * out, uint64_t * regs);
-asm(R"(
-  .text
-  .globl fx_call_with_sentinels
-  .type fx_call_with_sentinels, @function
-fx_call_with_sentinels:
-  push %rbp
-  mov %rsp, %rbp
-  push %rbx
-  push %r12
-  push %r13
-  push %r14
-  push %r15
-  push %r8
-  mov %rdi, %rax
-  mov %rsi, %rdi
-  mov %rdx, %rsi
-  mov %rcx, %rdx
-  movabs $0x1111111111111111, %rbx
-  movabs $0x2222222222222222, %r12
-  movabs $0x3333333333333333, %r13
-  movabs $0x4444444444444444, %r14
-  movabs $0x5555555555555555, %r15
-  call *%rax
-  pop %r8
-  mov %rbx, 0(%r8)
-  mov %r12, 8(%r8)
-  mov %r13, 16(%r8)
-  mov %r14, 24(%r8)
-  mov %r15, 32(%r8)
-  pop %r15
-  pop %r14
-  pop %r13
-  pop %r12
-  pop %rbx
-  pop %rbp
-  ret
-  .size fx_call_with_sentinels, .-fx_call_with_sentinels
-)");
-#endif
-
 TEST(Calls, NoCalleeSavedRegisterIsEverChangedByCompiledCodeThroughTheEntryOrAChain) {
   CALLS_ONLY_ON_X86_64_SYSV();
-#if defined(__x86_64__) && defined(__linux__)
+#if FX_HAVE_CALLS_ASM
   Engine e;
   int g = add_gchain(e, -1);
   int deep = add_gchain(e, 4);
@@ -981,16 +940,17 @@ TEST(Calls, NoCalleeSavedRegisterIsEverChangedByCompiledCodeThroughTheEntryOrACh
     const GRJIT_Code * code = e.code_of(fn).code;
     uint64_t in[1] = {9};
     std::vector<uint64_t> out(grjit_code_out_words(code), 0);
-    uint64_t regs[5] = {};
+    uint64_t regs[fx::kSentinelCount];
+    for (size_t i = 0; i < fx::kSentinelCount; i++) {
+      regs[i] = fx::sentinel_value(i);
+    }
     // Through a trampoline that sets the registers and reads them back: calling
     // a callee that does not preserve them directly would corrupt this very
     // function, which is what the test is for.
     fx_call_with_sentinels(grjit_code_entry(code), e.ctx, in, out.data(), regs);
-    EXPECT_EQ(regs[0], 0x1111111111111111ull) << "rbx";
-    EXPECT_EQ(regs[1], 0x2222222222222222ull) << "r12";
-    EXPECT_EQ(regs[2], 0x3333333333333333ull) << "r13";
-    EXPECT_EQ(regs[3], 0x4444444444444444ull) << "r14";
-    EXPECT_EQ(regs[4], 0x5555555555555555ull) << "r15";
+    for (size_t i = 0; i < fx::kSentinelCount; i++) {
+      EXPECT_EQ(regs[i], fx::sentinel_value(i)) << fx::sentinel_name(i);
+    }
     ASSERT_EQ(grcore_activation_leave(e.stack, rec), GRCORE_OK);
     grcore_unwind_all(e.stack, nullptr);
     e.reset_reservation();

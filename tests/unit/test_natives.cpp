@@ -12,6 +12,10 @@
  * Copyright 2026 by Corey Pennycuff
  */
 
+#define FX_ASM_ENTRY_SP
+#define FX_ASM_STATUS_GARBAGE
+#define FX_ASM_CLOBBER
+#include "../calls_asm.h"
 #include "../calls_fixture.h"
 
 #include "../../src/backend/backend_internal.h"
@@ -322,49 +326,6 @@ TEST(Natives, StatusNativesOfEveryArityArriveIntactAndAStatusLeavesWithTheNative
 
 /* ---- Alignment, the stack pointer, clobbered registers ---------------------------------- */
 
-extern "C" {
-uint64_t grjit_test_entry_rsp[256];
-uint64_t grjit_test_entry_count = 0;
-uint64_t grjit_test_align_stub(void *, ...);
-GRJIT_NativeResult grjit_test_align_status_stub(void *, ...);
-}
-namespace {
-/* The recording native, with or without a status (and then with no result: a native may have a status and
- * nothing else). */
-const void * align_stub(bool status) {
-  return status ? reinterpret_cast<const void *>(grjit_test_align_status_stub)
-                : reinterpret_cast<const void *>(grjit_test_align_stub);
-}
-} // namespace
-/* Records the stack pointer at its entry (after the return address is pushed), and
- * touches only rax and rcx. */
-asm(R"(
-.text
-.globl grjit_test_align_stub
-.type grjit_test_align_stub, @function
-grjit_test_align_stub:
-  movq grjit_test_entry_count(%rip), %rax
-  leaq grjit_test_entry_rsp(%rip), %rcx
-  movq %rsp, (%rcx,%rax,8)
-  incq %rax
-  movq %rax, grjit_test_entry_count(%rip)
-  xorl %eax, %eax
-  ret
-.size grjit_test_align_stub, .-grjit_test_align_stub
-.globl grjit_test_align_status_stub
-.type grjit_test_align_status_stub, @function
-grjit_test_align_status_stub:
-  movq grjit_test_entry_count(%rip), %rax
-  leaq grjit_test_entry_rsp(%rip), %rcx
-  movq %rsp, (%rcx,%rax,8)
-  incq %rax
-  movq %rax, grjit_test_entry_count(%rip)
-  xorl %eax, %eax
-  xorl %edx, %edx
-  ret
-.size grjit_test_align_status_stub, .-grjit_test_align_status_stub
-)");
-
 TEST(Natives, TheStackIsSixteenAlignedAtTheNativesEntryAndTheSameAfterEveryCallForOddAndEvenStackArguments) {
   JitWorld w;
   NativeTab t;
@@ -396,7 +357,7 @@ TEST(Natives, TheStackIsSixteenAlignedAtTheNativesEntryAndTheSameAfterEveryCallF
     ASSERT_EQ(run.exit, uint32_t{GRJIT_EXIT_RETURNED});
     ASSERT_EQ(grjit_test_entry_count, 10u);
     for (int k = 0; k < 10; k++) {
-      EXPECT_EQ((grjit_test_entry_rsp[k] + 8) % 16, 0u) << n << " arguments, call " << k;
+      EXPECT_EQ((grjit_test_entry_rsp[k] + kNativeEntrySpBias) % 16, 0u) << n << " arguments, call " << k;
       EXPECT_EQ(grjit_test_entry_rsp[k], grjit_test_entry_rsp[0])
           << n << " arguments: a missing pop drifts rsp by the area with every call";
     }
@@ -406,41 +367,10 @@ TEST(Natives, TheStackIsSixteenAlignedAtTheNativesEntryAndTheSameAfterEveryCallF
     if (n == 0) {
       first_entry[with_status] = grjit_test_entry_rsp[0];
     }
-    size_t stack_words = n + 1 > 6 ? n + 1 - 6 : 0;
-    EXPECT_EQ(first_entry[with_status] - grjit_test_entry_rsp[0], (stack_words * 8 + 15) / 16 * 16)
+    EXPECT_EQ(first_entry[with_status] - grjit_test_entry_rsp[0], native_stack_area(n))
         << n << " arguments leave exactly the rounded area below the frame";
   }
 }
-
-namespace {
-
-/* Takes the value it is given, trashes every caller-saved register (and the
- * vector registers), and returns the value plus one. The compiler is told the
- * registers are clobbered, so it saves what it needs; the point is that the
- * *caller* may not assume anything survives. */
-__attribute__((noinline)) uint64_t n_clobber(void *, uint64_t v) {
-  asm volatile(
-      "movabsq $0x5A5A5A5A5A5A5A5A, %%rax\n"
-      "movabsq $0x5A5A5A5A5A5A5A5B, %%rcx\n"
-      "movabsq $0x5A5A5A5A5A5A5A5C, %%rdx\n"
-      "movabsq $0x5A5A5A5A5A5A5A5D, %%rsi\n"
-      "movabsq $0x5A5A5A5A5A5A5A5E, %%rdi\n"
-      "movabsq $0x5A5A5A5A5A5A5A5F, %%r8\n"
-      "movabsq $0x5A5A5A5A5A5A5A60, %%r9\n"
-      "movabsq $0x5A5A5A5A5A5A5A61, %%r10\n"
-      "movabsq $0x5A5A5A5A5A5A5A62, %%r11\n"
-      "pcmpeqd %%xmm0, %%xmm0\n pcmpeqd %%xmm1, %%xmm1\n pcmpeqd %%xmm2, %%xmm2\n pcmpeqd %%xmm3, %%xmm3\n"
-      "pcmpeqd %%xmm4, %%xmm4\n pcmpeqd %%xmm5, %%xmm5\n pcmpeqd %%xmm6, %%xmm6\n pcmpeqd %%xmm7, %%xmm7\n"
-      "pcmpeqd %%xmm8, %%xmm8\n pcmpeqd %%xmm9, %%xmm9\n pcmpeqd %%xmm10, %%xmm10\n pcmpeqd %%xmm11, %%xmm11\n"
-      "pcmpeqd %%xmm12, %%xmm12\n pcmpeqd %%xmm13, %%xmm13\n pcmpeqd %%xmm14, %%xmm14\n pcmpeqd %%xmm15, %%xmm15\n"
-      :
-      :
-      : "rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5",
-        "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15", "memory");
-  return v + 1;
-}
-
-} // namespace
 
 TEST(Natives, ANativeThatClobbersEveryCallerSavedRegisterLeavesTheCallersValuesAndTheNextContextIntact) {
   JitWorld w;
@@ -725,7 +655,7 @@ TEST(Natives, TheNativeStackIsCheckedAtTheCallSiteForTheStackArgumentsAndTheNati
       // The call is made if the lowest address the native may use (its entry stack pointer,
       // less its own use, counting the return address the entry stack pointer is past) is not
       // below the limit, and is an exit before the call if it is one byte below.
-      const uintptr_t lowest = entry + 8 - declared;
+      const uintptr_t lowest = entry + kNativeEntrySpBias - declared;
       for (long delta : {-1L, 0L, 1L}) {
         *limit = static_cast<uintptr_t>(static_cast<long>(lowest) + delta);
         g_deopts = 0;
@@ -1355,28 +1285,6 @@ TEST(Natives, AStatusOfZeroContinuesInCompiledCodeAndAnyOtherLeavesThroughTheCha
 
 /* Natives written in assembly, which return a status in edx and whatever they like in the upper half of
  * rdx: the half above a 32-bit status is padding under SysV, and the call must not read it. */
-extern "C" {
-GRJIT_NativeResult grjit_test_status_garbage_zero(void *);
-GRJIT_NativeResult grjit_test_status_garbage_three(void *);
-}
-asm(R"(
-.text
-.globl grjit_test_status_garbage_zero
-.type grjit_test_status_garbage_zero, @function
-grjit_test_status_garbage_zero:
-  movl $7, %eax
-  movabsq $0xDEADBEEF00000000, %rdx
-  ret
-.size grjit_test_status_garbage_zero, .-grjit_test_status_garbage_zero
-.globl grjit_test_status_garbage_three
-.type grjit_test_status_garbage_three, @function
-grjit_test_status_garbage_three:
-  movl $7, %eax
-  movabsq $0xDEADBEEF00000003, %rdx
-  ret
-.size grjit_test_status_garbage_three, .-grjit_test_status_garbage_three
-)");
-
 TEST(Natives, TheStatusIsTheThirtyTwoBitsOfEdxAndGarbageAboveItNeitherLeavesNorChangesTheCause) {
   for (bool leaves : {false, true}) {
     SCOPED_TRACE(leaves);
@@ -2067,7 +1975,7 @@ TEST(Natives, ABudgetOneByteEitherSideOfTheCallsNeedMakesTheCallOrAnExitBeforeIt
       }
       // The lowest address the native may use is its entry stack pointer, past the return address, less
       // what it declared; the call is made iff that is not below the limit, sp_run - budget.
-      const uintptr_t lowest = entry + 8 - declared;
+      const uintptr_t lowest = entry + kNativeEntrySpBias - declared;
       const uint64_t exact = sp_run - lowest;
       ASSERT_GT(exact, uint64_t{100}) << "the run's own frames fit in less";
       for (int64_t delta : {-1, 0, 1}) {
@@ -2819,7 +2727,7 @@ TEST(Natives, ARebuildTheEngineRefusesAtAnExitBeforeANativeCallIsTheFatalExitAnd
     Outcome o = e.run_compiled(top, {1});
     ASSERT_TRUE(o.finished);
     ASSERT_EQ(grjit_test_entry_count, 1u);
-    exact = (e.last_native_limit + kWide) - (grjit_test_entry_rsp[0] + 8 - 4000);
+    exact = (e.last_native_limit + kWide) - (grjit_test_entry_rsp[0] + kNativeEntrySpBias - 4000);
   }
   Engine e(GRCORE_UNLIMITED, exact - 1);
   int top;

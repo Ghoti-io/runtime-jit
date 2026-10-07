@@ -12,6 +12,8 @@
  * Copyright 2026 by Corey Pennycuff
  */
 
+#define FX_ASM_TAIL_GARBAGE
+#include "../calls_asm.h"
 #include "../calls_fixture.h"
 
 #include "../../src/backend/backend_internal.h"
@@ -2186,26 +2188,7 @@ TEST(Tail, TheHooksSiteNamesTheArgumentsAndTheExitsSiteOnlyWhatItsStateNames) {
 
 /* ---- A hook's answer is its low 32 bits ------------------------------------------------ */
 
-#if defined(__x86_64__) && defined(__linux__)
-extern "C" {
-uint32_t (*grjit_test_real_tail)(void *, uint64_t, const uint64_t *, uint64_t) = nullptr;
-/* Calls the real hook and returns what it returned in eax with the high half of rax
- * set to garbage, as the ABI allows for a function returning 32 bits. */
-uint32_t grjit_test_tail_garbage(void *, uint64_t, const uint64_t *, uint64_t);
-}
-asm(".text\n"
-    ".globl grjit_test_tail_garbage\n"
-    ".type grjit_test_tail_garbage,@function\n"
-    "grjit_test_tail_garbage:\n"
-    "  subq $8, %rsp\n"
-    "  movq grjit_test_real_tail(%rip), %r11\n"
-    "  call *%r11\n"
-    "  addq $8, %rsp\n"
-    "  movl %eax, %eax\n"
-    "  movabsq $0x1357924600000000, %rcx\n"
-    "  orq %rcx, %rax\n"
-    "  ret\n"
-    ".size grjit_test_tail_garbage, .-grjit_test_tail_garbage\n");
+#if FX_HAVE_CALLS_ASM
 
 TEST(Tail, AHooksAnswerIsItsLowThirtyTwoBitsWhateverTheRegisterHoldsAbove) {
   TAIL_ONLY_ON_X86_64_SYSV();

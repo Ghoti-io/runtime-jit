@@ -1762,9 +1762,13 @@ __attribute__((always_inline)) inline uintptr_t current_sp() {
   uintptr_t sp;
   asm volatile("mov %%rsp, %0" : "=r"(sp));
   return sp;
+#elif defined(__aarch64__)
+  uintptr_t sp;
+  asm volatile("mov %0, sp" : "=r"(sp));
+  return sp;
 #else
-  /* Only the x86-64 SysV backend emits a native call, so no native runs here under a compiled
-   * caller; the frame address stands in for the stack pointer so the fixture still builds. */
+  /* No native runs here under a compiled caller (no call is emitted); the frame address
+   * stands in for the stack pointer so the fixture still builds. */
   return reinterpret_cast<uintptr_t>(__builtin_frame_address(0));
 #endif
 }
