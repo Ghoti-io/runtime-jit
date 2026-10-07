@@ -572,6 +572,136 @@ M_ARM64 = [
      ['testCalls']),
 ]
 
+
+# Every place the code tests a hook's answer (a uint32_t: the register above its 32 bits is the callee's to leave as
+# it likes) narrows it first. Each edit below takes the narrowing out of one place; the tests that answer through
+# the garbage stubs of tests/calls_asm.h (a zero with garbage above, a refusal with garbage above) must fail on it
+# by an assertion, the pin and nothing else not being enough.
+def _nomask(old, mask):
+    assert old.count(mask) == 1, old
+    return old.replace(mask, '')
+
+_X86_MASK = '  grjit_asm_mov32_rr(a, GRJIT_RAX, GRJIT_RAX);\n'
+_X86_MASK4 = '    grjit_asm_mov32_rr(a, GRJIT_RAX, GRJIT_RAX);\n'
+_A64_MASK = '  grjit_a64_mov32_rr(a, GRJIT_A64_X0, GRJIT_A64_X0);\n'
+_A64_MASK4 = '    grjit_a64_mov32_rr(a, GRJIT_A64_X0, GRJIT_A64_X0);\n'
+_A64_MASK6 = '      grjit_a64_mov32_rr(a, GRJIT_A64_X0, GRJIT_A64_X0);\n'
+
+_HOOKS_X86 = [
+    ("the deopt hook's answer is tested in 64 bits (a guard or call exit)", 'src/x86_64/exit.c', _X86_MASK,
+     "returns FAILED with the answer, and the engine hears of it. */\n" + _X86_MASK + "  grjit_asm_test_rr(a, GRJIT_RAX, GRJIT_RAX);\n  grjit_asm_jcc(a, GRJIT_COND_NE, e->ret_failed);\n}", ['testCalls']),
+    ("the compile hook's answer is tested in 64 bits", 'src/x86_64/exit.c', _X86_MASK,
+     "  grjit_asm_call_r(a, GRJIT_RAX);\n" + _X86_MASK + "  grjit_asm_test_rr(a, GRJIT_RAX, GRJIT_RAX);\n  grjit_asm_jcc(a, GRJIT_COND_NE, p->exit);\n  /* The hook says it installed", ['testCalls']),
+    ("the deopt hook's answer is tested in 64 bits (the overflow stub)", 'src/x86_64/exit.c', _X86_MASK,
+     _X86_MASK + "  grjit_asm_test_rr(a, GRJIT_RAX, GRJIT_RAX);\n  grjit_asm_jcc(a, GRJIT_COND_NE, e->ret_failed);\n  grjit_asm_mov_ri(a, GRJIT_RAX, 0);\n  grjit_asm_mov_ri(a, ISTATUS(e), GRJIT_STATUS_DEOPTED);", ['testCalls']),
+    ("a callable poll helper's answer is tested in 64 bits", 'src/x86_64/exit.c', _X86_MASK4,
+     _X86_MASK4 + "    grjit_asm_test_rr(a, GRJIT_RAX, GRJIT_RAX);\n    grjit_asm_jcc(a, GRJIT_COND_NE, deopt);", ['testCalls']),
+    ("a plain function's poll helper's answer is tested in 64 bits", 'src/x86_64/exit.c', _X86_MASK,
+     _X86_MASK + "  grjit_asm_test_rr(a, GRJIT_RAX, GRJIT_RAX);\n  grjit_asm_jcc(a, GRJIT_COND_NE, e->refuse);\n  grjit_asm_jmp(a, p->back);", ['testPoll']),
+    ("the push hook's answer is tested in 64 bits", 'src/x86_64/emit.c', _X86_MASK,
+     _X86_MASK + "  grjit_asm_test_rr(a, GRJIT_RAX, GRJIT_RAX);\n  grjit_asm_jcc(a, GRJIT_COND_NE, exit);\n\n  /* The call. The stack arguments are pushed", ['testCalls']),
+    ("a callable function's entry hook's answer is tested in 64 bits", 'src/x86_64/emit.c', _X86_MASK4,
+     _X86_MASK4 + "    grjit_asm_test_rr(a, GRJIT_RAX, GRJIT_RAX);\n    grjit_asm_jcc(a, GRJIT_COND_NE, e->refuse);\n  }\n  grjit_asm_load64(a, scratch, GRJIT_RSP, 8);", ['testCalls']),
+    ("a plain function's entry hook's answer is tested in 64 bits", 'src/x86_64/emit.c', _X86_MASK4,
+     "    grjit_asm_call_r(a, GRJIT_RAX);\n" + _X86_MASK4 + "    grjit_asm_test_rr(a, GRJIT_RAX, GRJIT_RAX);\n    grjit_asm_jcc(a, GRJIT_COND_NE, e->refuse);\n  }\n  if (f->param_count != 0) {", ['testPoll']),
+]
+_HOOKS_A64 = [
+    ("the deopt hook's answer is tested in 64 bits (a guard or call exit)", 'src/arm64/exit.c', _A64_MASK,
+     "  grjit_a64_blr(a, GRJIT_A64_X16);\n" + _A64_MASK + "  grjit_a64_cbnz(a, GRJIT_A64_X0, e->ret_failed);\n}\n\nvoid grjit_a64_emit_call_slow_stub", ['testCalls']),
+    ("the compile hook's answer is tested in 64 bits", 'src/arm64/exit.c', _A64_MASK,
+     _A64_MASK + "  grjit_a64_cbnz(a, GRJIT_A64_X0, p->exit);\n  /* The hook says it installed", ['testCalls']),
+    ("the deopt hook's answer is tested in 64 bits (the overflow stub)", 'src/arm64/exit.c', _A64_MASK,
+     _A64_MASK + "  grjit_a64_cbnz(a, GRJIT_A64_X0, e->ret_failed);\n  grjit_a64_mov_ri(a, GRJIT_A64_X0, 0);", ['testCalls']),
+    ("a callable poll helper's answer is tested in 64 bits", 'src/arm64/exit.c', _A64_MASK4,
+     _A64_MASK4 + "    grjit_a64_cbnz(a, GRJIT_A64_X0, deopt);", ['testCalls']),
+    ("a plain function's poll helper's answer is tested in 64 bits", 'src/arm64/exit.c', _A64_MASK,
+     _A64_MASK + "  grjit_a64_cbnz(a, GRJIT_A64_X0, e->refuse);\n  grjit_a64_b(a, p->back);\n}", ['testPoll']),
+    ("the push hook's answer is tested in 64 bits", 'src/arm64/emit.c', _A64_MASK,
+     _A64_MASK + "  grjit_a64_cbnz(a, GRJIT_A64_X0, exit);\n\n  /* The call. The stack arguments are made", ['testCalls']),
+    ("a callable function's entry hook's answer is tested in 64 bits", 'src/arm64/emit.c', _A64_MASK4,
+     _A64_MASK4 + "    grjit_a64_cbnz(a, GRJIT_A64_X0, e->refuse);\n  }\n  grjit_a64_load(a, GRJIT_A64_MEM_X64, GRJIT_A64_X15, GRJIT_A64_SP, 16);", ['testCalls']),
+    ("a plain function's entry hook's answer is tested in 64 bits", 'src/arm64/emit.c', _A64_MASK6,
+     _A64_MASK6 + "      grjit_a64_cbnz(a, GRJIT_A64_X0, e->refuse);\n    }\n    if (f->param_count != 0) {", ['testPoll']),
+]
+for _name, _file, _mask, _old, _tests in _HOOKS_X86:
+    M.append((_name, 'jit', _file, _old, _nomask(_old, _mask), _tests))
+for _name, _file, _mask, _old, _tests in _HOOKS_A64:
+    M_ARM64.append((_name, 'jit', _file, _old, _nomask(_old, _mask), _tests))
+
+
+# The arm64 emitter's sites, indices and offsets, each shown on the host (the emitter's code is in the library on every
+# host, and the tests read what it emits for arm64 through `grjit_emit_for`) and under qemu: a defect in the code only
+# arm64 runs is not left to the one environment that runs it.
+_ARM64_SHARED = [
+    ("the push site and the call site swap their site sets", 'src/arm64/emit.c',
+     ["  grjit_emit_add_site_for(&e->c, (uint32_t)grjit_a64_size(a),\n      GRCORE_SITE_GC_POINT_FRAME_PUSH, st->identity, live, op->state, op);\n  grjit_a64_mov32_rr(a, GRJIT_A64_X0, GRJIT_A64_X0);\n  grjit_a64_cbnz(a, GRJIT_A64_X0, exit);\n\n  /* The call. The stack",
+      "      GRCORE_SITE_GC_POINT_CALL, st->identity, live + 1, op->state, op);\n  grjit_a64_cbnz(a, GRJIT_A64_X1, e->ret_propagate);"],
+     ["  grjit_emit_add_site_for(&e->c, (uint32_t)grjit_a64_size(a),\n      GRCORE_SITE_GC_POINT_FRAME_PUSH, st->identity, live + 1, op->state, op);\n  grjit_a64_mov32_rr(a, GRJIT_A64_X0, GRJIT_A64_X0);\n  grjit_a64_cbnz(a, GRJIT_A64_X0, exit);\n\n  /* The call. The stack",
+      "      GRCORE_SITE_GC_POINT_CALL, st->identity, live, op->state, op);\n  grjit_a64_cbnz(a, GRJIT_A64_X1, e->ret_propagate);"]),
+    ("a call's exit stub is made from the call's own set, not the exit's", 'src/arm64/emit.c',
+     "emit_dispatch(e, op, live, live + 2);", "emit_dispatch(e, op, live, live + 1);"),
+    ("a tail call's exit stub is made from the hook's set, not the exit's", 'src/arm64/emit.c',
+     "  GRJIT_Label exit = emit_dispatch(e, op, live, live + 1);\n  emit_stage_arguments(e, op);\n\n  GRJIT_Label hook_ret",
+     "  GRJIT_Label exit = emit_dispatch(e, op, live, live);\n  emit_stage_arguments(e, op);\n\n  GRJIT_Label hook_ret"),
+    ("a tail call's hook is a call site, not a frame-push one", 'src/arm64/emit.c',
+     "      GRCORE_SITE_GC_POINT_FRAME_PUSH, st->identity, live, op->state, op);\n  grjit_a64_mov32_rr(a, GRJIT_A64_X0, GRJIT_A64_X0);\n  grjit_a64_cbnz(a, GRJIT_A64_X0, exit);\n\n  const unsigned ireg",
+     "      GRCORE_SITE_GC_POINT_CALL, st->identity, live, op->state, op);\n  grjit_a64_mov32_rr(a, GRJIT_A64_X0, GRJIT_A64_X0);\n  grjit_a64_cbnz(a, GRJIT_A64_X0, exit);\n\n  const unsigned ireg"),
+    ("a native's exit before the call takes the call's site set", 'src/arm64/emit.c',
+     "    p.kind = GRJIT_PENDING_NATIVE_EXIT;\n    p.entry = exit;\n    p.op = op;\n    p.live_index = live + 1;",
+     "    p.kind = GRJIT_PENDING_NATIVE_EXIT;\n    p.entry = exit;\n    p.op = op;\n    p.live_index = live;"),
+    ("a native's status exit takes the exit before the call's site set", 'src/arm64/emit.c',
+     "    p.kind = GRJIT_PENDING_NATIVE_STATUS;\n    p.entry = leave;\n    p.op = op;\n    p.live_index = live + 2;",
+     "    p.kind = GRJIT_PENDING_NATIVE_STATUS;\n    p.entry = leave;\n    p.op = op;\n    p.live_index = live + 1;"),
+    ("a call's or tail call's exit is a call site, not a guard site", 'src/arm64/exit.c',
+     "  grjit_emit_add_site(&e->c, (uint32_t)grjit_a64_size(a), GRCORE_SITE_GUARD,\n      state->identity, p->live_index, exit_state);",
+     "  grjit_emit_add_site(&e->c, (uint32_t)grjit_a64_size(a), GRCORE_SITE_GC_POINT_CALL,\n      state->identity, p->live_index, exit_state);"),
+    ("a native's exit before the call is a call site, not a guard site", 'src/arm64/exit.c',
+     "  grjit_emit_add_site(&e->c, (uint32_t)grjit_a64_size(a), GRCORE_SITE_GUARD,\n      state->identity, p->live_index, p->op->state);\n  grjit_a64_mov_ri(a, GRJIT_A64_X0, 0);",
+     "  grjit_emit_add_site(&e->c, (uint32_t)grjit_a64_size(a), GRCORE_SITE_GC_POINT_CALL,\n      state->identity, p->live_index, p->op->state);\n  grjit_a64_mov_ri(a, GRJIT_A64_X0, 0);"),
+    ("a native's status exit is a call site, not a guard site", 'src/arm64/exit.c',
+     "  grjit_emit_add_site(&e->c, (uint32_t)grjit_a64_size(a), GRCORE_SITE_GUARD,\n      state->identity, p->live_index, p->op->exit_state);",
+     "  grjit_emit_add_site(&e->c, (uint32_t)grjit_a64_size(a), GRCORE_SITE_GC_POINT_CALL,\n      state->identity, p->live_index, p->op->exit_state);"),
+    ("lea: the shifted high part loses its shift", 'src/arm64/emit.c',
+     "(neg ? grjit_a64_sub_imm : grjit_a64_add_imm)(a, rd, from, (uint32_t)(mag >> 12), true);",
+     "(neg ? grjit_a64_sub_imm : grjit_a64_add_imm)(a, rd, from, (uint32_t)(mag >> 12), false);"),
+    ("lea: the low part is dropped when the high part is present and the offset is not a multiple of 4096", 'src/arm64/emit.c',
+     "  if ((mag & 0xFFFu) != 0 || from == base) {",
+     "  if ((mag & 0xFFFu) != 0 && from == base) {"),
+    ("lea: an offset of nothing emits nothing", 'src/arm64/emit.c',
+     "  if ((mag & 0xFFFu) != 0 || from == base) {",
+     "  if ((mag & 0xFFFu) != 0) {"),
+    ("lea: an offset of 2^24 or more is built with the low 16 bits of its magnitude", 'src/arm64/emit.c',
+     "    grjit_a64_mov_ri(a, GRJIT_A64_X17, mag);\n    (neg ?",
+     "    grjit_a64_mov_ri(a, GRJIT_A64_X17, mag & 0xFFFFu);\n    (neg ?"),
+]
+for _name, _file, _old, _new in _ARM64_SHARED:
+    # `lea` is the stack check's own arithmetic: the tests that read it (testNatives) must see it, and not a crash in a
+    # tail call (which uses it for its own sp) that comes first.
+    _t = ['testNatives'] if _name.startswith('lea:') else ['testCalls', 'testTail', 'testNatives']
+    M.append((_name, 'jit', _file, _old, _new, _t))
+    M_ARM64.append((_name, 'jit', _file, _old, _new, _t))
+
+# The mutations of the arm64 emitter that a run finds only as a crash (an address entered that is no entry, a frame
+# record left wrong: `judge` accepts a signal as a catch) are shown too to be seen by a test that reads the words of
+# the emitted code (testArm64_calls), on the host and under qemu, by an assertion that names what is wrong. Two have no
+# such assertion that is cheap, and stay caught by their crash (named in the story's review triage): the entry
+# a slot call keeps for its callee's return (a store to a slot the callee never reads back by name) and the order in
+# which the arguments are staged in the area (an offset a run reads as the wrong argument, by a fault in the hook).
+_BY_WORDS = [
+    'a refused entry slot (one) is entered',
+    'a call through a pointer ignores the answer of the target check',
+    'a call does not load the context into x9 for the callee',
+    'a tail call does not reload its return address into x30',
+    "a tail call takes the caller's base from x29, not from its saved word (the callee's chain loops)",
+    'a tail call sets sp one frame record too high',
+    'the slow path does not look again at a slot the compile hook claims to have filled',
+]
+for _e in list(M_ARM64):
+    if _e[0] in _BY_WORDS:
+        _w = (_e[0] + ' (seen by the words of the code alone)',) + tuple(_e[1:5]) + (['testArm64_calls'],)
+        M.append(_w)
+        M_ARM64.append(_w)
+
 # What each library's tests are.
 CORE_TESTS = ['testRebuild', 'testRegistry', 'testCompiled']
 JIT_TESTS = ['testCalls', 'testCall_ir', 'testTail', 'testTail_ir', 'testNatives', 'testNative_ir']
