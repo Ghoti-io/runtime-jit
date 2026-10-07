@@ -396,6 +396,7 @@ class Engine {
   bool record_polls = false;       // snapshot the whole stack at every poll, in either tier
   std::vector<PollSnap> poll_snaps;
   bool bad_native_ctx = false;     // a native was called with a context that is not this one
+  bool bad_hook_ctx = false;       // a hook was handed a context that is not this one
 
   explicit Engine(uint64_t guest_depth = GRCORE_UNLIMITED,
       uint64_t native_bytes = GRCORE_UNLIMITED, bool conv = false,
@@ -466,6 +467,11 @@ class Engine {
    * code is retired while a frame may return into it) and unregister the range. */
   void discard(int fn);
 
+  void check_hook_ctx(void * c) {
+    if (c != static_cast<void *>(ctx)) {
+      bad_hook_ctx = true;
+    }
+  }
   // ---- hooks (C ABI) ----
   static uint32_t h_push(void *, uint64_t, const uint64_t *, uint64_t);
   static uint32_t h_tail(void *, uint64_t, const uint64_t *, uint64_t);
@@ -532,6 +538,7 @@ inline Engine::~Engine() {
       grcore_code_unregister(ctx, cur[fn]->start);
     }
   }
+  EXPECT_FALSE(bad_hook_ctx) << "every hook is handed the context the code was called with";
   grcore_deopt_release(ctx, reservation);
   grjit_native_table_free(ntable);
   EXPECT_EQ(grcore_context_destroy(ctx), GRCORE_OK);
@@ -926,8 +933,9 @@ inline bool Engine::compile_fn(int fn) {
 
 /* ---- Hooks ------------------------------------------------------------------ */
 
-inline uint32_t Engine::h_push(void *, uint64_t callee, const uint64_t * args, uint64_t n) {
+inline uint32_t Engine::h_push(void * ctx, uint64_t callee, const uint64_t * args, uint64_t n) {
   Engine & e = *g_engine;
+  e.check_hook_ctx(ctx);
   if (e.torture) {
     e.collect(); // the frame-push GC point: the arguments are read afterwards
   }
@@ -970,8 +978,9 @@ inline uint32_t Engine::h_push(void *, uint64_t callee, const uint64_t * args, u
  * callee's, and its reservation extension, as one step. Everything that can fail
  * or collect is done before the guest stack is touched, so a refusal leaves
  * everything as it was; the pop and push after it cannot fail. */
-inline uint32_t Engine::h_tail(void *, uint64_t callee, const uint64_t * args, uint64_t n) {
+inline uint32_t Engine::h_tail(void * ctx, uint64_t callee, const uint64_t * args, uint64_t n) {
   Engine & e = *g_engine;
+  e.check_hook_ctx(ctx);
   e.st.tails++;
   if (e.torture) {
     e.collect(); // a GC point: the arguments are read afterwards
@@ -1039,8 +1048,9 @@ inline uint32_t Engine::h_tail(void *, uint64_t callee, const uint64_t * args, u
   return 0;
 }
 
-inline void Engine::h_pop(void *) {
+inline void Engine::h_pop(void * ctx) {
   Engine & e = *g_engine;
+  e.check_hook_ctx(ctx);
   e.pop_frame();
   if (!e.extensions.empty()) {
     grcore_deopt_reservation_retract(e.reservation, e.extensions.back());
@@ -1049,8 +1059,9 @@ inline void Engine::h_pop(void *) {
   }
 }
 
-inline uint32_t Engine::h_compile(void *, uint64_t callee) {
+inline uint32_t Engine::h_compile(void * ctx, uint64_t callee) {
   Engine & e = *g_engine;
+  e.check_hook_ctx(ctx);
   e.st.compile_calls++;
   if (e.uncompilable.count(static_cast<int>(callee)) != 0) {
     e.st.compile_refusals++;
@@ -1063,8 +1074,9 @@ inline uint32_t Engine::h_compile(void *, uint64_t callee) {
   return e.compile_fn(static_cast<int>(callee)) ? 0 : 1;
 }
 
-inline uint32_t Engine::h_deopt(void *, uint64_t cause) {
+inline uint32_t Engine::h_deopt(void * ctx, uint64_t cause) {
   Engine & e = *g_engine;
+  e.check_hook_ctx(ctx);
   e.st.deopts++;
   e.st.last_cause = cause;
   e.st.causes.push_back(cause);
@@ -1146,8 +1158,9 @@ inline uint32_t Engine::h_deopt(void *, uint64_t cause) {
   return r == GRCORE_OK ? 0u : static_cast<uint32_t>(r);
 }
 
-inline uint32_t Engine::h_poll(void *, uint64_t, uint64_t) {
+inline uint32_t Engine::h_poll(void * ctx, uint64_t, uint64_t) {
   Engine & e = *g_engine;
+  e.check_hook_ctx(ctx);
   e.st.poll_slow++;
   if (e.torture) {
     e.collect();

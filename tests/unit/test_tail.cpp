@@ -2099,6 +2099,7 @@ TEST(Tail, AnAddressThatIsNotRegisteredCodeOfThisContextIsRefusedEvenWithAValidT
   int o2 = add_callee(other, 2);
   ASSERT_TRUE(other.compile_fn(o2));
   ASSERT_EQ(c2, o2) << "the same token in both contexts";
+  g_engine = &e; // the hooks of the run below belong to `e`: the last engine made is not the one that runs
   struct Case {
     const char * name;
     uintptr_t target;
