@@ -147,13 +147,14 @@ bool win64_refuses(const GRJIT_Function * f) {
   return r == GRJIT_ERR_UNSUPPORTED && other.size == 0 && other.bytes == nullptr && t.calls == 0 && t.live == 0;
 }
 
-Pin callable_pin(GRJIT_Arch arch, unsigned * pointer_calls, unsigned * functions, bool * win64_refused) {
+Pin callable_pin(GRJIT_Arch arch, unsigned * pointer_calls, unsigned * functions, bool * win64_refused,
+    GRJIT_EntryHook hook = nullptr) {
   Pin pin;
   unsigned checks = 0;
   *win64_refused = true;
   cg::each_call_function([&](const GRJIT_Function * f, unsigned id) {
     GRJIT_Emitted e;
-    GRJIT_Result res = grjit_emit_for(arch, f, grjit_allocator_default(), nullptr, nullptr, kRequestOffset, &e);
+    GRJIT_Result res = grjit_emit_for(arch, f, grjit_allocator_default(), nullptr, hook, kRequestOffset, &e);
     EXPECT_EQ(res, GRJIT_OK) << "function " << id << ": " << grjit_result_string(res);
     if (res != GRJIT_OK) {
       return false;
@@ -290,6 +291,36 @@ TEST(Pin, TheArm64CodeOfCallableFunctionsWithCallsIsByteForByteWhatWasRecorded) 
   EXPECT_EQ(pin.bytes % 4, 0u);
   EXPECT_EQ(pin.hash, 0x8ff93d28f8d8ec19ull) << pin.bytes << " bytes";
   EXPECT_EQ(pin.bytes, 266492u);
+}
+
+/* An entry hook is an address the emitter is handed and never calls here: a constant that is not any
+ * process's, so the code is as deterministic as without one. The adapter calls it and narrows its 32-bit answer
+ * before it tests it, which no other pin's corpus has (it has no entry hook); the tests of
+ * tests/unit/test_calls.cpp and test_poll.cpp catch the same edit by an assertion and this pins the bytes. */
+GRJIT_EntryHook fake_entry_hook() { return reinterpret_cast<GRJIT_EntryHook>(uintptr_t{0x0000123456789ab0ull}); }
+
+TEST(Pin, TheX86_64CodeOfCallableFunctionsWithAnEntryHookIsByteForByteWhatWasRecorded) {
+  unsigned pointer_calls = 0, functions = 0;
+  bool refused = false;
+  Pin pin = callable_pin(GRJIT_ARCH_X86_64, &pointer_calls, &functions, &refused, fake_entry_hook());
+  EXPECT_EQ(functions, 8u * 7u * 3u * 2u);
+  EXPECT_TRUE(refused);
+  std::printf("pin x86-64 callable with an entry hook: %llu bytes, hash %016llx\n",
+      static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
+  EXPECT_EQ(pin.hash, 0xc5e0be7b7ef3cea1ull) << pin.bytes << " bytes";
+  EXPECT_EQ(pin.bytes, 293108u);
+}
+
+TEST(Pin, TheArm64CodeOfCallableFunctionsWithAnEntryHookIsByteForByteWhatWasRecorded) {
+  unsigned pointer_calls = 0, functions = 0;
+  bool refused = false;
+  Pin pin = callable_pin(GRJIT_ARCH_ARM64, &pointer_calls, &functions, &refused, fake_entry_hook());
+  EXPECT_EQ(functions, 8u * 7u * 3u * 2u);
+  EXPECT_TRUE(refused);
+  std::printf("pin arm64 callable with an entry hook: %llu bytes, hash %016llx\n",
+      static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
+  EXPECT_EQ(pin.hash, 0x979ab308f05b25c3ull) << pin.bytes << " bytes";
+  EXPECT_EQ(pin.bytes, 273884u);
 }
 
 TEST(Pin, TheArm64CodeOfCallableFunctionsWithTailCallsIsByteForByteWhatWasRecorded) {
