@@ -2136,4 +2136,51 @@ TEST(Tail, AnAddressThatIsNotRegisteredCodeOfThisContextIsRefusedEvenWithAValidT
   }
 }
 
+/* ---- The two sites of a tail call, read from the metadata -------------------------- */
+
+TEST(Tail, TheHooksSiteNamesTheArgumentsAndTheExitsSiteOnlyWhatItsStateNames) {
+  TAIL_ONLY_ON_X86_64_SYSV();
+  // The exit before the replacement leaves the frame, so its map is the state's
+  // registers alone; the hook's is those, the argument registers, and the arguments
+  // area's entry for the argument that is a reference. (An exit built from the
+  // hook's set would keep the arguments' references alive across a rebuild for
+  // nothing and could not be told from the right one by any run, which is why it is
+  // read here, from the table.)
+  B b("sites", 2);
+  GRJIT_CallHooks h{};
+  h.push = h_noop_push;
+  h.pop = h_noop_pop;
+  h.compile = h_noop;
+  h.deopt = h_noop;
+  h.tail = h_noop_push;
+  b.callable(h);
+  GRJIT_VReg x = b.param(GRJIT_TYPE_I64);
+  GRJIT_VReg keep = b.param(GRJIT_TYPE_REF); // named by the state only
+  GRJIT_VReg arg = b.param(GRJIT_TYPE_REF);  // an argument only
+  b.at(b.block());
+  static uint64_t word;
+  b.tail_call_slot(&word, 1, {V(x), V(arg)}, GRCORE_PollIdentity{0, 0},
+      {grjit_frame_slot_vreg(x), grjit_frame_slot_vreg(keep)});
+  Fn f(b.finish());
+  JitWorld w;
+  Compiled c(f, w.pages());
+  ASSERT_TRUE(c);
+  const GRCORE_CodeMeta * meta = grjit_code_meta(c.code);
+  const GRCORE_CodeSite * hook = nullptr;
+  const GRCORE_CodeSite * exit = nullptr;
+  for (size_t i = 0; i < meta->site_count; i++) {
+    if (meta->sites[i].kind == GRCORE_SITE_GC_POINT_FRAME_PUSH) {
+      hook = &meta->sites[i];
+    } else if (meta->sites[i].kind == GRCORE_SITE_GUARD) {
+      exit = &meta->sites[i];
+    }
+  }
+  ASSERT_NE(hook, nullptr);
+  ASSERT_NE(exit, nullptr);
+  EXPECT_EQ(meta->site_count, 2u) << "two sites per tail call";
+  EXPECT_EQ(exit->live_count, 1u) << "keep, and not the argument";
+  EXPECT_EQ(hook->live_count, 3u) << "keep and the argument's register, and the argument's slot in the area";
+  EXPECT_EQ(exit->frame_state_count, hook->frame_state_count) << "the one state";
+}
+
 GRJIT_TEST_MAIN()
