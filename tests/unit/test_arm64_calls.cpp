@@ -21,11 +21,13 @@
 #include "../callable_gen.h"
 
 #include "../../src/arm64/asm_internal.h"
+#include "../../src/backend/backend_internal.h"
 #include "../../src/code/code_internal.h"
 #include "../../src/ir/ir_internal.h"
 
 #include <cstring>
 #include <set>
+#include <string>
 
 namespace {
 
@@ -491,6 +493,107 @@ TEST(Arm64Calls, ACallToACompiledCalleeIsEnteredThroughTheSlotsWordAndAnyOtherCa
   });
   EXPECT_GT(guest, 300u);
   EXPECT_GT(other, 300u);
+}
+
+/* A run of this test's own sequences, read from the words (a cheap assertion beside what the executing tests show:
+ * a defect in any of these makes code that is entered at a wrong address or with a frame left wrong, which a run
+ * finds as a crash, and a crash says a defect was reached and not which). */
+TEST(Arm64Calls, TheDispatchAndTheTailCallSequenceAreInTheCodeOfEveryFunctionThatHasThemAsTheDesignSays) {
+  constexpr uint32_t kBlrX16 = 0xD63F0200u, kBrX16 = 0xD61F0200u;
+  constexpr uint32_t kMovW0W0 = 0x2A0003E0u;
+  constexpr uint32_t kCmpX16One = 0xF100061Fu;          // subs xzr, x16, #1: the refused word
+  constexpr uint32_t kLdurX9Ctx = 0xF85F83A9u;           // ldur x9, [x29, #-8]: the context slot
+  constexpr uint32_t kLdrX30Saved = 0xF94007BEu;         // ldr x30, [x29, #8]: the return address
+  constexpr uint32_t kLdrX15Base = 0xF94003AFu;          // ldr x15, [x29]: the caller's base
+  constexpr uint32_t kMovX15X29 = 0x910003AFu;           // add x15, x29, #0, which a tail call must not use for it
+  constexpr uint32_t kMovX29X15 = 0xAA0F03FDu;           // mov x29, x15
+  size_t slot_calls = 0, ptr_calls = 0, tails = 0;
+  for_every_callable_function([&](const GRJIT_Emitted & e, const GRJIT_Function *, unsigned id, const char * family) {
+    const bool is_tail = std::string(family) == "tail";
+    if (std::string(family) == "native") {
+      return;
+    }
+    // Which form: calls are (params, args, form, variant), tail calls (params, args, form).
+    const unsigned shape = is_tail ? id / 3 : id / 6;
+    const unsigned form = is_tail ? id % 3 : (id / 2) % 3;
+    const unsigned params = cg::kParams[shape / 7], args = cg::kArgs[shape % 7];
+    const bool slot = form == 0;
+    std::vector<uint32_t> w;
+    for (size_t off = 0; off < e.size; off += 4) {
+      w.push_back(word_at(e, off));
+    }
+    SCOPED_TRACE(std::string(family) + " " + std::to_string(id));
+    // The slot's word: one compare tells compiled code (above one) from empty (zero) and refused (one), and
+    // both of the last two take the slow path: `b.ls`, not `b.lo`.
+    size_t slot_compares = 0;
+    for (size_t i = 0; i + 1 < w.size(); i++) {
+      if (w[i] == kCmpX16One && (w[i + 1] & 0xFF00001Fu) == 0x54000009u) {
+        slot_compares++;
+      }
+    }
+    // Twice for a slot: the dispatch, and the slow path's second look at what the compile hook says it installed.
+    EXPECT_EQ(slot_compares, slot ? 2u : 0u) << "a slot call compares the entry with one and branches on `ls`, twice";
+    // A call through a pointer asks the library's target check and exits on a zero answer: `blr x16; mov w0, w0;
+    // cbz x0` once, and never for a slot.
+    size_t target_checks = 0;
+    for (size_t i = 0; i + 2 < w.size(); i++) {
+      if (w[i] == kBlrX16 && w[i + 1] == kMovW0W0 && (w[i + 2] & 0xFF00001Fu) == 0xB4000000u) {
+        target_checks++;
+      }
+    }
+    EXPECT_EQ(target_checks, slot ? 0u : 1u) << "a pointer call tests the answer of the target check";
+    (slot ? slot_calls : ptr_calls)++;
+    if (!is_tail) {
+      // The context is in x9 as the callee is entered: `ldur x9, [x29, #-8]; ldr x16, [..]; blr x16`.
+      // (The entry's own load may take up to four words in a large frame, so the load of x9 is looked for in
+      // the six words before the jump.)
+      size_t entered = 0;
+      for (size_t i = 0; i < w.size(); i++) {
+        if (w[i] != kBlrX16) {
+          continue;
+        }
+        for (size_t k = i >= 6 ? i - 6 : 0; k < i; k++) {
+          if (w[k] == kLdurX9Ctx) {
+            entered++;
+            break;
+          }
+        }
+      }
+      EXPECT_EQ(entered, 1u) << "the callee is entered with the context in x9";
+      return;
+    }
+    tails++;
+    // The tail call: the return address and the caller's base loaded from the frame record before anything
+    // moves, the stack pointer set from the base to where the original caller expects it less what the callee
+    // pops (16 + in_A - in_T), the frame record base taken from the loaded word and not from x29, and the jump.
+    size_t jump = w.size();
+    for (size_t i = 0; i < w.size(); i++) {
+      if (w[i] == kBrX16) {
+        jump = i;
+      }
+    }
+    ASSERT_GE(jump, 3u) << "a tail call ends with a jump to x16";
+    EXPECT_EQ(w[jump - 1], kMovX29X15) << "the base of the frame record is the caller's saved one";
+    const int64_t sp_new = 16 + static_cast<int64_t>(grjit_stack_arg_bytes(params, 8)) -
+        static_cast<int64_t>(grjit_stack_arg_bytes(args, 8));
+    const uint32_t expect_sp = sp_new >= 0 ? (0x910003BFu | (static_cast<uint32_t>(sp_new) << 10))
+                                           : (0xD10003BFu | (static_cast<uint32_t>(-sp_new) << 10));
+    EXPECT_EQ(w[jump - 2], expect_sp) << "sp is x29 + " << sp_new << " (16 + the bytes this function pops - the callee's)";
+    size_t loads_ra = 0, loads_base = 0, base_from_fp = 0, ctx = 0;
+    for (size_t i = 0; i < jump; i++) {
+      loads_ra += w[i] == kLdrX30Saved;
+      loads_base += w[i] == kLdrX15Base;
+      base_from_fp += w[i] == kMovX15X29;
+      ctx += w[i] == kLdurX9Ctx;
+    }
+    EXPECT_GE(loads_ra, 1u) << "the return address is reloaded into x30";
+    EXPECT_GE(loads_base, 1u) << "the caller's base is read from the saved word";
+    EXPECT_EQ(base_from_fp, 0u) << "and never taken from x29, which is this frame's";
+    EXPECT_GE(ctx, 1u) << "the context is loaded into x9 for the callee";
+  });
+  EXPECT_GT(slot_calls, 100u);
+  EXPECT_GT(ptr_calls, 200u);
+  EXPECT_EQ(tails, 168u);
 }
 
 GRJIT_TEST_MAIN()
