@@ -324,6 +324,9 @@ class Engine {
    * test whose programs derive pointers and whose interpreter finishes a run
    * sets this, and a collection the interpreter makes does not move anything. */
   bool interpreter_never_moves = false;
+  /* A tail hook to give the compiled code in place of h_tail, for a test of what the
+   * hook's return value may be (see test_tail.cpp). */
+  uint32_t (*tail_override)(void *, uint64_t, const uint64_t *, uint64_t) = nullptr;
   bool record_hook_args = false;  // keep what each push and tail hook was handed
 
   explicit Engine(uint64_t guest_depth = GRCORE_UNLIMITED,
@@ -580,7 +583,7 @@ inline GRJIT_Function * Engine::build_ir(int fn) {
   hooks.pop = Engine::h_pop;
   hooks.compile = Engine::h_compile;
   hooks.deopt = Engine::h_deopt;
-  hooks.tail = Engine::h_tail;
+  hooks.tail = tail_override != nullptr ? tail_override : Engine::h_tail;
   b.callable(hooks);
   EXPECT_EQ(grjit_builder_set_token(b.b, static_cast<u64>(fn)), GRJIT_OK);
   b.poll_helper(Engine::h_poll);

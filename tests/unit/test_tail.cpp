@@ -2183,4 +2183,54 @@ TEST(Tail, TheHooksSiteNamesTheArgumentsAndTheExitsSiteOnlyWhatItsStateNames) {
   EXPECT_EQ(exit->frame_state_count, hook->frame_state_count) << "the one state";
 }
 
+/* ---- A hook's answer is its low 32 bits ------------------------------------------------ */
+
+#if defined(__x86_64__) && defined(__linux__)
+extern "C" {
+uint32_t (*grjit_test_real_tail)(void *, uint64_t, const uint64_t *, uint64_t) = nullptr;
+/* Calls the real hook and returns what it returned in eax with the high half of rax
+ * set to garbage, as the ABI allows for a function returning 32 bits. */
+uint32_t grjit_test_tail_garbage(void *, uint64_t, const uint64_t *, uint64_t);
+}
+asm(".text\n"
+    ".globl grjit_test_tail_garbage\n"
+    ".type grjit_test_tail_garbage,@function\n"
+    "grjit_test_tail_garbage:\n"
+    "  subq $8, %rsp\n"
+    "  movq grjit_test_real_tail(%rip), %r11\n"
+    "  call *%r11\n"
+    "  addq $8, %rsp\n"
+    "  movl %eax, %eax\n"
+    "  movabsq $0x1357924600000000, %rcx\n"
+    "  orq %rcx, %rax\n"
+    "  ret\n"
+    ".size grjit_test_tail_garbage, .-grjit_test_tail_garbage\n");
+
+TEST(Tail, AHooksAnswerIsItsLowThirtyTwoBitsWhateverTheRegisterHoldsAbove) {
+  TAIL_ONLY_ON_X86_64_SYSV();
+  // The hook returns a uint32_t, so the upper half of rax is the callee's to leave as
+  // it likes. Zero with garbage above is success, and one with garbage above is a
+  // refusal; testing all of rax would read the first as a refusal on every call.
+  for (long refuse_at : {0L, 3L}) {
+    SCOPED_TRACE(refuse_at);
+    Engine e;
+    grjit_test_real_tail = Engine::h_tail;
+    e.tail_override = grjit_test_tail_garbage;
+    int tc = add_tchain(e, -1);
+    int top = add_top(e, tc);
+    e.refuse_tail_at = refuse_at;
+    Outcome o = e.run_compiled(top, {10});
+    ASSERT_TRUE(o.finished);
+    EXPECT_EQ(o.value, tsum(10));
+    if (refuse_at == 0) {
+      EXPECT_EQ(o.exit, uint32_t{GRJIT_EXIT_RETURNED}) << "zero with garbage above is not a refusal";
+      EXPECT_EQ(e.st.tails, 10);
+    } else {
+      EXPECT_EQ(o.exit, uint32_t{GRJIT_EXIT_DEOPT}) << "one with garbage above is";
+      EXPECT_EQ(e.st.tails, 3);
+    }
+  }
+}
+#endif
+
 GRJIT_TEST_MAIN()
