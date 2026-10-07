@@ -57,6 +57,7 @@ enum class K {
   ADD,       // d = a + b
   SUB,       // d = a - b
   MUL,       // d = a * b
+  AND,       // d = a & b
   LT,        // d = a < b (signed)
   EQ,        // d = a == b
   BRZ,       // if a == 0 goto t
@@ -578,6 +579,7 @@ inline GRJIT_Function * Engine::build_ir(int fn) {
       case K::ADD: b.bin(GRJIT_OP_ADD, in.d, V(in.a), V(in.b)); break;
       case K::SUB: b.bin(GRJIT_OP_SUB, in.d, V(in.a), V(in.b)); break;
       case K::MUL: b.bin(GRJIT_OP_MUL, in.d, V(in.a), V(in.b)); break;
+      case K::AND: b.bin(GRJIT_OP_AND, in.d, V(in.a), V(in.b)); break;
       case K::LT: b.cmp(GRJIT_CMP_LT, in.d, V(in.a), V(in.b)); break;
       case K::EQ: b.cmp(GRJIT_CMP_EQ, in.d, V(in.a), V(in.b)); break;
       case K::BRZ: b.br_if(V(in.a), blk[pc + 1], blk[in.t]); terminated = true; break;
@@ -843,6 +845,7 @@ inline void Engine::interpret(Outcome & out) {
       case K::ADD: wr(S, fn, in.d, L(in.a) + L(in.b)); S[0] = pc + 1; break;
       case K::SUB: wr(S, fn, in.d, L(in.a) - L(in.b)); S[0] = pc + 1; break;
       case K::MUL: wr(S, fn, in.d, L(in.a) * L(in.b)); S[0] = pc + 1; break;
+      case K::AND: wr(S, fn, in.d, L(in.a) & L(in.b)); S[0] = pc + 1; break;
       case K::LT:
         wr(S, fn, in.d, static_cast<int64_t>(L(in.a)) < static_cast<int64_t>(L(in.b)) ? 1 : 0);
         S[0] = pc + 1;

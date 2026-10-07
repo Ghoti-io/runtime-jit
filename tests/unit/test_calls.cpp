@@ -51,10 +51,33 @@ int add_fib(Engine & e) {
 
 } // namespace
 
-#if !(defined(__x86_64__) && defined(__linux__))
-#define CALLS_ONLY_ON_X86_64_SYSV() GTEST_SKIP() << "calls are emitted for x86-64 SysV only"
-#else
+/* Calls are emitted for x86-64 SysV only (arm64 and Win64 are story 7's). Where
+ * they are not, a test does not skip, which would count as a test that proved
+ * nothing: it shows the refusal instead, which is what those targets promise. */
+#if defined(__x86_64__) && defined(__linux__)
 #define CALLS_ONLY_ON_X86_64_SYSV() (void)0
+#else
+namespace {
+void expect_calls_refused_here() {
+  B b("ident", 0);
+  GRJIT_VReg x = b.param(GRJIT_TYPE_I64);
+  GRJIT_CallHooks h{};
+  h.deopt = [](void *, uint64_t) {};
+  b.callable(h);
+  b.at(b.block());
+  b.ret(V(x));
+  Fn f(b.finish());
+  JitWorld w;
+  Compiled c(f, w.pages());
+  EXPECT_EQ(c.result, GRJIT_ERR_UNSUPPORTED) << "a callable function is refused with a clear error";
+  EXPECT_FALSE(c);
+}
+} // namespace
+#define CALLS_ONLY_ON_X86_64_SYSV() \
+  do { \
+    expect_calls_refused_here(); \
+    return; \
+  } while (0)
 #endif
 
 TEST(Calls, FibCompiledMatchesTheInterpreterAndTheCReferenceAndNeverLeavesCompiledCode) {
@@ -1347,6 +1370,86 @@ TEST(Calls, AnOverflowingCalleesGuestFrameHoldsTheArgumentsItWasCalledWith) {
   EXPECT_EQ(c.exit, uint32_t{GRJIT_EXIT_DEOPT});
   EXPECT_EQ(static_cast<int64_t>(c.value), ref(300, 10, 20, 30));
   EXPECT_EQ(e.st.rebuild, GRCORE_OK);
+}
+
+TEST(Calls, ArgumentsOfAllThreeTypesMixedAtEveryCountFromOneToSixteenArriveIntactUnderCollection) {
+  CALLS_ONLY_ON_X86_64_SYSV();
+  // callee(a0 ... a{n-1}) with a_i an I64, a REF or a PTR in turn; it returns the
+  // sum of (i + 1) times each one's value: the integer, the integer an object
+  // holds, or the pointer's low byte. The caller makes them, and every push
+  // collects and moves, so a reference passed in a register or on the stack is
+  // read after the collection from where the collector put it.
+  Engine e;
+  e.torture = true;
+  for (int n = 1; n <= 16; n++) {
+    SCOPED_TRACE(n);
+    std::vector<GRJIT_Type> types;
+    for (int i = 0; i < n; i++) {
+      types.push_back(i % 3 == 0 ? GRJIT_TYPE_I64 : i % 3 == 1 ? GRJIT_TYPE_REF : GRJIT_TYPE_PTR);
+    }
+    int callee = e.reserve();
+    {
+      P p("mixed", types);
+      int acc = p.local(), c = p.local(), t = p.local(), mask = p.local();
+      p.cnst(acc, 0);
+      p.cnst(mask, 255);
+      for (int i = 0; i < n; i++) {
+        if (types[i] == GRJIT_TYPE_I64) {
+          p.mov(t, i);
+        } else if (types[i] == GRJIT_TYPE_REF) {
+          p.get(t, i);
+        } else {
+          p.bin(K::AND, t, i, mask);
+        }
+        p.cnst(c, i + 1);
+        p.bin(K::MUL, t, t, c);
+        p.bin(K::ADD, acc, acc, t);
+      }
+      p.ret(acc);
+      e.set(callee, p.done());
+    }
+    int caller = e.reserve();
+    {
+      P p("mixed_caller", {GRJIT_TYPE_I64});
+      int x = 0, r = p.local();
+      std::vector<int> args;
+      for (int i = 0; i < n; i++) {
+        int a = p.local(types[i]);
+        if (types[i] == GRJIT_TYPE_I64) {
+          int k = p.local();
+          p.cnst(k, i);
+          p.bin(K::ADD, a, x, k);
+        } else if (types[i] == GRJIT_TYPE_REF) {
+          p.nw(a, 1000 + i);
+        } else {
+          p.cnst(a, i * 16 + 3);
+        }
+        args.push_back(a);
+      }
+      p.call(r, callee, args);
+      p.ret(r);
+      e.set(caller, p.done());
+    }
+    for (int64_t x : {int64_t{5}, int64_t{-2}}) {
+      int64_t want = 0;
+      for (int i = 0; i < n; i++) {
+        int64_t v = types[i] == GRJIT_TYPE_I64 ? x + i
+            : types[i] == GRJIT_TYPE_REF       ? 1000 + i
+                                               : (i * 16 + 3) & 255;
+        want += (i + 1) * v;
+      }
+      Outcome o = e.run_compiled(caller, {static_cast<u64>(x)});
+      ASSERT_TRUE(o.finished);
+      EXPECT_EQ(o.exit, uint32_t{GRJIT_EXIT_RETURNED});
+      EXPECT_EQ(static_cast<int64_t>(o.value), want);
+      Outcome i = e.run_interpreted(caller, {static_cast<u64>(x)});
+      ASSERT_TRUE(i.finished);
+      EXPECT_EQ(i.value, o.value);
+    }
+  }
+  EXPECT_EQ(e.heap.poisoned_reads, 0);
+  EXPECT_GT(e.heap.moved, 50);
+  EXPECT_EQ(e.st.deopts, 0);
 }
 
 GRJIT_TEST_MAIN()
