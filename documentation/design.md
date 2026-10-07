@@ -517,11 +517,13 @@ slower with the JIT on than off, and `fib(22)` 1.2% slower (lang-tang's
 `design.md`, "Measured"), because every call left compiled code, deoptimized the
 caller into the interpreter, and re-entered the callee's compiled code from the
 top. The restriction was story 15's own rule ("no JIT frame calls a JIT frame"),
-not the spine's. This section is the protocol that removes it, on x86-64 SysV;
-arm64 and Win64 refuse the new operations with `GRJIT_ERR_UNSUPPORTED` until
-they have them, before emitting a byte (their emitted bytes, and the pins, are
-unchanged), and `grjit_backend_calls_available()` lets an engine ask once instead
-of finding out at its first compile.
+not the spine's. This section is the protocol that removes it, as built and
+described for x86-64 SysV; arm64 has its own convention of the same shape (the
+section "The arm64 convention for calls, tail calls and natives", below). Win64
+refuses the new operations with `GRJIT_ERR_UNSUPPORTED` until it has them (story
+7b of the calls spec), before emitting a byte (its emitted bytes, and the pin, are
+unchanged), and `grjit_backend_calls_available()`, true on Linux x86-64 and Linux
+arm64, lets an engine ask once instead of finding out at its first compile.
 `runtime-core`'s `design.md` ("A, part 5") holds the other half: the walk, the
 rebuild, the native-stack limit and the entry slot.
 
@@ -694,11 +696,11 @@ A compiled function can call another (above); this is the call that replaces the
 caller. Wasm 3.0's `return_call`, `return_call_indirect` and `return_call_ref`
 need it, and so does any tail-recursive guest program: without it a loop written
 as a tail call grows the native stack and the guest stack at every iteration. It
-is x86-64 SysV only, as calls are: arm64 and Win64 refuse a function that has one
-with `GRJIT_ERR_UNSUPPORTED` before a byte is emitted (story 7), and nothing
-about a function without one changes (the three pins, and a fourth, over
-callable functions with calls and no tail call, were recorded at the commit
-before and hold).
+is described here for x86-64 SysV and exists on arm64 too (the arm64 section,
+below): Win64 refuses a function that has one with `GRJIT_ERR_UNSUPPORTED` before
+a byte is emitted (story 7b), and nothing about a function without one changes
+(the three pins, and a fourth, over callable functions with calls and no tail
+call, were recorded at the commit before and hold).
 
 **The IR.** `TAIL_CALL_SLOT` and `TAIL_CALL_PTR`: terminators with no result and
 *one* frame state, up to sixteen arguments (registers or immediates), the
@@ -885,11 +887,11 @@ but the only way it reached C was `GRJIT_OP_CALL`: a helper at a fixed address, 
 most six integer arguments, no result status, no signature, no native-stack
 accounting, and no way to say "this one may allocate, pause, fail or re-enter guest
 code". lang-tang's library calls therefore still left compiled code. This is the call
-that does not. It is x86-64 SysV only, as calls and tail calls are: arm64 and Win64
-refuse a function with one (`GRJIT_ERR_UNSUPPORTED`, before a byte), and the three pins
-and the callable pin do not move (story 7 gives them the call; the register
-assignment differs and Win64 returns a 16-byte struct through a hidden pointer, so
-the *emission* adapts there and the descriptor does not).
+that does not. It is described here for x86-64 SysV and exists on arm64 too (the arm64
+section, below, with AAPCS64's eight register words and the pair back in `x0:x1`): Win64
+refuses a function with one (`GRJIT_ERR_UNSUPPORTED`, before a byte), and the pins and the
+callable pin do not move (story 7b gives Win64 the call; it returns a 16-byte struct
+through a hidden pointer, so the *emission* adapts there and the descriptor does not).
 
 **`CALL` and `CALL_NATIVE` are two operations, decided.** `CALL` stays the *trusted
 helper*: the engine's `gc_store`, a barrier, the poll's slow path. It is a leaf or a
@@ -1128,6 +1130,138 @@ status; those figures contradicted the tables and are withdrawn.) Each loop chec
 The cost of taking an exit (a status, or the stack check) is a `deopt` hook call and a chain rebuild, which is the
 engine's and is measured by its tests, not here.
 
+## The arm64 convention for calls, tail calls and natives (AD-28, story 7 of the calls spec)
+
+arm64 refused a callable function and each of the five operations (`CALL_SLOT`, `CALL_PTR`,
+`TAIL_CALL_SLOT`, `TAIL_CALL_PTR`, `CALL_NATIVE`) until story 7 of the calls spec, so CAP-1, CAP-7 and
+CAP-8 held on x86-64 only and every call, tail-call and native test on arm64 refused and passed,
+proving the refusal and nothing else. `src/arm64/` now has its own internal convention, on the frame
+record `x29`/`x30` that `runtime-core`'s `a/compiled.h` already names for arm64, with the same
+protocol, hooks, stack maps and metadata as x86-64: what differs is the registers, and where the
+stack arguments and the return address are.
+
+| | x86-64 SysV | arm64 (AAPCS64's registers) |
+| --- | --- | --- |
+| Register arguments | `rdi rsi rdx rcx r8 r9` | `x0`-`x7` |
+| Context | `r10` | `x9` |
+| Result; status | `rax`; `rdx` | `x0`; `x1` |
+| Stack arguments, and who pops | above the return address; the callee, `ret imm16` | at `[sp + 8i]` at the call, in whole 16-byte units; the callee, `mov sp, x29; ldp x29, x30, [sp], #16; add sp, sp, #in_A; ret` (the `add` omitted for none) |
+| Callee-saved registers | none used | none used: `x19`-`x28` and `d8`-`d15` are never named, and `x18` (the platform register) is never touched; the adapter sets `x29` to the chain-end marker and restores it from its own frame record, never `mov sp, x29` |
+| Scratch | `rax rcx rdx` and `r11` | `x10` copy temporary, `x15` the context while the walk-start cell is stored, `x16` the call target and `adr`'s destination, `x17` a displacement that fits no immediate |
+| Walk-start cell | frame base and `lea rax, [rip + after_call]` | `x29` and `adr x16, after_call` (a new assembler instruction: 21 bits, and `adrp`/`add` where it does not reach, under the assembler's reach rule) |
+| The return address | pushed by `call` | in `x30`, saved by the callee's frame record |
+| Native pair | `rax:rdx` | `x0:x1`, only `w1` looked at (`reserved` is the upper half of `x1`) |
+| Native stack words | context and five arguments in registers, the rest at `[rsp + 8i]` | context and seven arguments in registers, the rest at `[sp + 8i]`; the area is `S = round_up_16(8k)`, made by `sub sp`, popped by the caller |
+
+The internal entry is on a 16-byte boundary with the 16-byte tag before it (the magic and the
+parameter count, then the engine's token), padded to it by `brk #0` words; `grjit_call_target_ok`
+checks the boundary as well as the registry, the magic, the count and the token, because a branch to a
+misaligned address faults on arm64 and lands in the code's own data everywhere. The native-stack check
+is in every callable prologue and ends in a chain deopt before a frame is made: `sub x16, sp, #alloc;
+ldr x15, [x9, #limit]; cmp x16, x15; b.lo overflow`. There is no unwind information, as before (nothing
+unwinds natively through a compiled frame). **`sp` is a multiple of 16 at every instruction that uses it
+as a base**: the frame is made once and is a multiple of 16, an argument area is whole 16-byte units,
+and nothing else moves it. `qemu-user` does not fault on a misaligned `sp`, so each alignment claim is a
+recorded `sp` asserted explicitly: at every native's entry (a stub records it), at every hook and
+helper the fixture engine supplies (their frame address, which is `sp` less a multiple of sixteen), and
+in the code itself (every instruction that writes `sp` is one of five forms, and moves it by sixteens:
+`test_arm64_calls.cpp`).
+
+**The sequences** (`i` indexes the argument, `in_A` and `in_T` are the stack-argument bytes of this
+function and of the tail callee):
+
+```
+call:    ldr x16, =slot ; ldr x16, [x16] ; cmp x16, #1 ; b.ls slow ; str x16, [x29, ENTRY] ; stage the arguments
+         adr x16, push_ret ; ldr x15, [x29, CTX] ; str x29, [x15, cell] ; str x16, [x15, cell + 8]
+         x0 = ctx, x1 = callee, x2 = &area, x3 = n ; blr hook ; push_ret: (the frame-push site) ; cbnz w0, exit
+         sub sp, sp, #S ; the stack arguments through x10 ; x0..x7 from the area ; x9 = ctx ; x16 = ENTRY ; blr x16
+         (the call site) ; cbnz x1, ret_propagate ; str x0, [dst] ; the pop hook
+native:  sub x16, sp, #(S + stack_bytes) ; compare with the limit ; b.lo exit_before
+         adr x16, ret ; store the cell ; sub sp, sp, #S ; stack arguments through x10 ; x0 = ctx ; x1..x7 = args
+         mov x16, #addr ; blr x16 ; ret: (the call site) ; add sp, sp, #S ; str x0, [dst] ; mov w1, w1 ; cbnz x1, exit_after
+adapter: stp x29, x30 ; sub sp ; save ctx, out, args ; the entry hook ; arguments to x0-x7 and [sp..] ; x9 = ctx
+         x29 = MARKER ; adr x16, internal ; blr x16 ; clear the cell ; ldp x29, x30 from the adapter's own frame ; ret
+```
+
+**A tail call** replaces the frame with `sp` moved last. With `R = x29 + 16 + in_A` where the original
+caller expects `sp` after the return, the callee is entered with `sp = R - in_T`, its stack arguments
+at `[sp, R)`, and `x29` and `x30` as they were for this function (the caller's frame record and the
+return address, which the callee's prologue pushes again). The arguments area is the staging place
+(the shape's `pad` keeps its end below the lowest address the copy writes), everything that is read
+from the frame after the first write (the context, the return address, the caller's saved base) is
+loaded first, and the register arguments come from the area last. An emitted one, for a function of ten
+parameters that tail-calls a callee of twelve arguments (four of them on the stack, where its caller has
+two, so the copy overwrites the frame record, which was loaded first), disassembled with the cross
+`objdump` (the offsets are in the function's own code):
+
+```
+  1d4:	ldur	x9, [x29, #-8]
+  1d8:	ldr	x30, [x29, #8]
+  1dc:	ldr	x15, [x29]
+  1e0:	ldur	x10, [x29, #-136]
+  1e4:	str	x10, [x29]
+  1e8:	ldur	x10, [x29, #-128]
+  1ec:	str	x10, [x29, #8]
+  1f0:	ldur	x10, [x29, #-120]
+  1f4:	str	x10, [x29, #16]
+  1f8:	ldur	x10, [x29, #-112]
+  1fc:	str	x10, [x29, #24]
+  200:	ldur	x0, [x29, #-200]
+  204:	ldur	x1, [x29, #-192]
+  208:	ldur	x2, [x29, #-184]
+  20c:	ldur	x3, [x29, #-176]
+  210:	ldur	x4, [x29, #-168]
+  214:	ldur	x5, [x29, #-160]
+  218:	ldur	x6, [x29, #-152]
+  21c:	ldur	x7, [x29, #-144]
+  220:	ldur	x16, [x29, #-208]
+  224:	mov	sp, x29
+  228:	mov	x29, x15
+  22c:	br	x16
+```
+
+`16 + in_A - in_T` is negative when the callee is wider and the copy then reaches below the caller's
+incoming area, as on x86-64, and the old slots above the area are dead by then. The shared shape
+(`grjit_callable_shape`) counts a return-address word arm64 does not have, so its padding is
+conservative by up to one slot; an arm64-only formula would have been a second shape for a slot, so
+there is one, taking the target's count of register arguments (`grjit_stack_arg_bytes` and
+`grjit_callable_shape` take it: 6, 8, and Win64's 4 in story 7b), which is why the pad rule is tested
+for both counts from the frame sizes alone.
+
+**The native-stack check is one-sided on arm64, deliberately.** The check on every target is: the
+call is an exit before it unless `sp_before_call - S - stack_bytes` is not below the limit. On x86-64
+the return address the call pushes is inside `stack_bytes` (the native's whole use from its entry);
+on arm64 it is in `x30` and not on the stack, so a native has eight bytes *more* than it declared. A
+bound that said "as declared on both" would be one `sub` and one compare on x86-64 and an extra
+instruction on arm64 for a figure nobody can state to the byte (a native's own use varies with its
+compiler), so the formula stays one and `natives.h` says so. The byte-exact tests derive the budget from
+the entry stack pointer a stub records, name the adjustment (`kNativeEntrySpBias`: 8 on x86-64, 0 on
+arm64) and show the call is made at the budget and an exit before it one byte below.
+
+**Rejected.** *Caller pops*: a tail call to a callee with more stack arguments could not move the
+return address without telling the original caller (story 5's reason). *AAPCS64's own stack convention
+as the internal one*: the same, and it would put `x30` handling in the caller. *A thunk adapting natives*:
+a second call and a frame between every compiled function and every native. *An arm64-only padding
+formula*: one slot at most, a second shape. *Expecting the alignment fault under qemu*: not modelled, so
+the claim is asserted. *The `adrp`/`add` form for every `adr`*: the walk start is always a few
+instructions from its label, and the long form exists so that the reach rule is the assembler's for
+every label, not because an emitter needs it.
+
+**What each instrument gives, and where each runs.** Pins and cross emission run on the host for all
+three architectures and say bytes did not move; only `qemu-aarch64` says the bytes are right. The
+structural test reads the convention out of the code of all 1,016 callable functions the pin test
+generates, and the executing tests (`testCalls`, `testTail`, `testNatives`) run it; both are kept,
+because a decoder written by the emitter's author agreeing with it is not an execution, and an execution
+that passes does not say which claim it leaned on. The planted defects 20 to 29 and the mutations of
+`src/arm64/` (`tools/arm64-plants.txt`, `check-planted-calls.py --target=arm64`) each run under qemu in
+the container of `tools/xarch/jit-arm64.sh`, with their controls; `check-planted.sh` names them and does
+not count them. `runtime-core`'s, `runtime-heap`'s (with `RELOCATE=yes` and its relocation gates) and
+`runtime-debug`'s suites run there too. **Not shown, and not claimed:** real arm64 hardware, the
+instruction cache (`qemu-user` translates lazily and does not model it), and the alignment fault.
+The "pause resumed on another thread" test runs under qemu without a sanitizer; its race-freedom claim
+is TSan's, on x86-64. No timing is taken under qemu: the benchmark runs `--smoke` there, every case once,
+each checking its own sum.
+
 ## Gates
 
 `make check-labels` requires every header to carry exactly one `@stability free`
@@ -1178,8 +1312,8 @@ numbers; the calibration row is what to read them against.
   through the `deopt` hook (above). Walking native frames for roots is
   `runtime-core`'s walk (`a/compiled.h`), which a callable function feeds by
   storing its walk start before every call that can reach a GC point.
-- **Calls, tail calls and calls to natives on arm64 and Win64**: story 7 of the calls
-  spec. (A native with a floating-point or variadic signature cannot be described;
+- **Calls, tail calls and calls to natives on Win64**: story 7b of the calls spec (arm64
+  has them, below). (A native with a floating-point or variadic signature cannot be described;
   resumable natives, which are called only through an exit (AD-23), and the policy of
   an opaque native under a pause are the engine's, story 9.)
 - **Windows arm64 and macOS.** No backend: `grjit_backend_available()` is false,
@@ -1195,9 +1329,12 @@ numbers; the calibration row is what to read them against.
   the built executables instead).
 - **Pointer authentication and BTI** (above): unsupported and untested.
 - **Real arm64 hardware.** The arm64 backend's code runs under `qemu-aarch64`
-  (every test of this library and `lang-tang`'s JIT arm) and in a simulator, and
-  nowhere else. Instruction-cache coherence, memory ordering and a real kernel's
-  W^X are not exercised.
+  (every test of this library, including its calls, tail calls and natives, of
+  `runtime-core`, `runtime-heap` and `runtime-debug`, and `lang-tang`'s JIT arm) and
+  in a simulator, and nowhere else. Instruction-cache coherence, memory ordering, the
+  fault a misaligned `sp` takes on hardware (`qemu-user` does not model it: alignment is
+  asserted, recorded at every hook and native, and never expected as a fault) and a real
+  kernel's W^X are not exercised.
 - An ahead-of-time C backend, a Wasm backend, JIT hardening, a
   register allocator, any pass, SSA, inlining, unboxing, floating point, SIMD,
   32-bit and 8-bit values.

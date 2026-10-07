@@ -71,13 +71,14 @@ typedef struct GRJIT_Limits {
   size_t max_guest_call_arguments; ///< Arguments of a call or a tail call to
                                ///< another compiled function (`CALL_SLOT`,
                                ///< `CALL_PTR`, `TAIL_CALL_SLOT`, `TAIL_CALL_PTR`), which
-                               ///< the internal convention passes in six
-                               ///< registers and then on the stack. Default
-                               ///< and ceiling 16.
+                               ///< the internal convention passes in registers
+                               ///< (six on x86-64 SysV, eight on arm64) and then
+                               ///< on the stack. Default and ceiling 16.
   size_t max_native_arguments; ///< Arguments of a native (`CALL_NATIVE`), not
                                ///< counting the context, which every native
                                ///< takes first: the C ABI passes the first five
-                               ///< in registers and the rest on the stack.
+                               ///< in registers on x86-64 SysV (seven on arm64)
+                               ///< and the rest on the stack.
                                ///< Default and ceiling 16.
   size_t max_native_stack_bytes; ///< The most `GRJIT_NativeDesc::stack_bytes` a
                                ///< descriptor may declare. Default 64 KiB;
