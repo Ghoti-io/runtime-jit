@@ -240,7 +240,7 @@ the IR and by AArch64 normal memory, and nothing extra is done for it.
 | Hazard | What was done |
 | --- | --- |
 | A slot offset beyond the signed 9-bit unscaled range (`ldur`, -256..255) or any `disp` beyond the scaled 12-bit range | One instruction when it fits (scaled if the displacement is non-negative, a multiple of the access size and in range; unscaled if it is -256..255); otherwise the displacement is built in `x17` and the register-offset form is used. Slots beyond `-256` are register 29 and up, so a function with more than 28 registers has some. Never truncated: a test sweeps every width and sign around every boundary and runs it. |
-| A frame over 4095 bytes, up to the 1 MiB cap | `sub sp, sp, #hi, lsl #12` then `sub sp, sp, #lo`, each a multiple of 16 so `sp` is aligned between them. Over 16 MiB (a raised cap) is `LIMIT`, not a truncation. At the cap runs; one register over is `LIMIT` as on x86-64. |
+| A frame over 4095 bytes, up to the 1 MiB cap | `sub sp, sp, #hi, lsl #12` then `sub sp, sp, #lo`, each a multiple of 16 so `sp` is aligned between them. From 16 MiB (a raised cap, up to the 1 GiB ceiling) the immediates cannot hold it: the amount goes in `x17` and one extended-register instruction (`sub sp, sp, x17`, the form that can name `sp`) moves it, so no frame is refused that x86-64 compiles; the slot offsets beyond it are built in `x17` as every large offset is. At the cap runs; one register over is `LIMIT` as on x86-64. **This was a difference between the targets** (arm64 refused a frame over 2^24 bytes, 2,097,200 registers, with `LIMIT` where x86-64 compiled it; a native whose call needed 2^24 bytes or more of stack, declared use plus stack arguments, was refused the same way, though `limits.c` and `natives.h` allow 1 GiB), and was removed rather than documented: a limit that is a property of an instruction encoding and not of the function is a defect, and the cost of removing it is one instruction in a case no function reaches by accident. Tests run the sizes 2^24 - 16 to 2^30 on every target and read the emitted words for both. |
 | A conditional branch reaches only +-1 MiB (`b.cond`, `cbz`, `cbnz`) while `b` reaches +-128 MiB and the code cap defaults to 16 MiB | See below. |
 | A 64-bit immediate | `movz` or `movn` (whichever leaves fewer pieces) and `movk` for each 16-bit piece that differs: one to four instructions. |
 | The instruction cache | After the code is written and before the mapping is made executable, `__builtin___clear_cache` runs over it (arm64 only). |
@@ -269,7 +269,15 @@ code it runs would work with or without that call.** So no run under the emulato
 can prove the call is right. What is tested is that the line is *reached*: the
 function counts its calls, and a test shows that an arm64 mapping is synced once,
 before `protect` is called (a page provider that records the count when its
-`protect` runs), and an x86-64 mapping is not. Real arm64 hardware has not been
+`protect` runs), and an x86-64 mapping is not. **The maintenance is once per mapping, before
+the flip to read-execute, and that suffices only because the engine that compiles also runs the code,
+on one thread**: the thread that wrote the lines is the thread whose instruction fetch sees them after
+the cache maintenance and the context synchronization of its own `mprotect`. Publishing code to another
+thread (a compiler thread that hands a mapping to a running one) would need more: the executing
+thread must discard any instructions it already fetched (`isb`, or `membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE)`
+from the publisher, on Linux), and nothing here does it. That is not a limit of the library today (the
+context, and the code it runs, belong to one thread at a time) and is the first thing a background
+compiler would have to add. Real arm64 hardware has not been
 exercised by this library, and that line is the one thing that would fail
 there and not here.
 
@@ -1126,7 +1134,7 @@ not show), **about 0.2 ns dearer than the leaf helper** that stores no walk star
 measurable**: the `test` and the branch on `edx` are hidden by the call's own latency, and the status loop measures
 0.05 to 0.1 ns *faster* than the plain one, which is noise in the compiler's placement and not a gain. (An earlier
 version of this paragraph, measured with other sessions building, said 3.3 ns, 1.0 over the leaf helper and 0.4 for the
-status; those figures contradicted the tables and are withdrawn.) Each loop checks that its sum is its iteration count.
+status; those figures contradicted the tables and are withdrawn.) Each loop checks its own sum (the plain, poll and call loops the sum of 0 to n - 1 and the call loop's helper count, the others n).
 The cost of taking an exit (a status, or the stack check) is a `deopt` hook call and a chain rebuild, which is the
 engine's and is measured by its tests, not here.
 
@@ -1255,12 +1263,22 @@ because a decoder written by the emitter's author agreeing with it is not an exe
 that passes does not say which claim it leaned on. The planted defects 20 to 29 and the mutations of
 `src/arm64/` (`tools/arm64-plants.txt`, `check-planted-calls.py --target=arm64`) each run under qemu in
 the container of `tools/xarch/jit-arm64.sh`, with their controls; `check-planted.sh` names them and does
-not count them. `runtime-core`'s, `runtime-heap`'s (with `RELOCATE=yes` and its relocation gates) and
+not count them. The harness accepts a signal as a catch (code freed under a frame faults the process, and a
+hang is the tests' watchdog's signal), which says a defect was reached and not which: seven of the arm64
+mutations that only a crash caught are now also caught by the words of the code (`testArm64_calls` reads the
+dispatch and the tail-call sequence), and two stay caught by their crash alone, for want of a cheap assertion (the
+entry a slot call saves for the callee's return, and the arguments staged in the area one slot late: a run
+reads either as a wrong argument or a fault in the hook, and the words that would show it are the emitter's own
+offsets over again). The mutations of the arm64 emitter's sites, indices, kinds and large offsets are run on the host
+too, through what `grjit_emit_for` makes for arm64, since a defect in code only arm64 runs must not wait for qemu to
+be seen. `runtime-core`'s, `runtime-heap`'s (with `RELOCATE=yes` and its relocation gates) and
 `runtime-debug`'s suites run there too. **Not shown, and not claimed:** real arm64 hardware, the
 instruction cache (`qemu-user` translates lazily and does not model it), and the alignment fault.
 The "pause resumed on another thread" test runs under qemu without a sanitizer; its race-freedom claim
 is TSan's, on x86-64. No timing is taken under qemu: the benchmark runs `--smoke` there, every case once,
-each checking its own sum.
+each loop case checking its own sum inside the program and `jit-arm64.sh` reading the check word each prints
+against the one its iteration count must give. Each test binary is bounded in time there (`timeout`, 30 minutes
+by default), and the gates of the script are tried on a pass and a planted failure by `tools/xarch/jit-arm64-selftest.sh`.
 
 ## Gates
 
