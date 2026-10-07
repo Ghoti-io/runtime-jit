@@ -2034,4 +2034,46 @@ TEST(Calls, CallableCodeBuiltForAnotherLayoutIsRefusedBeforeAnyOfItRuns) {
   EXPECT_EQ(grjit_code_call(c.code, w.ctx, args, out), uint32_t{GRJIT_EXIT_RETURNED});
 }
 
+/* ---- An entry is on a sixteen-byte boundary ------------------------------------------------ */
+
+TEST(Calls, AnAddressNotOnASixteenByteBoundaryIsNoEntryEvenInsideRegisteredCodeWithAValidTagBeforeIt) {
+  CALLS_ONLY_WHERE_EMITTED();
+  // A range the context registered as code (here a buffer of ours; the registry does not look at
+  // what the bytes are), with the tag written before two addresses: one on a sixteen-byte boundary,
+  // which is the control (the registry, the tag's magic, its parameter count and its token all
+  // accept it), and one eight bytes off, whose tag is just as valid. Only the boundary tells them
+  // apart: a branch to the second faults on arm64 and lands in the middle of the code's data on
+  // every target.
+  Engine e;
+  alignas(64) static uint64_t buf[32];
+  const uint64_t token = 4242;
+  const size_t aligned_word = 8;    // byte offset 64
+  const size_t misaligned_word = 17; // byte offset 136, which is 8 mod 16
+  for (uint64_t & w : buf) {
+    w = 0xCCCCCCCCCCCCCCCCull;
+  }
+  for (size_t entry_word : {aligned_word, misaligned_word}) {
+    buf[entry_word - 2] = GRJIT_ENTRY_TAG_WORD(3);
+    buf[entry_word - 1] = token;
+  }
+  GRCORE_Code * handle = nullptr;
+  ASSERT_EQ(grcore_code_create(nullptr, nullptr, [](void *) {}, &handle), GRCORE_OK);
+  GRCORE_CodeMeta meta{GRCORE_CODEMETA_FORMAT_VERSION, 0, sizeof buf, 0, nullptr};
+  ASSERT_EQ(grcore_code_register(e.ctx, e.engine, handle, reinterpret_cast<uintptr_t>(buf), sizeof buf, &meta),
+      GRCORE_OK);
+  const uint64_t good = reinterpret_cast<uint64_t>(&buf[aligned_word]);
+  const uint64_t odd = reinterpret_cast<uint64_t>(&buf[misaligned_word]);
+  ASSERT_EQ(good % 16, 0u);
+  ASSERT_EQ(odd % 16, 8u);
+  EXPECT_EQ(grjit_call_target_ok(e.ctx, good, token, 3), 1u) << "the control: every other check accepts it";
+  EXPECT_EQ(grjit_call_target_ok(e.ctx, good, token + 1, 3), 0u) << "and the token still matters";
+  EXPECT_EQ(grjit_call_target_ok(e.ctx, good, token, 2), 0u) << "and the parameter count";
+  EXPECT_EQ(grjit_call_target_ok(e.ctx, odd, token, 3), 0u) << "the same tag, off the boundary: refused";
+  for (uint64_t off : {1u, 2u, 4u, 8u, 12u}) {
+    EXPECT_EQ(grjit_call_target_ok(e.ctx, good + off, token, 3), 0u) << off;
+  }
+  ASSERT_EQ(grcore_code_unregister(e.ctx, reinterpret_cast<uintptr_t>(buf)), GRCORE_OK);
+  grcore_code_release(handle);
+}
+
 GRJIT_TEST_MAIN()

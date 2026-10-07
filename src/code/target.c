@@ -37,6 +37,13 @@
 uint32_t grjit_call_target_ok(
     void * context, uint64_t target, uint64_t callee, uint64_t arg_count) {
   GRCORE_CodeRange range;
+  /* Every internal entry is on a sixteen-byte boundary with its tag before it (both emitters
+   * pad to it), so an address that is not is no entry, whatever bytes lie before it: a branch
+   * to a misaligned address faults on arm64, and on every target it is the middle of an
+   * instruction or of the code's own data. */
+  if ((target & (GRJIT_ENTRY_TAG_BYTES - 1u)) != 0) {
+    return 0;
+  }
   if (!grcore_code_lookup((const GRCORE_Context *)context, (uintptr_t)target, &range) ||
       range.retired || target < range.start + GRJIT_ENTRY_TAG_BYTES) {
     return 0;
