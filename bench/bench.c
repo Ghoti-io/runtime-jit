@@ -430,6 +430,117 @@ static uint64_t loop_tail_call_run(uint64_t iterations) {
   return out[0];
 }
 
+/* ---- calls to natives (AD-28, CAP-7) -------------------------------------- */
+
+typedef enum { LOOP_NATIVE, LOOP_NATIVE_STATUS, LOOP_HELPER_GC } NativeLoopKind;
+
+static uint64_t native_inc(void * context, uint64_t x) {
+  (void)context;
+  return x + 1;
+}
+static GRJIT_NativeResult native_inc_status(void * context, uint64_t x) {
+  (void)context;
+  GRJIT_NativeResult r = {x + 1, 0};
+  return r;
+}
+/* The trusted helper a CALL reaches: the same work, no context, no status. */
+static uint64_t helper_inc(uint64_t x) { return x + 1; }
+
+static GRJIT_NativeTable * g_native_table;
+static uint32_t g_native_ids[2];
+static GRJIT_Code * g_native_loop[3];
+
+/* loop(n): for i in 0..n { sum = inc(sum) }, in a callable function, with the call
+ * a registered native without a status (the C call with the context, the walk
+ * start stored first, the native-stack check), a registered native with a status
+ * (and the result pair tested), or the engine's trusted helper through GRJIT_OP_CALL
+ * as a GC point (the walk start stored, no check, no status), so the three figures
+ * are the cost of each protocol over the same work. */
+static GRJIT_Function * build_native_loop(NativeLoopKind kind) {
+  GRJIT_Builder * b;
+  GRJIT_CallHooks hooks = {call_push, call_pop, call_compile, call_deopt, NULL};
+  check(grjit_builder_create("native_loop", 2, NULL, NULL, &b), "builder");
+  GRJIT_VReg n, i, sum, t;
+  GRJIT_BlockId entry, head, body, done;
+  check(grjit_builder_param(b, GRJIT_TYPE_I64, &n), "param");
+  check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &i), "vreg");
+  check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &sum), "vreg");
+  check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &t), "vreg");
+  check(grjit_builder_set_callable(b, &hooks), "callable");
+  check(grjit_builder_set_natives(b, g_native_table), "natives");
+  check(grjit_builder_block(b, &entry), "block");
+  check(grjit_builder_block(b, &head), "block");
+  check(grjit_builder_block(b, &body), "block");
+  check(grjit_builder_block(b, &done), "block");
+  check(grjit_builder_set_block(b, entry), "at");
+  check(grjit_builder_const(b, i, 0), "op");
+  check(grjit_builder_const(b, sum, 0), "op");
+  check(grjit_builder_br(b, head), "op");
+  check(grjit_builder_set_block(b, head), "at");
+  check(grjit_builder_cmp(b, GRJIT_CMP_LT, t, grjit_operand_vreg(i), grjit_operand_vreg(n)), "op");
+  check(grjit_builder_br_if(b, grjit_operand_vreg(t), body, done), "op");
+  check(grjit_builder_set_block(b, body), "at");
+  GRJIT_FrameSlot st[2] = {grjit_frame_slot_vreg(i), grjit_frame_slot_vreg(sum)};
+  GRJIT_FrameState before = {{1, 1}, 2, st};
+  GRJIT_FrameState after = {{1, 2}, 2, st};
+  GRJIT_Operand args[1] = {grjit_operand_vreg(sum)};
+  if (kind == LOOP_HELPER_GC) {
+    check(grjit_builder_call(b, sum, (uint64_t)(uintptr_t)helper_inc, GRJIT_CALL_GC_POINT,
+              GRCORE_SITE_GC_POINT_CALL, args, 1, before.identity, st, 2),
+        "call");
+  } else {
+    check(grjit_builder_call_native(b, sum, g_native_ids[kind == LOOP_NATIVE ? 0 : 1], args, 1,
+              &before, kind == LOOP_NATIVE ? NULL : &after),
+        "native call");
+  }
+  check(grjit_builder_binary(b, GRJIT_OP_ADD, i, grjit_operand_vreg(i), grjit_operand_imm(1)), "op");
+  check(grjit_builder_br(b, head), "op");
+  check(grjit_builder_set_block(b, done), "at");
+  check(grjit_builder_ret(b, grjit_operand_vreg(sum)), "op");
+  GRJIT_Function * f;
+  check(grjit_builder_finish(b, &f), "finish");
+  return f;
+}
+
+static uint64_t run_native_loop(NativeLoopKind kind, uint64_t iterations) {
+  world_open();
+  if (g_native_table == NULL) {
+    GRJIT_Type one[1] = {GRJIT_TYPE_I64};
+    GRJIT_NativeDesc d;
+    memset(&d, 0, sizeof d);
+    d.params = one;
+    d.param_count = 1;
+    d.result = GRJIT_TYPE_I64;
+    d.stack_bytes = 64;
+    if (grjit_native_table_create(NULL, NULL, &g_native_table) != GRJIT_OK) {
+      setup_failed("a native table");
+    }
+    d.address = (uint64_t)(uintptr_t)native_inc;
+    check(grjit_native_table_add(g_native_table, &d, &g_native_ids[0]), "native");
+    d.address = (uint64_t)(uintptr_t)native_inc_status;
+    d.flags = GRJIT_NATIVE_STATUS;
+    check(grjit_native_table_add(g_native_table, &d, &g_native_ids[1]), "native");
+  }
+  if (g_native_loop[kind] == NULL) {
+    GRJIT_Function * f = build_native_loop(kind);
+    g_native_loop[kind] = compile(f);
+    grjit_function_destroy(f);
+  }
+  uint64_t args[1] = {iterations};
+  uint64_t out[3] = {0, 0, 0};
+  if (grjit_code_call(g_native_loop[kind], g_context, args, out) != GRJIT_EXIT_RETURNED) {
+    setup_failed("the native loop did not return");
+  }
+  if (out[0] != iterations) {
+    setup_failed("the native loop's sum is not its iteration count");
+  }
+  return out[0];
+}
+
+static uint64_t loop_native_run(uint64_t n) { return run_native_loop(LOOP_NATIVE, n); }
+static uint64_t loop_native_status_run(uint64_t n) { return run_native_loop(LOOP_NATIVE_STATUS, n); }
+static uint64_t loop_helper_gc_run(uint64_t n) { return run_native_loop(LOOP_HELPER_GC, n); }
+
 /* A function of 100 operations: alternating arithmetic on a few registers. */
 static GRJIT_Function * build_hundred(void) {
   GRJIT_Builder * b;
@@ -534,6 +645,9 @@ static const Case cases[] = {
     {"loop-call", loop_call_run, 10000000, 1000, 0},
     {"loop-compiled-call", loop_compiled_call_run, 10000000, 1000, 1},
     {"loop-tail-call", loop_tail_call_run, 10000000, 1000, 1},
+    {"loop-helper-gc", loop_helper_gc_run, 10000000, 1000, 1},
+    {"loop-native", loop_native_run, 10000000, 1000, 1},
+    {"loop-native-status", loop_native_status_run, 10000000, 1000, 1},
 };
 
 int main(int argc, char ** argv) {
@@ -599,6 +713,10 @@ int main(int argc, char ** argv) {
     grcore_code_release(g_tail_loop.handle);
     grjit_code_destroy(g_tail_loop.code);
   }
+  for (int k = 0; k < 3; k++) {
+    grjit_code_destroy(g_native_loop[k]);
+  }
+  grjit_native_table_free(g_native_table);
   if (g_context != NULL) {
     grcore_context_destroy(g_context);
     grcore_group_destroy(g_group);
