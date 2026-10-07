@@ -45,6 +45,7 @@
 #include <ghoti.io/runtime-jit/core.h>
 #include <ghoti.io/runtime-jit/ir.h>
 #include <ghoti.io/runtime-jit/limits.h>
+#include <ghoti.io/runtime-jit/natives.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -167,6 +168,21 @@ GRJIT_API GRJIT_Result grjit_builder_set_callable(
  * @return ::GRJIT_OK, or ::GRJIT_ERR_INVALID for NULL.
  */
 GRJIT_API GRJIT_Result grjit_builder_set_token(GRJIT_Builder * builder, uint64_t token);
+
+/**
+ * @brief Gives the function the table its `CALL_NATIVE` operations name
+ *   (natives.h).
+ *
+ * The function keeps the pointer, not a copy: the table must outlive the function's
+ * verification and compilation (the compiled code copies what it needs and does
+ * not name the table again). The natives it describes must outlive the code. May
+ * be set once and changed before the function is finished; a native call with no
+ * table is refused by the verifier.
+ *
+ * @return ::GRJIT_OK, or ::GRJIT_ERR_INVALID for a NULL builder.
+ */
+GRJIT_API GRJIT_Result grjit_builder_set_natives(
+    GRJIT_Builder * builder, const GRJIT_NativeTable * table);
 
 /** @brief Declares the poll slow-path helper that `POLL` calls. */
 GRJIT_API GRJIT_Result grjit_builder_set_poll_helper(
@@ -336,6 +352,35 @@ GRJIT_API GRJIT_Result grjit_builder_tail_call_ptr(GRJIT_Builder * builder,
     GRJIT_Operand target, uint64_t callee, const GRJIT_Operand * args,
     size_t arg_count, GRCORE_PollIdentity identity,
     const GRJIT_FrameSlot * state_slots, size_t state_count);
+
+/**
+ * @brief Calls the registered native `id` (natives.h): a GC point, and no exit to
+ *   the interpreter.
+ *
+ * Only in a callable function (which has the `deopt` hook) whose builder was given the
+ * table (::grjit_builder_set_natives). The verifier refuses, naming the
+ * operation: an id the table does not hold; a function that is not callable; an
+ * argument count other than the descriptor's; a register argument whose type is
+ * not the parameter's (an immediate is accepted for any type); a `dst` whose type
+ * is not the result's, or a `dst` for a native with no result; a frame state of
+ * the wrong length; an `after_state` missing when the descriptor says
+ * ::GRJIT_NATIVE_STATUS, or given when it does not.
+ *
+ * @param dst The result register, or ::GRJIT_NO_VREG to discard it.
+ * @param id The native's id in the table.
+ * @param args The arguments, copied; each a register or an immediate; at most
+ *   `GRJIT_Limits::max_native_arguments` (the context is not counted).
+ * @param arg_count How many.
+ * @param state The guest frame while the native runs, and the state of an exit
+ *   before the call (copied).
+ * @param after_state The guest frame with the call complete and its result in
+ *   place, for the exit a non-zero status takes (copied); NULL for a native with
+ *   no status.
+ * @return ::GRJIT_OK, ::GRJIT_ERR_INVALID, ::GRJIT_ERR_LIMIT or ::GRJIT_ERR_OOM.
+ */
+GRJIT_API GRJIT_Result grjit_builder_call_native(GRJIT_Builder * builder,
+    GRJIT_VReg dst, uint32_t id, const GRJIT_Operand * args, size_t arg_count,
+    const GRJIT_FrameState * state, const GRJIT_FrameState * after_state);
 
 /** @brief A poll, with its frame state (copied). */
 GRJIT_API GRJIT_Result grjit_builder_poll(GRJIT_Builder * builder,

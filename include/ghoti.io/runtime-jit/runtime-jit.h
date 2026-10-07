@@ -49,6 +49,7 @@
 #include <ghoti.io/runtime-jit/ir.h>
 #include <ghoti.io/runtime-jit/libver.h>
 #include <ghoti.io/runtime-jit/limits.h>
+#include <ghoti.io/runtime-jit/natives.h>
 #include <ghoti.io/runtime-jit/print.h>
 #include <ghoti.io/runtime-jit/verify.h>
 

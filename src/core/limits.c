@@ -38,11 +38,15 @@
 #define GRJIT_DEFAULT_FRAME_BYTES (1u << 20)
 #define GRJIT_DEFAULT_CODE_BYTES (16u << 20)
 #define GRJIT_DEFAULT_SITE_ENTRIES (4u << 20)
+#define GRJIT_DEFAULT_NATIVE_ARGUMENTS 16u
+#define GRJIT_DEFAULT_NATIVE_STACK_BYTES (64u << 10)
 
 /* Compiled code addresses its frame with a 32-bit displacement and its
  * branches with a 32-bit offset, so a cap past these is no cap. */
 #define GRJIT_FRAME_CEILING ((size_t)1 << 30)
 #define GRJIT_CODE_CEILING ((size_t)1 << 30)
+/* A native's stack check is `lea rax, [rsp - (S + bytes)]`, a 32-bit displacement. */
+#define GRJIT_NATIVE_STACK_CEILING ((size_t)1 << 30)
 
 void grjit_limits_default(GRJIT_Limits * limits) {
   if (limits == NULL) {
@@ -57,6 +61,8 @@ void grjit_limits_default(GRJIT_Limits * limits) {
   limits->max_code_bytes = GRJIT_DEFAULT_CODE_BYTES;
   limits->max_site_entries = GRJIT_DEFAULT_SITE_ENTRIES;
   limits->max_guest_call_arguments = GRJIT_DEFAULT_GUEST_CALL_ARGUMENTS;
+  limits->max_native_arguments = GRJIT_DEFAULT_NATIVE_ARGUMENTS;
+  limits->max_native_stack_bytes = GRJIT_DEFAULT_NATIVE_STACK_BYTES;
 }
 
 static size_t clamp_max(size_t value, size_t ceiling) {
@@ -98,5 +104,13 @@ void grjit_limits_resolve(const GRJIT_Limits * in, GRJIT_Limits * out) {
   if (in->max_guest_call_arguments != 0) {
     out->max_guest_call_arguments =
         clamp_max(in->max_guest_call_arguments, GRJIT_BUILDER_MAX_ARGS);
+  }
+  if (in->max_native_arguments != 0) {
+    out->max_native_arguments =
+        clamp_max(in->max_native_arguments, GRJIT_BUILDER_MAX_ARGS);
+  }
+  if (in->max_native_stack_bytes != 0) {
+    out->max_native_stack_bytes =
+        clamp_max(in->max_native_stack_bytes, GRJIT_NATIVE_STACK_CEILING);
   }
 }

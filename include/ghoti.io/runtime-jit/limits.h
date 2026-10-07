@@ -74,6 +74,14 @@ typedef struct GRJIT_Limits {
                                ///< the internal convention passes in six
                                ///< registers and then on the stack. Default
                                ///< and ceiling 16.
+  size_t max_native_arguments; ///< Arguments of a native (`CALL_NATIVE`), not
+                               ///< counting the context, which every native
+                               ///< takes first: the C ABI passes the first five
+                               ///< in registers and the rest on the stack.
+                               ///< Default and ceiling 16.
+  size_t max_native_stack_bytes; ///< The most `GRJIT_NativeDesc::stack_bytes` a
+                               ///< descriptor may declare. Default 64 KiB;
+                               ///< ceiling 1 GiB.
 } GRJIT_Limits;
 
 /**

@@ -202,7 +202,8 @@ static bool grjit_emit_supports(GRJIT_Arch arch, const GRJIT_Function * f) {
     for (size_t i = 0; i < f->blocks[b].count; i++) {
       GRJIT_OpKind k = f->blocks[b].ops[i].kind;
       if (k == GRJIT_OP_CALL_SLOT || k == GRJIT_OP_CALL_PTR ||
-          k == GRJIT_OP_TAIL_CALL_SLOT || k == GRJIT_OP_TAIL_CALL_PTR) {
+          k == GRJIT_OP_TAIL_CALL_SLOT || k == GRJIT_OP_TAIL_CALL_PTR ||
+          k == GRJIT_OP_CALL_NATIVE) {
         return false;
       }
     }

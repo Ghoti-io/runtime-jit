@@ -75,6 +75,16 @@
  * site of the hook (a frame-push GC point) and an exit before the replacement,
  * from which the interpreter makes the tail call itself, use it.
  *
+ * **Natives** (`CALL_NATIVE`; AD-28) are the engine's C functions, registered
+ * and typed (natives.h), called from a callable function without leaving
+ * compiled code. A native call is a GC point and carries `state`, the guest
+ * frame as it stands while the native runs, which is also the state of an exit
+ * *before* the call (the native-stack check failed: the native is not called
+ * and the interpreter makes the call itself); a native that can fail returns a
+ * status, and a call to one carries a second state, `after_state`, the guest
+ * frame with the call complete and its result in place, which the exit a
+ * non-zero status takes uses because a native cannot be run again.
+ *
  * A *frame state* is a poll identity `(function, bytecode offset)` plus, for
  * each of the function's `interp_slot_count` interpreter slots, a register, a
  * 64-bit constant or "dead". It is attached to each `POLL`, to each call that
@@ -194,6 +204,10 @@ typedef enum GRJIT_OpKind {
                       ///< replaced by the callee's, and control goes to the
                       ///< callee's internal entry. Ends the block. No result.
   GRJIT_OP_TAIL_CALL_PTR,  ///< The same through the code pointer `a`.
+  GRJIT_OP_CALL_NATIVE, ///< Call the registered, typed native `native` (see
+                      ///< natives.h) with `args`, in a callable function: a GC
+                      ///< point with the frame state `state`, and, for a native
+                      ///< with a status, `exit_state`, the state after the call.
   GRJIT_OP_COUNT   ///< Not an operation; closes the enum.
 } GRJIT_OpKind;
 
@@ -304,7 +318,12 @@ typedef struct GRJIT_Op {
   uint32_t exit_state;        ///< For `CALL_SLOT` and `CALL_PTR` (a tail call
                               ///< has the one `state`): the frame
                               ///< state of an exit *before* the call, or
-                              ///< ::GRJIT_NO_STATE.
+                              ///< ::GRJIT_NO_STATE. For `CALL_NATIVE`: the
+                              ///< frame state *after* the call, which the exit a
+                              ///< non-zero status takes uses, or ::GRJIT_NO_STATE
+                              ///< for a native with no status.
+  uint32_t native;            ///< For `CALL_NATIVE`: the native's id in the
+                              ///< function's table.
 } GRJIT_Op;
 
 /**

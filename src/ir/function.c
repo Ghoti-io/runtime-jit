@@ -153,6 +153,7 @@ bool grjit_op_has_state(const GRJIT_Op * op) {
   return op->kind == GRJIT_OP_POLL || op->kind == GRJIT_OP_GUARD ||
          op->kind == GRJIT_OP_CALL_SLOT || op->kind == GRJIT_OP_CALL_PTR ||
          op->kind == GRJIT_OP_TAIL_CALL_SLOT || op->kind == GRJIT_OP_TAIL_CALL_PTR ||
+         op->kind == GRJIT_OP_CALL_NATIVE ||
          (op->kind == GRJIT_OP_CALL && op->attr == GRJIT_CALL_GC_POINT);
 }
 
@@ -170,6 +171,7 @@ void grjit_op_visit_uses(const GRJIT_Function * function, const GRJIT_Op * op,
     case GRJIT_OP_BR:
       break;
     case GRJIT_OP_CALL:
+    case GRJIT_OP_CALL_NATIVE:
       for (size_t i = 0; i < op->arg_count; i++) {
         visit_operand(&op->args[i], visit, user);
       }
@@ -189,8 +191,9 @@ void grjit_op_visit_uses(const GRJIT_Function * function, const GRJIT_Op * op,
       break;
   }
   if (grjit_op_has_state(op)) {
-    /* A guest call has two states; every other site, a tail call included
-     * (its exit state is its state), has one. */
+    /* A guest call has two states, and so does a native with a status (the
+     * second is the state after the call); every other site, a tail call
+     * included (its exit state is its state), has one. */
     uint32_t which[2] = {op->state, op->exit_state};
     for (size_t w = 0; w < 2; w++) {
       if (which[w] == GRJIT_NO_STATE || which[w] >= function->state_count) {
@@ -199,6 +202,12 @@ void grjit_op_visit_uses(const GRJIT_Function * function, const GRJIT_Op * op,
       const GRJIT_FrameState * s = &function->states[which[w]];
       for (size_t i = 0; i < s->slot_count; i++) {
         if (s->slots[i].kind == GRJIT_FRAME_SLOT_VREG) {
+          /* The state after a native call names its result, which the call
+           * assigns: that use is of the value just stored, not an earlier one. */
+          if (op->kind == GRJIT_OP_CALL_NATIVE && w == 1 && op->dst != GRJIT_NO_VREG &&
+              s->slots[i].vreg == op->dst) {
+            continue;
+          }
           visit(user, s->slots[i].vreg);
         }
       }

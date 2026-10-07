@@ -406,6 +406,89 @@ static GRJIT_Result check_op(
       }
       return tail ? GRJIT_OK : check_state_at(v, op->exit_state, block, index);
     }
+    case GRJIT_OP_CALL_NATIVE: {
+      /* A native is registered and typed (natives.h): the call is judged against
+       * its descriptor, so a call the descriptor does not describe is never made. */
+      if (!v->f->callable) {
+        return refuse(v, GRJIT_ERR_INVALID,
+            "block b%u op %zu: a native call in a function that is not callable "
+            "(a native call can leave compiled code through the deopt hook)",
+            block, index);
+      }
+      const GRJIT_NativeDesc * d = grjit_native_table_get(v->f->natives, op->native);
+      if (d == NULL) {
+        return refuse(v, GRJIT_ERR_INVALID,
+            "block b%u op %zu: native #%u is not in the function's native table",
+            block, index, op->native);
+      }
+      if (op->arg_count != d->param_count) {
+        return refuse(v, GRJIT_ERR_INVALID,
+            "block b%u op %zu: native #%u takes %zu arguments, the call has %zu",
+            block, index, op->native, d->param_count, op->arg_count);
+      }
+      if (op->arg_count > v->limits.max_native_arguments) {
+        return refuse(v, GRJIT_ERR_LIMIT,
+            "block b%u op %zu: native #%u call has %zu arguments, at most %zu are "
+            "allowed",
+            block, index, op->native, op->arg_count, v->limits.max_native_arguments);
+      }
+      for (size_t i = 0; i < op->arg_count; i++) {
+        const GRJIT_Operand * o = &op->args[i];
+        if (o->kind == GRJIT_OPERAND_VREG) {
+          if (!vreg_ok(v, o->vreg)) {
+            return refuse(v, GRJIT_ERR_INVALID,
+                "block b%u op %zu: argument %zu names v%u, which the "
+                "function does not have",
+                block, index, i, o->vreg);
+          }
+          if (type_of(v, o->vreg) != d->params[i]) {
+            return refuse(v, GRJIT_ERR_INVALID,
+                "block b%u op %zu: argument %zu is v%u, whose type is not the "
+                "type native #%u takes there",
+                block, index, i, o->vreg, op->native);
+          }
+        } else if (o->kind != GRJIT_OPERAND_IMM) {
+          return refuse(v, GRJIT_ERR_INVALID,
+              "block b%u op %zu: argument %zu is missing", block, index, i);
+        }
+      }
+      if (op->dst != GRJIT_NO_VREG) {
+        if (d->result == GRJIT_NATIVE_NO_RESULT) {
+          return refuse(v, GRJIT_ERR_INVALID,
+              "block b%u op %zu: native #%u has no result, and the call names "
+              "a destination",
+              block, index, op->native);
+        }
+        if ((r = check_dst(v, op, false, block, index)) != GRJIT_OK) {
+          return r;
+        }
+        if (type_of(v, op->dst) != d->result) {
+          return refuse(v, GRJIT_ERR_INVALID,
+              "block b%u op %zu: destination v%u is not of the type native #%u "
+              "returns",
+              block, index, op->dst, op->native);
+        }
+      }
+      if ((r = check_state_at(v, op->state, block, index)) != GRJIT_OK) {
+        return r;
+      }
+      if ((d->flags & GRJIT_NATIVE_STATUS) != 0) {
+        if (op->exit_state == GRJIT_NO_STATE) {
+          return refuse(v, GRJIT_ERR_INVALID,
+              "block b%u op %zu: native #%u returns a status, and the call has "
+              "no state after it for the exit a non-zero status takes",
+              block, index, op->native);
+        }
+        return check_state_at(v, op->exit_state, block, index);
+      }
+      if (op->exit_state != GRJIT_NO_STATE) {
+        return refuse(v, GRJIT_ERR_INVALID,
+            "block b%u op %zu: native #%u returns no status, and the call has a "
+            "state after it",
+            block, index, op->native);
+      }
+      return GRJIT_OK;
+    }
     case GRJIT_OP_POLL:
       if (v->f->poll_helper == NULL) {
         return refuse(v, GRJIT_ERR_INVALID,

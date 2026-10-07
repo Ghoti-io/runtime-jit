@@ -92,9 +92,14 @@ static void transfer(Ctx * c, const GRJIT_Op * op, uint64_t * live) {
 /* How many sites an operation makes. A call to another compiled function is
  * three: the push of the callee's frame, the call itself, and the exit before
  * it (backend/backend_internal.h). A tail call is two: the hook that replaces
- * the guest frame, and the exit before it. Every other operation with a frame
- * state is one. */
+ * the guest frame, and the exit before it. A native call is the call itself, the
+ * exit before it (the native-stack check failed) and, for a native with a status,
+ * the exit a non-zero status takes, in that order. Every other operation with a
+ * frame state is one. */
 size_t grjit_liveness_site_count(const GRJIT_Op * op) {
+  if (op->kind == GRJIT_OP_CALL_NATIVE) {
+    return op->exit_state != GRJIT_NO_STATE ? 3u : 2u;
+  }
   if (op->kind == GRJIT_OP_CALL_SLOT || op->kind == GRJIT_OP_CALL_PTR) {
     return 3u;
   }
@@ -253,6 +258,44 @@ GRJIT_Result grjit_liveness_compute(const GRJIT_Function * f,
             transfer(&c, op, before_set);
           }
           for (size_t k = 0; k < mult; k++) {
+            if (op->kind == GRJIT_OP_CALL_NATIVE) {
+              /* 0 is the call, 1 the exit before it (the state), 2 the exit a
+               * status takes (the state after). An exit leaves the frame: only what
+               * its own state names. The call's set is what is live after it, less
+               * its result, plus what either state names: the state after the call
+               * is read from the frame by the exit, so a collection the native
+               * triggers must have updated every register it names but the result,
+               * which does not exist until the call returns. */
+              memset(state_set, 0, words * sizeof *state_set);
+              c.set = state_set;
+              const uint32_t which_state = k == 2 ? op->exit_state : op->state;
+              const GRJIT_VReg result = grjit_op_def(op);
+              for (int pass_state = 0; pass_state < (k == 0 ? 2 : 1); pass_state++) {
+                uint32_t w = pass_state == 0 ? which_state : op->exit_state;
+                if (w == GRJIT_NO_STATE || w >= f->state_count) {
+                  continue;
+                }
+                const GRJIT_FrameState * st = &f->states[w];
+                for (size_t q = 0; q < st->slot_count; q++) {
+                  if (st->slots[q].kind == GRJIT_FRAME_SLOT_VREG &&
+                      !(pass_state == 1 && st->slots[q].vreg == result)) {
+                    add_use(&c, st->slots[q].vreg);
+                  }
+                }
+              }
+              if (k == 0) {
+                memcpy(site_set, cur, words * sizeof *site_set);
+                if (result != GRJIT_NO_VREG && result < f->vreg_count &&
+                    index[result] != UINT32_MAX) {
+                  clear_bit(site_set, index[result]);
+                }
+                for (size_t w = 0; w < words; w++) {
+                  site_set[w] |= state_set[w];
+                }
+              } else {
+                memcpy(site_set, state_set, words * sizeof *site_set);
+              }
+            } else {
             memset(state_set, 0, words * sizeof *state_set);
             c.set = state_set;
             /* Variant 0 is the only one of an ordinary site; for a guest call
@@ -292,6 +335,7 @@ GRJIT_Result grjit_liveness_compute(const GRJIT_Function * f,
               for (size_t w = 0; w < words; w++) {
                 site_set[w] |= state_set[w];
               }
+            }
             }
             if (pass == 0) {
               for (size_t w = 0; w < words; w++) {

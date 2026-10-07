@@ -276,6 +276,25 @@ struct B {
                   state.data(), state.size()),
         GRJIT_OK);
   }
+  void natives(const GRJIT_NativeTable * table) {
+    EXPECT_EQ(grjit_builder_set_natives(b, table), GRJIT_OK);
+  }
+  /* A call to a registered native without a status: one frame state. */
+  void call_native(GRJIT_VReg d, uint32_t id, std::vector<GRJIT_Operand> args,
+      GRCORE_PollIdentity sid, std::vector<GRJIT_FrameSlot> state) {
+    GRJIT_FrameState st{sid, state.size(), state.data()};
+    EXPECT_EQ(grjit_builder_call_native(b, d, id, args.data(), args.size(), &st, nullptr),
+        GRJIT_OK);
+  }
+  /* The same with a status: the state after the call as well. */
+  void call_native(GRJIT_VReg d, uint32_t id, std::vector<GRJIT_Operand> args,
+      GRCORE_PollIdentity sid, std::vector<GRJIT_FrameSlot> state, GRCORE_PollIdentity aid,
+      std::vector<GRJIT_FrameSlot> after) {
+    GRJIT_FrameState st{sid, state.size(), state.data()};
+    GRJIT_FrameState af{aid, after.size(), after.data()};
+    EXPECT_EQ(grjit_builder_call_native(b, d, id, args.data(), args.size(), &st, &af),
+        GRJIT_OK);
+  }
   void poll(GRCORE_PollIdentity id, std::vector<GRJIT_FrameSlot> state = {}) {
     EXPECT_EQ(grjit_builder_poll(b, id, state.data(), state.size()), GRJIT_OK);
   }
@@ -298,6 +317,35 @@ struct B {
     b = nullptr;
     return f;
   }
+};
+
+/* A table of natives the test owns. */
+struct NativeTab {
+  GRJIT_NativeTable * t = nullptr;
+  NativeTab(const NativeTab &) = delete;
+  NativeTab & operator=(const NativeTab &) = delete;
+  explicit NativeTab(const GRJIT_Limits * limits = nullptr,
+      const GRJIT_Allocator * allocator = nullptr) {
+    EXPECT_EQ(grjit_native_table_create(limits, allocator, &t), GRJIT_OK);
+  }
+  ~NativeTab() { grjit_native_table_free(t); }
+  /* Registers a native at `fn` (never called by a test that only builds IR) and
+   * returns its id. */
+  uint32_t add(const void * fn, std::vector<GRJIT_Type> params, GRJIT_Type result = GRJIT_NATIVE_NO_RESULT,
+      uint32_t flags = 0, uint32_t stack_bytes = 0) {
+    GRJIT_NativeDesc d{};
+    d.address = reinterpret_cast<uintptr_t>(fn);
+    d.params = params.data();
+    d.param_count = params.size();
+    d.result = result;
+    d.flags = flags;
+    d.stack_bytes = stack_bytes;
+    uint32_t id = UINT32_MAX;
+    EXPECT_EQ(grjit_native_table_add(t, &d, &id), GRJIT_OK);
+    return id;
+  }
+  operator GRJIT_NativeTable *() { return t; }
+  operator const GRJIT_NativeTable *() const { return t; }
 };
 
 /* A function the test owns. */

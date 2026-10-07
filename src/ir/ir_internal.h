@@ -34,6 +34,7 @@
 #include <ghoti.io/runtime-jit/builder.h>
 #include <ghoti.io/runtime-jit/ir.h>
 #include <ghoti.io/runtime-jit/limits.h>
+#include <ghoti.io/runtime-jit/natives.h>
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -67,6 +68,7 @@ struct GRJIT_Function {
   uint64_t token;           ///< The engine's token for this function, which a call
                             ///< through a code pointer must name (AD-28).
   GRJIT_CallHooks hooks;    ///< Valid when `callable`.
+  const GRJIT_NativeTable * natives; ///< What `CALL_NATIVE` names; borrowed.
   GRJIT_VRegInfo * vregs;
   size_t vreg_count;
   size_t vreg_capacity;

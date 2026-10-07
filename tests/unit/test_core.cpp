@@ -66,6 +66,8 @@ TEST(Limits, DefaultsAreTheDocumentedOnes) {
   EXPECT_EQ(limits.max_code_bytes, 16u << 20);
   EXPECT_EQ(limits.max_site_entries, 4u << 20);
   EXPECT_EQ(limits.max_guest_call_arguments, 16u);
+  EXPECT_EQ(limits.max_native_arguments, 16u);
+  EXPECT_EQ(limits.max_native_stack_bytes, size_t{64} << 10);
   grjit_limits_default(nullptr); // ignored
 }
 

@@ -244,6 +244,9 @@ static GRJIT_Result append_ex(GRJIT_Builder * b, const GRJIT_Op * op,
                     op->kind == GRJIT_OP_TAIL_CALL_SLOT || op->kind == GRJIT_OP_TAIL_CALL_PTR;
   size_t arg_cap = guest_call ? b->limits.max_guest_call_arguments
                               : b->limits.max_call_arguments;
+  if (op->kind == GRJIT_OP_CALL_NATIVE) {
+    arg_cap = b->limits.max_native_arguments;
+  }
   if (arg_count > arg_cap || arg_count > GRJIT_BUILDER_MAX_ARGS) {
     return GRJIT_ERR_LIMIT;
   }
@@ -568,6 +571,31 @@ GRJIT_Result grjit_builder_tail_call_ptr(GRJIT_Builder * builder,
   memset(&state, 0, sizeof state);
   state.identity = identity;
   return append(builder, &op, args, arg_count, &state, state_slots, state_count);
+}
+
+GRJIT_Result grjit_builder_set_natives(
+    GRJIT_Builder * builder, const GRJIT_NativeTable * table) {
+  if (builder == NULL) {
+    return GRJIT_ERR_INVALID;
+  }
+  builder->function->natives = table;
+  return GRJIT_OK;
+}
+
+GRJIT_Result grjit_builder_call_native(GRJIT_Builder * builder, GRJIT_VReg dst,
+    uint32_t id, const GRJIT_Operand * args, size_t arg_count,
+    const GRJIT_FrameState * state, const GRJIT_FrameState * after_state) {
+  if (builder == NULL || state == NULL) {
+    return GRJIT_ERR_INVALID;
+  }
+  GRJIT_Op op = blank(GRJIT_OP_CALL_NATIVE);
+  op.dst = dst;
+  op.native = id;
+  op.attr = GRJIT_CALL_GC_POINT;
+  op.site_kind = GRCORE_SITE_GC_POINT_CALL;
+  return append_ex(builder, &op, args, arg_count, state, state->slots,
+      state->slot_count, after_state, after_state != NULL ? after_state->slots : NULL,
+      after_state != NULL ? after_state->slot_count : 0);
 }
 
 GRJIT_Result grjit_builder_poll(GRJIT_Builder * builder,

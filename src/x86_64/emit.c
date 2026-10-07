@@ -590,6 +590,10 @@ static void emit_op(GRJIT_Emit * e, const GRJIT_Op * op, size_t block) {
     case GRJIT_OP_TAIL_CALL_PTR:
       emit_tail_call(e, op);
       break;
+    case GRJIT_OP_CALL_NATIVE:
+      /* The IR has it; the emitter is the next commit's. */
+      e->c.error = GRJIT_ERR_UNSUPPORTED;
+      break;
     case GRJIT_OP_COUNT:
       e->c.error = GRJIT_ERR_INTERNAL;
       break;
