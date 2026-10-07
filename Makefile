@@ -762,7 +762,9 @@ endif
 # of tail calls: 11: the last stack argument of a tail call is not copied to the
 # callee's place, 12: the tail hook's site leaves its arguments area out of the
 # stack map, 13: no padding between a frame's registers and its arguments area,
-# so the staging area overlaps the place the stack arguments are copied to), and the test
+# so the staging area overlaps the place the stack arguments are copied to, 14:
+# the tail call made as a call and its frame kept, so the answer is right and the
+# native stack grows with every call), and the test
 # that is meant to catch it is built and run there. The test must FAIL, and
 # say what it saw; the same test in the ordinary tree passes (it is part of
 # `make test`). The ordinary tree never sees the macro.
@@ -774,7 +776,8 @@ PLANT_DEFECTS := 1:testDifferential 2:testReadback 3:testReadback \
 	10:testCalls:Calls.TheStackLimitIsMeasuredInBytesAndTheFirstFrameThatDoesNotFitIsTheOneRefused \
 	11:testTail:Tail.APingPongBetweenANarrowAndAWideFunctionAMillionDeepLeavesTheStackWhereItWas \
 	12:testTail:Tail.ArgumentsOfAllThreeTypesTailCalledAtEveryCountAndCallerWidthArriveIntactUnderCollection \
-	13:testTail:Tail.EveryPairOfCallerParametersAndCalleeArgumentsFromZeroToSixteenArrivesIntactInConstantStack
+	13:testTail:Tail.EveryPairOfCallerParametersAndCalleeArgumentsFromZeroToSixteenArrivesIntactInConstantStack \
+	14:testTail:Tail.ASelfRecursionAMillionDeepRunsInConstantNativeStackAndGuestDepth
 
 # The controls the script runs are built by this make, as prerequisites, and
 # not by the script's own sub-make. Under `make -j test` the sibling goals

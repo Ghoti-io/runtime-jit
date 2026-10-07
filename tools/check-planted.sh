@@ -33,6 +33,9 @@
 #  13  no padding between a frame's registers and   -> testTail
 #      its arguments area (the staging area
 #      overlaps the place the stack arguments go)
+#  14  a tail call made as a call, its frame kept:  -> testTail
+#      the answer is right and the native stack
+#      grows with every tail call
 #
 # An entry is `n:test` or `n:test:filter`. With a filter the test binary runs
 # only that gtest (control and planted alike), which is how defect 4 is caught

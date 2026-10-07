@@ -412,6 +412,29 @@ static void emit_tail_call(GRJIT_Emit * e, const GRJIT_Op * op) {
   grjit_asm_test_rr(a, GRJIT_RAX, GRJIT_RAX);
   grjit_asm_jcc(a, GRJIT_COND_NE, exit);
 
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 14
+  /* Planted defect 14 (tests only): the tail call is made as a call, and its
+   * frame kept: the answer is the same and the native stack grows with every tail
+   * call, which no result shows and the stack pointer does. */
+  {
+    const uint32_t area_bytes = grjit_stack_arg_bytes(n);
+    if (area_bytes != 0) {
+      grjit_asm_sub_rsp(a, area_bytes);
+      for (size_t i = GRJIT_INTERNAL_REG_ARGS; i < n; i++) {
+        grjit_asm_load64(a, GRJIT_RAX, GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.args_area, i));
+        grjit_asm_store64(a, GRJIT_RSP, (int32_t)(8 * (i - GRJIT_INTERNAL_REG_ARGS)), GRJIT_RAX);
+      }
+    }
+    for (size_t i = 0; i < n && i < GRJIT_INTERNAL_REG_ARGS; i++) {
+      grjit_asm_load64(a, arg_regs[i], GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.args_area, i));
+    }
+    grjit_asm_load64(a, GRJIT_R10, GRJIT_RBP, GRJIT_SLOT_CTX);
+    grjit_asm_load64(a, GRJIT_RAX, GRJIT_RBP, entry_slot);
+    grjit_asm_call_r(a, GRJIT_RAX);
+    grjit_emit_callable_epilogue(e);
+    return;
+  }
+#endif
   /* The frame replacement. */
   const int64_t in_a = e->c.shape.incoming_bytes;
   const int64_t in_t = grjit_stack_arg_bytes(n);
