@@ -385,6 +385,12 @@ class Engine {
   /* A tail hook to give the compiled code in place of h_tail, for a test of what the
    * hook's return value may be (see test_tail.cpp). */
   uint32_t (*tail_override)(void *, uint64_t, const uint64_t *, uint64_t) = nullptr;
+  /* The same for the other hooks and the poll helper (tests/calls_asm.h's `grjit_test_garbage_*`, which
+   * answer with garbage above the 32 bits of the answer). */
+  uint32_t (*push_override)(void *, uint64_t, const uint64_t *, uint64_t) = nullptr;
+  uint32_t (*compile_override)(void *, uint64_t) = nullptr;
+  uint32_t (*deopt_override)(void *, uint64_t) = nullptr;
+  uint32_t (*poll_override)(void *, uint64_t, uint64_t) = nullptr;
   bool record_hook_args = false;  // keep what each push and tail hook was handed
   /* ---- Natives (AD-28, CAP-7): the engine's side, played ---- */
   GRJIT_NativeTable * ntable = nullptr;
@@ -731,15 +737,15 @@ inline GRJIT_Function * Engine::build_ir(int fn) {
   const int L = F.locals();
   B b(F.name.c_str(), 1 + static_cast<size_t>(L));
   GRJIT_CallHooks hooks{};
-  hooks.push = Engine::h_push;
+  hooks.push = push_override != nullptr ? push_override : Engine::h_push;
   hooks.pop = Engine::h_pop;
-  hooks.compile = Engine::h_compile;
-  hooks.deopt = Engine::h_deopt;
+  hooks.compile = compile_override != nullptr ? compile_override : Engine::h_compile;
+  hooks.deopt = deopt_override != nullptr ? deopt_override : Engine::h_deopt;
   hooks.tail = tail_override != nullptr ? tail_override : Engine::h_tail;
   b.callable(hooks);
   b.natives(ntable);
   EXPECT_EQ(grjit_builder_set_token(b.b, static_cast<u64>(fn)), GRJIT_OK);
-  b.poll_helper(Engine::h_poll);
+  b.poll_helper(poll_override != nullptr ? poll_override : Engine::h_poll);
   for (int i = 0; i < F.nparams; i++) {
     b.param(F.type[i]);
   }

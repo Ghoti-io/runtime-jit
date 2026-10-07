@@ -9,6 +9,8 @@
  * Copyright 2026 by Corey Pennycuff
  */
 
+#define FX_ASM_HOOK_GARBAGE
+#include "../calls_asm.h"
 #include "test_helpers.h"
 
 #include "../ir_eval.h"
@@ -246,5 +248,86 @@ TEST(EntryHook, TheHookRunsBeforeTheParametersAreReadAndGetsTheContext) {
   EXPECT_EQ(r.out[0], 0xABCDEFu);
   EXPECT_EQ(seen, static_cast<void *>(w.ctx));
 }
+
+#if FX_HAVE_CALLS_ASM
+
+/* The poll helper's and the entry hook's answer is a uint32_t: the register above its 32 bits is not the
+ * answer, and zero with garbage above is not a refusal. The stubs of tests/calls_asm.h answer for the real
+ * ones with exactly that. */
+TEST(Poll, AHelperAnswerIsItsLowThirtyTwoBitsWhateverTheRegisterHoldsAboveInAPlainFunction) {
+  GRJIT_REQUIRE_BACKEND();
+  grjit_test_real_poll = reinterpret_cast<void *>(&poll_helper);
+  {
+    // Zero with garbage above: every poll of the loop is served and the function runs to its end.
+    PostWorld w;
+    B b("pollsum", 1);
+    GRJIT_VReg n = b.param(GRJIT_TYPE_I64);
+    GRJIT_VReg i = b.reg(), sum = b.reg(), t = b.reg();
+    GRJIT_BlockId entry = b.block(), head = b.block(), body = b.block(), done = b.block();
+    b.poll_helper(grjit_test_garbage_poll);
+    b.at(entry);
+    b.cnst(i, 0);
+    b.cnst(sum, 0);
+    b.br(head);
+    b.at(head);
+    b.cmp(GRJIT_CMP_LT, t, V(i), V(n));
+    b.br_if(V(t), body, done);
+    b.at(body);
+    b.poll({7, 3}, {grjit_frame_slot_vreg(i)});
+    b.bin(GRJIT_OP_ADD, sum, V(sum), V(i));
+    b.bin(GRJIT_OP_ADD, i, V(i), I(1));
+    b.br(head);
+    b.at(done);
+    b.ret(V(sum));
+    Fn f(b.finish());
+    Compiled c(f, w.pages());
+    ASSERT_TRUE(c);
+    w.post();
+    auto r = c.run(w.ctx, {10});
+    EXPECT_EQ(r.exit, static_cast<uint32_t>(GRJIT_EXIT_RETURNED)) << "zero with garbage above is not a refusal";
+    EXPECT_EQ(r.out[0], 45u);
+    EXPECT_EQ(g_poll.calls, 10);
+  }
+  {
+    // A refusal, with garbage above: the answer reaches out[0] as the helper gave it.
+    PostWorld w;
+    B b("refuse", 0);
+    b.poll_helper(grjit_test_garbage_poll);
+    b.at(b.block());
+    b.poll({1, 1});
+    b.ret(I(5));
+    Fn f(b.finish());
+    Compiled c(f, w.pages());
+    ASSERT_TRUE(c);
+    g_poll.answer = 0x80000001u;
+    w.post();
+    auto r = c.run(w.ctx);
+    EXPECT_EQ(r.exit, static_cast<uint32_t>(GRJIT_EXIT_REFUSED));
+    EXPECT_EQ(r.out[0], 0x80000001u) << "the garbage above is not part of the answer";
+  }
+}
+
+TEST(EntryHook, AnAnswerIsItsLowThirtyTwoBitsWhateverTheRegisterHoldsAboveInAPlainFunction) {
+  GRJIT_REQUIRE_BACKEND();
+  JitWorld w;
+  grjit_test_real_entry = reinterpret_cast<void *>(&entry_hook);
+  B b("hook", 0);
+  GRJIT_VReg x = b.param(GRJIT_TYPE_I64);
+  b.at(b.block());
+  b.ret(V(x));
+  Fn f(b.finish());
+  Compiled c(f, w.pages(), grjit_test_garbage_entry);
+  ASSERT_TRUE(c);
+  g_hook_answer = 0;
+  auto r = c.run(w.ctx, {123});
+  EXPECT_EQ(r.exit, static_cast<uint32_t>(GRJIT_EXIT_RETURNED)) << "zero with garbage above lets the function run";
+  EXPECT_EQ(r.out[0], 123u);
+  g_hook_answer = 9;
+  r = c.run(w.ctx, {123});
+  EXPECT_EQ(r.exit, static_cast<uint32_t>(GRJIT_EXIT_REFUSED));
+  EXPECT_EQ(r.out[0], 9u) << "the garbage above is not part of the answer";
+}
+
+#endif
 
 GRJIT_TEST_MAIN()

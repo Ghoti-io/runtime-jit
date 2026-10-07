@@ -12,6 +12,7 @@
  */
 
 #define FX_ASM_SENTINELS
+#define FX_ASM_HOOK_GARBAGE
 #include "../calls_asm.h"
 #include "../calls_fixture.h"
 
@@ -1322,6 +1323,193 @@ TEST(Calls, TheEntryHookRunsInTheAdapterBeforeAnythingAndItsRefusalIsReportedAsR
     EXPECT_EQ(r.out[0], 123u);
   }
 }
+
+/* ---- A hook's answer is its low 32 bits, for every hook ------------------------------------ */
+
+#if FX_HAVE_CALLS_ASM
+
+namespace {
+
+/* Every hook and the poll helper of an engine answers through the stubs of tests/calls_asm.h: the real answer
+ * in the low 32 bits and garbage above. Code that tests all 64 bits reads each zero as a refusal and each
+ * refusal as a different number. (The tail hook has its own test, in test_tail.cpp.) */
+void install_garbage_hooks(Engine & e) {
+  grjit_test_real_push = reinterpret_cast<void *>(&Engine::h_push);
+  grjit_test_real_compile = reinterpret_cast<void *>(&Engine::h_compile);
+  grjit_test_real_deopt = reinterpret_cast<void *>(&Engine::h_deopt);
+  grjit_test_real_poll = reinterpret_cast<void *>(&Engine::h_poll);
+  e.push_override = grjit_test_garbage_push;
+  e.compile_override = grjit_test_garbage_compile;
+  e.deopt_override = grjit_test_garbage_deopt;
+  e.poll_override = grjit_test_garbage_poll;
+}
+
+} // namespace
+
+TEST(Calls, ThePushHooksAnswerIsItsLowThirtyTwoBitsWhateverTheRegisterHoldsAbove) {
+  CALLS_ONLY_WHERE_EMITTED();
+  {
+    // Zero with garbage above is success: a chain of calls that never leaves compiled code.
+    Engine e;
+    install_garbage_hooks(e);
+    int fib = add_fib(e);
+    Outcome o = e.run_compiled(fib, {10});
+    ASSERT_TRUE(o.finished);
+    EXPECT_EQ(o.value, static_cast<u64>(fib_ref(10)));
+    EXPECT_EQ(o.exit, uint32_t{GRJIT_EXIT_RETURNED}) << "zero with garbage above is not a refusal";
+    EXPECT_EQ(e.st.deopts, 0);
+    EXPECT_EQ(e.st.refused_pushes, 0);
+  }
+  {
+    // One with garbage above is a refusal: an exit at the call site, and the interpreter finishes.
+    Engine e;
+    install_garbage_hooks(e);
+    int fib = add_fib(e);
+    e.refuse_push_at = 4;
+    Outcome o = e.run_compiled(fib, {10});
+    ASSERT_TRUE(o.finished);
+    EXPECT_EQ(o.value, static_cast<u64>(fib_ref(10)));
+    EXPECT_EQ(o.exit, uint32_t{GRJIT_EXIT_DEOPT});
+    EXPECT_EQ(e.st.refused_pushes, 1);
+    EXPECT_EQ(e.st.deopts, 1);
+    EXPECT_EQ(e.st.last_cause, 0u) << "a refused push is no native's status";
+  }
+}
+
+TEST(Calls, TheCompileHooksAnswerIsItsLowThirtyTwoBitsWhateverTheRegisterHoldsAbove) {
+  CALLS_ONLY_WHERE_EMITTED();
+  {
+    Engine e;
+    install_garbage_hooks(e);
+    int inc = add_inc(e);
+    int top = add_via_slot(e, inc);
+    Outcome o = e.run_compiled(top, {5});
+    ASSERT_TRUE(o.finished);
+    EXPECT_EQ(o.value, 14u);
+    EXPECT_EQ(o.exit, uint32_t{GRJIT_EXIT_RETURNED}) << "installed, with garbage above a zero";
+    EXPECT_EQ(e.st.compile_calls, 1);
+    EXPECT_EQ(e.st.compile_refusals, 0);
+    EXPECT_EQ(e.st.deopts, 0);
+  }
+  {
+    Engine e;
+    install_garbage_hooks(e);
+    int inc = add_inc(e);
+    int top = add_via_slot(e, inc);
+    e.uncompilable.insert(inc);
+    Outcome o = e.run_compiled(top, {5});
+    ASSERT_TRUE(o.finished);
+    EXPECT_EQ(o.value, 14u);
+    EXPECT_EQ(o.exit, uint32_t{GRJIT_EXIT_DEOPT}) << "one with garbage above is a refusal: the call exits";
+    EXPECT_EQ(e.st.compile_refusals, 1);
+    EXPECT_EQ(e.st.deopts, 1);
+  }
+}
+
+TEST(Calls, TheDeoptHooksAnswerIsItsLowThirtyTwoBitsWhateverTheRegisterHoldsAboveOnEveryPathThatCallsIt) {
+  CALLS_ONLY_WHERE_EMITTED();
+  for (int refuse : {0, 1}) {
+    SCOPED_TRACE(refuse);
+    {
+      // The guard's and the call exit's path.
+      Engine e;
+      install_garbage_hooks(e);
+      int g = add_gchain(e, /*fail_at=*/3);
+      e.refuse_rebuild_with = refuse ? 77u : 0u;
+      Outcome o = e.run_compiled(g, {10});
+      if (!refuse) {
+        ASSERT_TRUE(o.finished);
+        EXPECT_EQ(o.value, 55u);
+        EXPECT_EQ(o.exit, uint32_t{GRJIT_EXIT_DEOPT}) << "zero with garbage above is a deoptimization, not a failure";
+        EXPECT_FALSE(o.rebuild_failed);
+        EXPECT_EQ(e.st.rebuild, GRCORE_OK);
+      } else {
+        EXPECT_TRUE(o.rebuild_failed);
+        EXPECT_EQ(o.exit, uint32_t{GRJIT_EXIT_REBUILD_FAILED});
+        EXPECT_EQ(o.failed_with, 77u) << "the answer reaches the entry as the answer, not with garbage above it";
+      }
+    }
+    {
+      // The overflow stub's own call of the hook.
+      Engine e(GRCORE_UNLIMITED, /*native_bytes=*/6000);
+      install_garbage_hooks(e);
+      int rec = add_rec(e);
+      e.refuse_rebuild_with = refuse ? 77u : 0u;
+      Outcome o = e.run_compiled(rec, {400});
+      if (!refuse) {
+        ASSERT_TRUE(o.finished);
+        EXPECT_EQ(o.exit, uint32_t{GRJIT_EXIT_DEOPT});
+        EXPECT_FALSE(o.rebuild_failed);
+      } else {
+        EXPECT_TRUE(o.rebuild_failed);
+        EXPECT_EQ(o.exit, uint32_t{GRJIT_EXIT_REBUILD_FAILED});
+        EXPECT_EQ(o.failed_with, 77u);
+      }
+    }
+  }
+}
+
+TEST(Calls, ThePollHelpersAnswerIsItsLowThirtyTwoBitsWhateverTheRegisterHoldsAboveAndSoIsTheCauseItBecomes) {
+  CALLS_ONLY_WHERE_EMITTED();
+  uint64_t * request = nullptr;
+  {
+    // A pending request sends every poll to its slow path: the helper answers zero with garbage above, and the
+    // chain finishes in compiled code.
+    Engine e;
+    install_garbage_hooks(e);
+    int g = add_gchain(e, /*fail_at=*/-1, /*with_poll=*/true);
+    request = reinterpret_cast<uint64_t *>(
+        reinterpret_cast<unsigned char *>(e.ctx) + grcore_jit_layout()->request_word_offset);
+    *request = 1;
+    Outcome o = e.run_compiled(g, {10});
+    *request = 0;
+    ASSERT_TRUE(o.finished);
+    EXPECT_EQ(o.value, 55u);
+    EXPECT_EQ(o.exit, uint32_t{GRJIT_EXIT_RETURNED}) << "zero with garbage above is not a verdict";
+    EXPECT_EQ(e.st.deopts, 0);
+    EXPECT_GE(e.st.poll_slow, 11);
+  }
+  {
+    Engine e;
+    install_garbage_hooks(e);
+    int g = add_gchain(e, /*fail_at=*/-1, /*with_poll=*/true);
+    request = reinterpret_cast<uint64_t *>(
+        reinterpret_cast<unsigned char *>(e.ctx) + grcore_jit_layout()->request_word_offset);
+    *request = 1;
+    e.poll_slow_calls_to_fail = 3;
+    Outcome o = e.run_compiled(g, {10});
+    *request = 0;
+    ASSERT_TRUE(o.finished);
+    EXPECT_EQ(o.value, 55u);
+    EXPECT_EQ(o.exit, uint32_t{GRJIT_EXIT_DEOPT});
+    EXPECT_EQ(e.st.last_cause, 1u) << "the helper's answer, and not the garbage above it, is the cause";
+    EXPECT_EQ(o.entry_cause, 1u);
+  }
+}
+
+TEST(Calls, TheEntryHooksAnswerIsItsLowThirtyTwoBitsWhateverTheRegisterHoldsAboveInTheAdapterOfACallableFunction) {
+  CALLS_ONLY_WHERE_EMITTED();
+  JitWorld w;
+  Fn f(callable_identity(GRJIT_TYPE_I64));
+  {
+    grjit_test_real_entry = reinterpret_cast<void *>(&accept);
+    Compiled c(f, w.pages(), grjit_test_garbage_entry);
+    ASSERT_TRUE(c) << c.result;
+    auto r = c.run(w.ctx, {123});
+    EXPECT_EQ(r.exit, uint32_t{GRJIT_EXIT_RETURNED}) << "zero with garbage above lets the function run";
+    EXPECT_EQ(r.out[0], 123u);
+  }
+  {
+    grjit_test_real_entry = reinterpret_cast<void *>(&refuse_with_seven);
+    Compiled c(f, w.pages(), grjit_test_garbage_entry);
+    ASSERT_TRUE(c) << c.result;
+    auto r = c.run(w.ctx, {123});
+    EXPECT_EQ(r.exit, uint32_t{GRJIT_EXIT_REFUSED});
+    EXPECT_EQ(r.out[0], 7u) << "the answer is reported as the answer, without the garbage above it";
+  }
+}
+
+#endif
 
 TEST(Calls, ACallableFunctionHasAnInternalEntryAndAPlainOneHasNone) {
   CALLS_ONLY_WHERE_EMITTED();

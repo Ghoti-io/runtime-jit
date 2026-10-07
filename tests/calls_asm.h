@@ -473,6 +473,71 @@ asm(".text\n"
 
 #endif // FX_ASM_TAIL_GARBAGE
 
+/* ---- Every other hook, answering with garbage above its 32 bits ------------------ */
+
+/* A hook returns a uint32_t, so the upper half of its return register is the callee's to leave as it
+ * likes (the ABI says nothing of it). `grjit_test_garbage_<hook>` calls the real function held in
+ * `grjit_test_real_<hook>` with the arguments it was given (all in registers, for every hook) and returns
+ * its answer in the low 32 bits with garbage above: a test installs it in the hook's place and sets the
+ * pointer. Code that tests all 64 bits of a hook's answer reads a zero as a refusal on every call. */
+#if FX_HAVE_CALLS_ASM && defined(FX_ASM_HOOK_GARBAGE)
+
+extern "C" {
+void * grjit_test_real_push = nullptr;
+void * grjit_test_real_compile = nullptr;
+void * grjit_test_real_deopt = nullptr;
+void * grjit_test_real_poll = nullptr;
+void * grjit_test_real_entry = nullptr;
+uint32_t grjit_test_garbage_push(void *, uint64_t, const uint64_t *, uint64_t);
+uint32_t grjit_test_garbage_compile(void *, uint64_t);
+uint32_t grjit_test_garbage_deopt(void *, uint64_t);
+uint32_t grjit_test_garbage_poll(void *, uint64_t, uint64_t);
+uint32_t grjit_test_garbage_entry(void *);
+}
+
+#if FX_ASM_X86_64
+#define FX_GARBAGE_STUB(hook)                                                    \
+  asm(".text\n"                                                                  \
+      ".globl grjit_test_garbage_" #hook "\n"                                    \
+      ".type grjit_test_garbage_" #hook ",@function\n"                           \
+      "grjit_test_garbage_" #hook ":\n"                                          \
+      "  subq $8, %rsp\n"                                                        \
+      "  movq grjit_test_real_" #hook "(%rip), %r11\n"                           \
+      "  call *%r11\n"                                                           \
+      "  addq $8, %rsp\n"                                                        \
+      "  movl %eax, %eax\n"                                                      \
+      "  movabsq $0x1357924600000000, %rcx\n"                                    \
+      "  orq %rcx, %rax\n"                                                       \
+      "  ret\n"                                                                  \
+      ".size grjit_test_garbage_" #hook ", .-grjit_test_garbage_" #hook "\n")
+#else
+#define FX_GARBAGE_STUB(hook)                                                    \
+  asm(".text\n"                                                                  \
+      ".globl grjit_test_garbage_" #hook "\n"                                    \
+      ".type grjit_test_garbage_" #hook ", %function\n"                          \
+      "grjit_test_garbage_" #hook ":\n"                                          \
+      "  stp x29, x30, [sp, #-16]!\n"                                            \
+      "  mov x29, sp\n"                                                          \
+      "  adrp x16, grjit_test_real_" #hook "\n"                                  \
+      "  ldr x16, [x16, :lo12:grjit_test_real_" #hook "]\n"                      \
+      "  blr x16\n"                                                              \
+      "  mov w0, w0\n"                                                           \
+      "  movz x1, #0x9246, lsl #32\n"                                            \
+      "  movk x1, #0x1357, lsl #48\n"                                            \
+      "  orr x0, x0, x1\n"                                                       \
+      "  ldp x29, x30, [sp], #16\n"                                              \
+      "  ret\n"                                                                  \
+      ".size grjit_test_garbage_" #hook ", .-grjit_test_garbage_" #hook "\n")
+#endif
+
+FX_GARBAGE_STUB(push);
+FX_GARBAGE_STUB(compile);
+FX_GARBAGE_STUB(deopt);
+FX_GARBAGE_STUB(poll);
+FX_GARBAGE_STUB(entry);
+
+#endif // FX_ASM_HOOK_GARBAGE
+
 /* ---- A native that trashes every caller-saved register -------------------------- */
 
 #if FX_HAVE_CALLS_ASM && defined(FX_ASM_CLOBBER)
