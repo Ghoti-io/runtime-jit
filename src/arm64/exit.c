@@ -48,7 +48,6 @@ void grjit_a64_emit_refuse_stub(GRJIT_A64Emit * e) {
 /* ---- A callable function's exits ---------------------------------------------------- */
 
 #define A64 GRJIT_A64Asm
-#define XR(n) GRJIT_A64_X##n
 
 void grjit_a64_emit_store_walk_cell(GRJIT_A64Emit * e, GRJIT_Label ret_label) {
   A64 * a = &e->as;

@@ -28,6 +28,11 @@
  * yields 0 or 1, loads of 8, 16 and 32 bits zero- or sign-extend as `LOAD` and
  * `LOAD_S` say, narrow stores store the low bits, an immediate is any 64-bit
  * value and a displacement is any `int32`.
+ *
+ * A *callable* function (AD-28) has the adapter, the tag and the internal entry first (see
+ * emit_internal.h for the convention) and the same operations after them; the calls, tail calls
+ * and native calls are `emit_guest_call`, `emit_tail_call` and `emit_native_call`, each
+ * documented above its sequence.
  */
 
 #include <ghoti.io/runtime-jit/macros.h>
@@ -41,14 +46,12 @@
 #include <string.h>
 
 #define A GRJIT_A64Asm
-#define XR(n) GRJIT_A64_X##n
 
-/* A helper call's arguments (the IR's six) and the internal convention's eight, which are
- * AAPCS64's too: x0-x7. */
+/* The registers that carry arguments: a helper's (the IR's six), the internal convention's eight
+ * and a native's seven after the context, which are all AAPCS64's x0-x7. */
 static const GRJIT_A64Reg arg_regs_internal[GRJIT_ARM64_INTERNAL_REG_ARGS] = {
     GRJIT_A64_X0, GRJIT_A64_X1, GRJIT_A64_X2, GRJIT_A64_X3, GRJIT_A64_X4,
     GRJIT_A64_X5, GRJIT_A64_X6, GRJIT_A64_X7};
-#define arg_regs arg_regs_internal
 
 /* A value from the frame: the frame base plus a (negative) slot offset, which
  * is one `ldur` for the first 32 slots and a materialised offset beyond. */
@@ -160,7 +163,7 @@ static void emit_call(GRJIT_A64Emit * e, const GRJIT_Op * op) {
     grjit_a64_emit_store_walk_cell(e, walk_ret);
   }
   for (size_t i = 0; i < op->arg_count; i++) {
-    load_operand(e, arg_regs[i], &op->args[i]);
+    load_operand(e, arg_regs_internal[i], &op->args[i]);
   }
   grjit_a64_mov_ri(a, GRJIT_A64_X16, op->address);
   grjit_a64_blr(a, GRJIT_A64_X16);
