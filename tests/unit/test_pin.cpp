@@ -138,9 +138,19 @@ unsigned mask_target_check(GRJIT_Arch arch, std::vector<uint8_t> * bytes) {
   return found;
 }
 
-Pin callable_pin(GRJIT_Arch arch, unsigned * pointer_calls, unsigned * functions) {
+/* Win64 refuses a callable function, and every call-machinery operation in one, before a byte: the error is
+ * GRJIT_ERR_UNSUPPORTED, nothing is emitted and nothing was even allocated. */
+bool win64_refuses(const GRJIT_Function * f) {
+  TrackingAllocator t;
+  GRJIT_Emitted other;
+  const GRJIT_Result r = grjit_emit_for(GRJIT_ARCH_X86_64_WIN64, f, t.get(), nullptr, nullptr, kRequestOffset, &other);
+  return r == GRJIT_ERR_UNSUPPORTED && other.size == 0 && other.bytes == nullptr && t.calls == 0 && t.live == 0;
+}
+
+Pin callable_pin(GRJIT_Arch arch, unsigned * pointer_calls, unsigned * functions, bool * win64_refused) {
   Pin pin;
   unsigned checks = 0;
+  *win64_refused = true;
   cg::each_call_function([&](const GRJIT_Function * f, unsigned id) {
     GRJIT_Emitted e;
     GRJIT_Result res = grjit_emit_for(arch, f, grjit_allocator_default(), nullptr, nullptr, kRequestOffset, &e);
@@ -159,6 +169,7 @@ Pin callable_pin(GRJIT_Arch arch, unsigned * pointer_calls, unsigned * functions
     pin.hash = fold(pin.hash, 0xFF);
     pin.bytes += bytes.size();
     grjit_emitted_free(&e);
+    *win64_refused = *win64_refused && win64_refuses(f);
     *functions += 1;
     return true;
   });
@@ -166,9 +177,10 @@ Pin callable_pin(GRJIT_Arch arch, unsigned * pointer_calls, unsigned * functions
   return pin;
 }
 
-Pin tail_pin(GRJIT_Arch arch, unsigned * pointer_calls, unsigned * functions) {
+Pin tail_pin(GRJIT_Arch arch, unsigned * pointer_calls, unsigned * functions, bool * win64_refused) {
   Pin pin;
   unsigned checks = 0;
+  *win64_refused = true;
   cg::each_tail_function([&](const GRJIT_Function * f, unsigned id) {
     GRJIT_Emitted e;
     GRJIT_Result res = grjit_emit_for(arch, f, grjit_allocator_default(), nullptr, nullptr, kRequestOffset, &e);
@@ -184,6 +196,7 @@ Pin tail_pin(GRJIT_Arch arch, unsigned * pointer_calls, unsigned * functions) {
     pin.hash = fold(pin.hash, 0xFF);
     pin.bytes += bytes.size();
     grjit_emitted_free(&e);
+    *win64_refused = *win64_refused && win64_refuses(f);
     *functions += 1;
     return true;
   });
@@ -207,15 +220,7 @@ Pin native_pin(GRJIT_Arch arch, unsigned * functions, bool * all_refused_elsewhe
     pin.hash = fold(pin.hash, 0xFF);
     pin.bytes += e.size;
     grjit_emitted_free(&e);
-    {
-      /* Win64 refuses every one of them before a byte. */
-      GRJIT_Emitted other;
-      if (grjit_emit_for(GRJIT_ARCH_X86_64_WIN64, f, grjit_allocator_default(), nullptr, nullptr, kRequestOffset,
-              &other) != GRJIT_ERR_UNSUPPORTED ||
-          other.size != 0 || other.bytes != nullptr) {
-        *all_refused_elsewhere = false;
-      }
-    }
+    *all_refused_elsewhere = *all_refused_elsewhere && win64_refuses(f);
     *functions = id + 1;
     return true;
   });
@@ -237,8 +242,10 @@ TEST(Pin, TheX86_64CodeOfCallableFunctionsWithCallsAndNoTailCallIsByteForByteWha
    * native-stack limit (which the code stores to and reads); a change to those
    * offsets is a change to the code, and records a new pin. */
   unsigned pointer_calls = 0, functions = 0;
-  Pin pin = callable_pin(GRJIT_ARCH_X86_64, &pointer_calls, &functions);
+  bool refused = false;
+  Pin pin = callable_pin(GRJIT_ARCH_X86_64, &pointer_calls, &functions, &refused);
   EXPECT_EQ(functions, 8u * 7u * 3u * 2u);
+  EXPECT_TRUE(refused) << "Win64 refuses every one of them, allocating nothing";
   EXPECT_EQ(pointer_calls, 8u * 7u * 2u * 2u) << "a call through a pointer per function of forms 1 and 2";
   std::printf("pin x86-64 callable: %llu bytes, hash %016llx\n",
       static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
@@ -273,8 +280,10 @@ TEST(Pin, TheArm64CodeOfCallableFunctionsWithCallsIsByteForByteWhatWasRecorded) 
    * then on: the code depends on the core's layout of the walk-start cell and the native-stack
    * limit, which it stores to and reads. The same functions as the x86-64 pin above. */
   unsigned pointer_calls = 0, functions = 0;
-  Pin pin = callable_pin(GRJIT_ARCH_ARM64, &pointer_calls, &functions);
+  bool refused = false;
+  Pin pin = callable_pin(GRJIT_ARCH_ARM64, &pointer_calls, &functions, &refused);
   EXPECT_EQ(functions, 8u * 7u * 3u * 2u);
+  EXPECT_TRUE(refused) << "Win64 refuses every one of them, allocating nothing";
   EXPECT_EQ(pointer_calls, 8u * 7u * 2u * 2u) << "a call through a pointer per function of forms 1 and 2";
   std::printf("pin arm64 callable: %u functions, %llu bytes, hash %016llx\n", functions,
       static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
@@ -286,8 +295,10 @@ TEST(Pin, TheArm64CodeOfCallableFunctionsWithCallsIsByteForByteWhatWasRecorded) 
 TEST(Pin, TheArm64CodeOfCallableFunctionsWithTailCallsIsByteForByteWhatWasRecorded) {
   /* Measured after the arm64 emitter of tail calls landed. */
   unsigned pointer_calls = 0, functions = 0;
-  Pin pin = tail_pin(GRJIT_ARCH_ARM64, &pointer_calls, &functions);
+  bool refused = false;
+  Pin pin = tail_pin(GRJIT_ARCH_ARM64, &pointer_calls, &functions, &refused);
   EXPECT_EQ(functions, 8u * 7u * 3u);
+  EXPECT_TRUE(refused) << "Win64 refuses every one of them, allocating nothing";
   EXPECT_EQ(pointer_calls, 8u * 7u * 2u) << "a target check per tail call through a pointer";
   std::printf("pin arm64 tail calls: %u functions, %llu bytes, hash %016llx\n", functions,
       static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
