@@ -15,6 +15,7 @@
 #define FX_ASM_HOOK_GARBAGE
 #include "../calls_asm.h"
 #include "../calls_fixture.h"
+#include "../cross_meta.h"
 
 #include "../../src/code/code_internal.h"
 
@@ -773,6 +774,99 @@ TEST(Calls, TheCauseOfAGuestCallExitIsZeroAtTheHookAndAtTheEntryWhateverMadeTheC
     ASSERT_EQ(e.st.causes.size(), 1u);
     EXPECT_EQ(e.st.causes[0], 0u) << "a guest-depth refusal is a refused push: cause zero too";
     EXPECT_EQ(o.entry_cause, 0u);
+  }
+}
+
+namespace {
+uint32_t h_noop_push(void *, uint64_t, const uint64_t *, uint64_t) { return 0; }
+void h_noop_pop(void *) {}
+uint32_t h_noop(void *, uint64_t) { return 0; }
+} // namespace
+
+TEST(Calls, ACallMakesThreeSitesAndEachMapNamesWhatTheKindOfSiteNeedsOnEveryTarget) {
+  // The push (frame-push GC point), the call (the callee running) and the exit before the call are three
+  // places, each with a map of its own: the push's holds what is live before the call, the references among
+  // the arguments and the arguments area's entry for them; the call's what is live after it (not the result,
+  // which is not yet assigned, and not an argument that is dead after it); the exit leaves the frame, so its
+  // map is only what its state names. A run shows none of this (an exit built from the call's map keeps
+  // references alive for nothing; a swap of the push's and the call's still finds every reference of the
+  // first collection), so it is read from the tables, of the emitter of each target.
+  for (int through_pointer = 0; through_pointer < 2; through_pointer++) {
+    SCOPED_TRACE(through_pointer);
+    B b("sites", 2);
+    GRJIT_CallHooks h{};
+    h.push = h_noop_push;
+    h.pop = h_noop_pop;
+    h.compile = h_noop;
+    h.deopt = h_noop;
+    h.tail = h_noop_push;
+    b.callable(h);
+    GRJIT_VReg x = b.param(GRJIT_TYPE_I64);
+    GRJIT_VReg keep = b.param(GRJIT_TYPE_REF);       // named by the state before the call only
+    GRJIT_VReg exit_keep = b.param(GRJIT_TYPE_REF);  // named by the exit's state only
+    GRJIT_VReg arg = b.param(GRJIT_TYPE_REF);        // an argument, dead after the call
+    GRJIT_VReg after = b.param(GRJIT_TYPE_REF);      // live after the call, named by no state
+    GRJIT_VReg ptr = b.param(GRJIT_TYPE_PTR);
+    GRJIT_VReg res = b.reg(GRJIT_TYPE_REF);
+    GRJIT_VReg flag = b.reg(GRJIT_TYPE_I64);
+    b.at(b.block());
+    static uint64_t word;
+    const GRCORE_PollIdentity id{4, 21}, exit_id{4, 22};
+    if (through_pointer) {
+      b.call_ptr(res, V(ptr), 1, {V(x), V(arg)}, id, {grjit_frame_slot_vreg(x), grjit_frame_slot_vreg(keep)},
+          exit_id, {grjit_frame_slot_vreg(x), grjit_frame_slot_vreg(exit_keep)});
+    } else {
+      b.call_slot(res, &word, 1, {V(x), V(arg)}, id, {grjit_frame_slot_vreg(x), grjit_frame_slot_vreg(keep)},
+          exit_id, {grjit_frame_slot_vreg(x), grjit_frame_slot_vreg(exit_keep)});
+    }
+    b.cmp(GRJIT_CMP_EQ, flag, V(after), V(res));
+    b.ret(V(flag));
+    Fn f(b.finish());
+    JitWorld w;
+    xm::for_each_target_meta(f, w.pages(), [&](const GRCORE_CodeMeta * meta, const char * target) {
+      SCOPED_TRACE(target);
+      ASSERT_EQ(meta->site_count, 3u) << "the push, the call and the exit before it";
+      const GRCORE_CodeSite *push = nullptr, *call = nullptr, *exit = nullptr;
+      for (size_t i = 0; i < meta->site_count; i++) {
+        const GRCORE_CodeSite * s = &meta->sites[i];
+        if (s->kind == GRCORE_SITE_GC_POINT_FRAME_PUSH) {
+          push = s;
+        } else if (s->kind == GRCORE_SITE_GC_POINT_CALL) {
+          call = s;
+        } else if (s->kind == GRCORE_SITE_GUARD) {
+          exit = s;
+        }
+      }
+      ASSERT_NE(push, nullptr);
+      ASSERT_NE(call, nullptr);
+      ASSERT_NE(exit, nullptr);
+      auto slots_of = [](const GRCORE_CodeSite * s) {
+        std::set<int64_t> out;
+        for (size_t i = 0; i < s->live_count; i++) {
+          out.insert(s->live[i].value);
+        }
+        return out;
+      };
+      const std::set<int64_t> exit_keep_s{grjit_emit_slot(exit_keep)};
+      // The push: everything live before the call (a state's names are uses of the call, the exit's too), the
+      // argument's register and its entry in the arguments area.
+      EXPECT_EQ(push->live_count, 5u) << "keep, exit_keep, after, the argument and its entry in the area";
+      for (int64_t v : {grjit_emit_slot(keep), grjit_emit_slot(exit_keep), grjit_emit_slot(after), grjit_emit_slot(arg)}) {
+        EXPECT_EQ(slots_of(push).count(v), 1u) << v;
+      }
+      EXPECT_EQ(push->identity.offset, id.offset);
+      // The call: after it, plus what its state names; neither the result nor the dead argument, and no area.
+      EXPECT_EQ(slots_of(call), (std::set<int64_t>{grjit_emit_slot(keep), grjit_emit_slot(after)}));
+      EXPECT_EQ(call->identity.offset, id.offset);
+      // The exit before the call: the exit state's own, and only what it names.
+      EXPECT_EQ(slots_of(exit), exit_keep_s);
+      EXPECT_EQ(exit->identity.offset, exit_id.offset);
+      EXPECT_EQ(exit->frame_state_count, 2u);
+      // Three places in the code.
+      EXPECT_NE(push->code_offset, call->code_offset);
+      EXPECT_NE(call->code_offset, exit->code_offset);
+      EXPECT_NE(push->code_offset, exit->code_offset);
+    });
   }
 }
 

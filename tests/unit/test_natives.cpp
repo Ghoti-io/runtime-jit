@@ -18,6 +18,7 @@
 #define FX_ASM_SENTINELS
 #include "../calls_asm.h"
 #include "../calls_fixture.h"
+#include "../cross_meta.h"
 
 #include "../../src/backend/backend_internal.h"
 #include "../../src/code/code_internal.h"
@@ -531,33 +532,32 @@ TEST(Natives, ANativeCallIsASiteWhoseMapNamesWhatIsLiveAfterItButNotItsResultOrI
   b.cmp(GRJIT_CMP_EQ, sum, V(live_after), V(res));
   b.ret(V(sum));
   Fn f(b.finish());
-  Compiled c(f, w.pages());
-  ASSERT_TRUE(c);
-  const GRCORE_CodeMeta * meta = grjit_code_meta(c.code);
-  const GRCORE_CodeSite * call = nullptr;
-  const GRCORE_CodeSite * exit_before = nullptr;
-  size_t calls = 0, exits = 0;
-  for (size_t i = 0; i < meta->site_count; i++) {
-    if (meta->sites[i].kind == GRCORE_SITE_GC_POINT_CALL) {
-      call = &meta->sites[i];
-      calls++;
-    } else if (meta->sites[i].kind == GRCORE_SITE_GUARD) {
-      exit_before = &meta->sites[i];
-      exits++;
+  xm::for_each_target_meta(f, w.pages(), [&](const GRCORE_CodeMeta * meta, const char *) {
+    const GRCORE_CodeSite * call = nullptr;
+    const GRCORE_CodeSite * exit_before = nullptr;
+    size_t calls = 0, exits = 0;
+    for (size_t i = 0; i < meta->site_count; i++) {
+      if (meta->sites[i].kind == GRCORE_SITE_GC_POINT_CALL) {
+        call = &meta->sites[i];
+        calls++;
+      } else if (meta->sites[i].kind == GRCORE_SITE_GUARD) {
+        exit_before = &meta->sites[i];
+        exits++;
+      }
     }
-  }
-  EXPECT_EQ(calls, 1u);
-  EXPECT_EQ(exits, 1u) << "a native with no status has the call and the exit before it, and no more";
-  ASSERT_EQ(meta->site_count, 2u);
-  ASSERT_NE(call, nullptr);
-  ASSERT_NE(exit_before, nullptr);
-  // The map of the call: live_after only. arg_only is an argument and not live after; the
-  // result is not assigned until the call returns; raw is no reference.
-  ASSERT_EQ(call->live_count, 1u);
-  EXPECT_EQ(call->live[0].value, grjit_emit_slot(live_after));
-  EXPECT_EQ(call->live[0].slot_kind, GRCORE_SLOT_VALUE);
-  EXPECT_EQ(call->derived_count, 0u);
-  EXPECT_EQ(exit_before->live_count, 0u) << "the exit leaves the frame, and its state names nothing";
+    EXPECT_EQ(calls, 1u);
+    EXPECT_EQ(exits, 1u) << "a native with no status has the call and the exit before it, and no more";
+    ASSERT_EQ(meta->site_count, 2u);
+    ASSERT_NE(call, nullptr);
+    ASSERT_NE(exit_before, nullptr);
+    // The map of the call: live_after only. arg_only is an argument and not live after; the
+    // result is not assigned until the call returns; raw is no reference.
+    ASSERT_EQ(call->live_count, 1u);
+    EXPECT_EQ(call->live[0].value, grjit_emit_slot(live_after));
+    EXPECT_EQ(call->live[0].slot_kind, GRCORE_SLOT_VALUE);
+    EXPECT_EQ(call->derived_count, 0u);
+    EXPECT_EQ(exit_before->live_count, 0u) << "the exit leaves the frame, and its state names nothing";
+  });
 }
 
 /* ---- The native stack ----------------------------------------------------------------- */
@@ -585,53 +585,52 @@ TEST(Natives, ANativeWithAStatusMakesThreeSitesEachWithItsKindItsIdentityItsStat
   b.cmp(GRJIT_CMP_EQ, flag, V(live_after), V(live_after));
   b.ret(V(flag));
   Fn f(b.finish());
-  Compiled c(f, w.pages());
-  ASSERT_TRUE(c);
-  const GRCORE_CodeMeta * meta = grjit_code_meta(c.code);
-  ASSERT_EQ(meta->site_count, 3u) << "the call, the exit before it, the exit after it";
-  auto slots_of = [](const GRCORE_CodeSite * s) {
-    std::set<int64_t> out;
-    for (size_t i = 0; i < s->live_count; i++) {
-      EXPECT_EQ(s->live[i].slot_kind, GRCORE_SLOT_VALUE);
-      out.insert(s->live[i].value);
+  xm::for_each_target_meta(f, w.pages(), [&](const GRCORE_CodeMeta * meta, const char *) {
+    ASSERT_EQ(meta->site_count, 3u) << "the call, the exit before it, the exit after it";
+    auto slots_of = [](const GRCORE_CodeSite * s) {
+      std::set<int64_t> out;
+      for (size_t i = 0; i < s->live_count; i++) {
+        EXPECT_EQ(s->live[i].slot_kind, GRCORE_SLOT_VALUE);
+        out.insert(s->live[i].value);
+      }
+      return out;
+    };
+    const GRCORE_CodeSite *call = nullptr, *exit_before = nullptr, *exit_after = nullptr;
+    for (size_t i = 0; i < meta->site_count; i++) {
+      const GRCORE_CodeSite * s = &meta->sites[i];
+      if (s->kind == GRCORE_SITE_GC_POINT_CALL) {
+        call = s;
+      } else if (s->kind == GRCORE_SITE_GUARD && s->identity.offset == before.offset) {
+        exit_before = s;
+      } else if (s->kind == GRCORE_SITE_GUARD && s->identity.offset == after.offset) {
+        exit_after = s;
+      }
     }
-    return out;
-  };
-  const GRCORE_CodeSite *call = nullptr, *exit_before = nullptr, *exit_after = nullptr;
-  for (size_t i = 0; i < meta->site_count; i++) {
-    const GRCORE_CodeSite * s = &meta->sites[i];
-    if (s->kind == GRCORE_SITE_GC_POINT_CALL) {
-      call = s;
-    } else if (s->kind == GRCORE_SITE_GUARD && s->identity.offset == before.offset) {
-      exit_before = s;
-    } else if (s->kind == GRCORE_SITE_GUARD && s->identity.offset == after.offset) {
-      exit_after = s;
-    }
-  }
-  ASSERT_NE(call, nullptr);
-  ASSERT_NE(exit_before, nullptr) << "the exit before the call is a guard site in the state before the call";
-  ASSERT_NE(exit_after, nullptr) << "the exit after it is a guard site in the state after the call";
-  // The call: this frame with the callee running, in the state before (the interpreter's call still to be made).
-  EXPECT_EQ(call->identity.function, before.function);
-  EXPECT_EQ(call->identity.offset, before.offset);
-  ASSERT_EQ(call->frame_state_count, 3u);
-  EXPECT_EQ(call->frame_state[0].kind, GRCORE_LOC_CONSTANT);
-  EXPECT_EQ(call->frame_state[0].value, 11);
-  EXPECT_EQ(slots_of(call), (std::set<int64_t>{grjit_emit_slot(live_after), grjit_emit_slot(in_before), grjit_emit_slot(in_after)}))
-      << "live after it, plus what either state names, and neither the result (named only by the state after it) nor the argument";
-  // The exit before the call: the state before, only what it names.
-  EXPECT_EQ(exit_before->identity.function, before.function);
-  ASSERT_EQ(exit_before->frame_state_count, 3u);
-  EXPECT_EQ(exit_before->frame_state[0].value, 11);
-  EXPECT_EQ(slots_of(exit_before), (std::set<int64_t>{grjit_emit_slot(in_before)}));
-  // The exit after it: the state after the call, the result included.
-  EXPECT_EQ(exit_after->identity.function, after.function);
-  ASSERT_EQ(exit_after->frame_state_count, 3u);
-  EXPECT_EQ(exit_after->frame_state[0].value, 12);
-  EXPECT_EQ(slots_of(exit_after), (std::set<int64_t>{grjit_emit_slot(in_after), grjit_emit_slot(res)}));
-  // The three are distinct places: the return addresses of the call and of the two hook calls.
-  EXPECT_NE(call->code_offset, exit_before->code_offset);
-  EXPECT_NE(exit_before->code_offset, exit_after->code_offset);
+    ASSERT_NE(call, nullptr);
+    ASSERT_NE(exit_before, nullptr) << "the exit before the call is a guard site in the state before the call";
+    ASSERT_NE(exit_after, nullptr) << "the exit after it is a guard site in the state after the call";
+    // The call: this frame with the callee running, in the state before (the interpreter's call still to be made).
+    EXPECT_EQ(call->identity.function, before.function);
+    EXPECT_EQ(call->identity.offset, before.offset);
+    ASSERT_EQ(call->frame_state_count, 3u);
+    EXPECT_EQ(call->frame_state[0].kind, GRCORE_LOC_CONSTANT);
+    EXPECT_EQ(call->frame_state[0].value, 11);
+    EXPECT_EQ(slots_of(call), (std::set<int64_t>{grjit_emit_slot(live_after), grjit_emit_slot(in_before), grjit_emit_slot(in_after)}))
+        << "live after it, plus what either state names, and neither the result (named only by the state after it) nor the argument";
+    // The exit before the call: the state before, only what it names.
+    EXPECT_EQ(exit_before->identity.function, before.function);
+    ASSERT_EQ(exit_before->frame_state_count, 3u);
+    EXPECT_EQ(exit_before->frame_state[0].value, 11);
+    EXPECT_EQ(slots_of(exit_before), (std::set<int64_t>{grjit_emit_slot(in_before)}));
+    // The exit after it: the state after the call, the result included.
+    EXPECT_EQ(exit_after->identity.function, after.function);
+    ASSERT_EQ(exit_after->frame_state_count, 3u);
+    EXPECT_EQ(exit_after->frame_state[0].value, 12);
+    EXPECT_EQ(slots_of(exit_after), (std::set<int64_t>{grjit_emit_slot(in_after), grjit_emit_slot(res)}));
+    // The three are distinct places: the return addresses of the call and of the two hook calls.
+    EXPECT_NE(call->code_offset, exit_before->code_offset);
+    EXPECT_NE(exit_before->code_offset, exit_after->code_offset);
+  });
 }
 
 TEST(Natives, TheNativeStackIsCheckedAtTheCallSiteForTheStackArgumentsAndTheNativesOwnUseToTheByte) {
@@ -2951,14 +2950,18 @@ TEST(Natives, Win64RefusesANativeCallBeforeAByteAndTheOtherTwoEmitItOnAnyHost) {
   EXPECT_TRUE(grjit_backend_calls_available());
 }
 
-/* The same boundary, read in the code, on any host: the arm64 check holds a need of 2^24 or more in x17 (the
- * immediates stop there) and applies it in one instruction, and nothing is refused that x86-64 emits. */
-TEST(Natives, TheNativeStackCheckOfALargeNeedIsEmittedForBothTargetsAndArm64PutsItInX17FromSixteenMebibytes) {
+/* The same boundary, read in the code, on any host: the amount the arm64 check takes off `sp` is the need to the
+ * byte for every size an immediate holds in one step, in two (the shifted high part and the low), and, from 2^24,
+ * in x17 (the immediates stop there), and nothing is refused that x86-64 emits. */
+TEST(Natives, TheNativeStackCheckSubtractsExactlyTheNeedOnArm64AndIsEmittedForBothTargetsWhateverTheSize) {
   GRJIT_Limits limits;
   grjit_limits_default(&limits);
   limits.max_native_stack_bytes = size_t{1} << 30;
   NativeTab t(&limits);
-  for (uint32_t declared : {(1u << 24) - 16, (1u << 24) - 1, 1u << 24, (1u << 24) + 100, 1u << 26, 1u << 29, 1u << 30}) {
+  const uint32_t sizes[] = {0,        1,        15,       16,        4080,     4095,     4096,
+      4097,     8191,     8192,     (1u << 20) - 1, 1u << 20, 0xFFF000, 0xFFF001, 0xFFFFFF, 1u << 24,
+      (1u << 24) + 1, (1u << 24) + 100, 1u << 26, 1u << 29, 1u << 30};
+  for (uint32_t declared : sizes) {
     SCOPED_TRACE(declared);
     uint32_t id = t.add(reinterpret_cast<const void *>(sums()[1]), {GRJIT_TYPE_I64}, GRJIT_TYPE_I64, 0, declared);
     B b("native", 1);
@@ -2970,21 +2973,34 @@ TEST(Natives, TheNativeStackCheckOfALargeNeedIsEmittedForBothTargetsAndArm64Puts
     b.ret(V(x));
     Fn f(b.finish());
     for (GRJIT_Arch arch : {GRJIT_ARCH_X86_64, GRJIT_ARCH_ARM64}) {
-      GRJIT_Emitted e;
-      ASSERT_EQ(grjit_emit_for(arch, f, grjit_allocator_default(), nullptr, nullptr, 0x40, &e), GRJIT_OK)
-          << "a native's declared use is a limit of the descriptor, not of the target " << arch;
+      xm::Emit em(arch, f);
+      ASSERT_TRUE(em.ok()) << "a native's declared use is a limit of the descriptor, not of the target "
+                           << xm::arch_name(arch) << ": " << grjit_result_string(em.result);
       if (arch == GRJIT_ARCH_ARM64) {
-        // One argument is in a register, so the area is empty and the need is the declaration: `sub x16, sp, x17`
-        // from 2^24 up, an immediate form below it.
-        bool uxtx = false;
-        for (size_t i = 0; i + 4 <= e.size; i += 4) {
-          uint32_t w;
-          std::memcpy(&w, e.bytes + i, 4);
-          uxtx = uxtx || w == 0xCB3163F0u;
+        // One argument is in a register, so the area is empty and the need is the declaration.
+        const std::vector<uint64_t> amounts = xm::arm64_sub_x16_sp_amounts(em);
+        if (declared == 0) {
+          // A need of nothing is the stack pointer itself: `add x16, sp, #0`, not an empty sequence.
+          bool mov = false;
+          for (size_t i = 0; i < em.words(); i++) {
+            mov = mov || em.word(i) == 0x910003F0u;
+          }
+          EXPECT_TRUE(mov) << "x16 holds sp when nothing is needed";
+        } else {
+          EXPECT_NE(std::find(amounts.begin(), amounts.end(), uint64_t{declared}), amounts.end())
+              << "the check of a need of " << declared << " bytes subtracts exactly that from sp";
         }
-        EXPECT_EQ(uxtx, declared >= (1u << 24)) << "the stack check of a need of " << declared << " bytes";
+        // And from 2^24 it is the register form: no other can hold it.
+        const bool uses_x17 = [&] {
+          for (size_t i = 0; i < em.words(); i++) {
+            if (em.word(i) == 0xCB3163F0u) {
+              return true;
+            }
+          }
+          return false;
+        }();
+        EXPECT_EQ(uses_x17, declared >= (1u << 24));
       }
-      grjit_emitted_free(&e);
     }
   }
 }

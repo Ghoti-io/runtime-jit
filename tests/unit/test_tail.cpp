@@ -16,6 +16,7 @@
 #define FX_ASM_SENTINELS
 #include "../calls_asm.h"
 #include "../calls_fixture.h"
+#include "../cross_meta.h"
 
 #include "../../src/backend/backend_internal.h"
 #include "../../src/code/code_internal.h"
@@ -2172,24 +2173,23 @@ TEST(Tail, TheHooksSiteNamesTheArgumentsAndTheExitsSiteOnlyWhatItsStateNames) {
       {grjit_frame_slot_vreg(x), grjit_frame_slot_vreg(keep)});
   Fn f(b.finish());
   JitWorld w;
-  Compiled c(f, w.pages());
-  ASSERT_TRUE(c);
-  const GRCORE_CodeMeta * meta = grjit_code_meta(c.code);
-  const GRCORE_CodeSite * hook = nullptr;
-  const GRCORE_CodeSite * exit = nullptr;
-  for (size_t i = 0; i < meta->site_count; i++) {
-    if (meta->sites[i].kind == GRCORE_SITE_GC_POINT_FRAME_PUSH) {
-      hook = &meta->sites[i];
-    } else if (meta->sites[i].kind == GRCORE_SITE_GUARD) {
-      exit = &meta->sites[i];
+  xm::for_each_target_meta(f, w.pages(), [&](const GRCORE_CodeMeta * meta, const char *) {
+    const GRCORE_CodeSite * hook = nullptr;
+    const GRCORE_CodeSite * exit = nullptr;
+    for (size_t i = 0; i < meta->site_count; i++) {
+      if (meta->sites[i].kind == GRCORE_SITE_GC_POINT_FRAME_PUSH) {
+        hook = &meta->sites[i];
+      } else if (meta->sites[i].kind == GRCORE_SITE_GUARD) {
+        exit = &meta->sites[i];
+      }
     }
-  }
-  ASSERT_NE(hook, nullptr);
-  ASSERT_NE(exit, nullptr);
-  EXPECT_EQ(meta->site_count, 2u) << "two sites per tail call";
-  EXPECT_EQ(exit->live_count, 1u) << "keep, and not the argument";
-  EXPECT_EQ(hook->live_count, 3u) << "keep and the argument's register, and the argument's slot in the area";
-  EXPECT_EQ(exit->frame_state_count, hook->frame_state_count) << "the one state";
+    ASSERT_NE(hook, nullptr);
+    ASSERT_NE(exit, nullptr);
+    EXPECT_EQ(meta->site_count, 2u) << "two sites per tail call";
+    EXPECT_EQ(exit->live_count, 1u) << "keep, and not the argument";
+    EXPECT_EQ(hook->live_count, 3u) << "keep and the argument's register, and the argument's slot in the area";
+    EXPECT_EQ(exit->frame_state_count, hook->frame_state_count) << "the one state";
+  });
 }
 
 /* ---- The C caller's registers across tail calls --------------------------------------------- */
