@@ -1110,23 +1110,23 @@ at instantiation; the address is a constant of the code, which is also why there
 check. *A walk start stored after the call*: a native's collection would find the previous call's
 (planted defect 15 shows exactly that, and the walk test reads it from inside the native).
 
-**Measured.** (2026-10-07, x86-64, GCC 14.2; the machine was loaded (load average 14, other
-sessions building), so only the rows beside each other mean anything; three runs, the best
-of them first, `make bench`'s minimum of five repeats, ns per loop iteration.) The same loop,
-`sum = inc(sum)`, in a callable function: the loop with no call 0.97 (1.13, 1.55 in the
-loaded runs); the existing `GRJIT_OP_CALL` to a leaf `NO_GC` helper 2.30 (4.05, 4.00);
-`CALL` as a `GC_POINT` (`loop-helper-gc`: the walk start stored, no check, no status)
-4.25 (4.45, 4.47); `CALL_NATIVE` without a status (`loop-native`) 4.25 (4.43, 4.39); with a
-status (`loop-native-status`) 4.62 (4.78, 5.58); a call and return between compiled
-functions through a slot (`loop-compiled-call`, hooks doing nothing) 6.07 (9.88, 10.38). So
-a native call over the loop's own work is about 3.3 ns, the same as the helper called as a
-GC point (the walk-start store and the C call are the cost; the stack check, three
-instructions and a predicted branch, does not show), about 1.0 more than the leaf helper that
-stores nothing, and the status costs about 0.4: a `test` and a branch on `rdx` and the
-second return word, which is the whole price of an error that is a value and never an
-unwinding through compiled code. Each loop checks that its sum is its iteration count. The
-cost of taking an exit (a status, or the stack check) is a `deopt` hook call and a chain
-rebuild, which is the engine's and is measured by its tests, not here.
+**Measured.** (2026-10-07, x86-64, GCC 14.2, on a quiet machine, load average 0.7; `make bench`'s minimum of five
+repeats, ns per loop iteration, five runs, the figures below the first of them to within 0.05 except where
+said; the first measurement, on a loaded machine, was wrong in its conclusions and is replaced.) The same loop,
+`sum = inc(sum)`, in a callable function: the loop with no call 0.61; the existing `GRJIT_OP_CALL` to a leaf `NO_GC`
+helper 1.42; `CALL` as a `GC_POINT` (`loop-helper-gc`: the walk start stored, no check, no status) 1.78 (1.76 to 1.80);
+`CALL_NATIVE` without a status (`loop-native`) 1.62 (1.62 to 1.65); with a status (`loop-native-status`) 1.54 (1.51 to
+1.57); a call and return between compiled functions through a slot (`loop-compiled-call`, hooks doing nothing) 3.65;
+a tail call 2.2. Over the loop's own work, then: the leaf helper costs 0.8 ns, the helper as a GC point 1.2, a native
+1.0, a native with a status 0.9. **A native call is no dearer than the helper called as a GC point** (it is 0.15 ns
+cheaper: the helper's result takes the same path and the stack check, three instructions and a predicted branch, does
+not show), **about 0.2 ns dearer than the leaf helper** that stores no walk start, and **the status costs nothing
+measurable**: the `test` and the branch on `edx` are hidden by the call's own latency, and the status loop measures
+0.05 to 0.1 ns *faster* than the plain one, which is noise in the compiler's placement and not a gain. (An earlier
+version of this paragraph, measured with other sessions building, said 3.3 ns, 1.0 over the leaf helper and 0.4 for the
+status; those figures contradicted the tables and are withdrawn.) Each loop checks that its sum is its iteration count.
+The cost of taking an exit (a status, or the stack check) is a `deopt` hook call and a chain rebuild, which is the
+engine's and is measured by its tests, not here.
 
 ## Gates
 
