@@ -214,8 +214,17 @@ static uint64_t run_loop(LoopKind kind, uint64_t iterations) {
   }
   uint64_t args[1] = {iterations};
   uint64_t out[1] = {0};
+  const uint64_t helper_before = g_helper_calls;
   if (grjit_code_call(g_loop[kind], g_context, args, out) != GRJIT_EXIT_RETURNED) {
     setup_failed("the loop did not return");
+  }
+  /* The sum of 0 .. n - 1, and a helper called once per iteration by the call loop, never by the others
+   * (the poll helper adds a million: it must not run). A wrong result fails here, in a smoke run too. */
+  if (out[0] != iterations * (iterations - 1) / 2) {
+    setup_failed("the loop's sum is not the sum of 0 .. n - 1");
+  }
+  if (g_helper_calls - helper_before != (kind == LOOP_CALL ? iterations : 0)) {
+    setup_failed("the loop's helper was called a number of times that is not its iteration count");
   }
   return out[0] ^ g_helper_calls;
 }
@@ -341,6 +350,9 @@ static uint64_t loop_compiled_call_run(uint64_t iterations) {
   uint64_t out[3] = {0, 0, 0};
   if (grjit_code_call(g_call_loop.caller, g_context, args, out) != GRJIT_EXIT_RETURNED) {
     setup_failed("the call loop did not return");
+  }
+  if (out[0] != iterations) {
+    setup_failed("the call loop's sum is not its iteration count");
   }
   return out[0];
 }
