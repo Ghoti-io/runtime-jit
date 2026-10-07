@@ -2132,6 +2132,69 @@ TEST(Calls, TheStackPointerIsTheSameBeforeEveryCallAndAfterEveryReturnForEveryAr
   }
 }
 
+/* ---- A function of more than a mebibyte of code ------------------------------------------- */
+
+TEST(Calls, AFunctionOfOverAMebibyteOfCodeCallsReturnsAndDeoptimizesThroughStubsFarFromTheirBranches) {
+  CALLS_ONLY_WHERE_EMITTED();
+  // arm64's conditional branches reach one mebibyte, so a callable function whose stubs (the slow path
+  // of a slot call, its exit, the poll's and the guard's) lie more than that from the branches that go
+  // to them is assembled a second time in the long form (an inverted test over a `b`), and its `adr`s
+  // and calls are unaffected. Seven thousand calls in a row, each a push hook, a call, a status test and
+  // a pop, are some three mebibytes; a poll and a guard are at the end, so the guard's exit is far from
+  // its branch and a failing one rebuilds the chain from there. On x86-64 the same function is a check
+  // that nothing in the emitter depended on the size.
+  constexpr int kCalls = 7000;
+  for (int guard_fails = 0; guard_fails < 2; guard_fails++) {
+    SCOPED_TRACE(guard_fails);
+    Engine e;
+    int inc = add_inc(e);
+    int big = e.reserve();
+    {
+      P p("big", {GRJIT_TYPE_I64});
+      int acc = p.local(), zero = p.local(), ok = p.local(), hit = p.local(), k = p.local();
+      p.mov(acc, 0);
+      for (int i = 0; i < kCalls; i++) {
+        p.call(acc, inc, {acc});
+      }
+      p.poll();
+      p.cnst(zero, 0);
+      p.cnst(k, guard_fails ? kCalls : -1);
+      p.bin(K::EQ, hit, acc, k);
+      p.bin(K::EQ, ok, hit, zero); // zero exactly where the guard must fail
+      p.guard(ok);
+      p.ret(acc);
+      e.set(big, p.done());
+    }
+    ASSERT_TRUE(e.compile_fn(inc));
+    GRJIT_Function * ir = e.build_ir(big);
+    GRJIT_Emitted out;
+    ASSERT_EQ(grjit_emit_for(GRJIT_ARCH_ARM64, ir, grjit_allocator_default(), nullptr, nullptr,
+                  grcore_jit_layout()->request_word_offset, &out),
+        GRJIT_OK);
+    EXPECT_GT(out.size, size_t{1} << 20) << "the function is over a mebibyte of code";
+    grjit_emitted_free(&out);
+    grjit_function_destroy(ir);
+    Outcome i = e.run_interpreted(big, {0});
+    ASSERT_TRUE(i.finished);
+    EXPECT_EQ(i.value, static_cast<u64>(kCalls));
+    e.st = Stats{};
+    Outcome c = e.run_compiled(big, {0});
+    ASSERT_TRUE(c.finished);
+    EXPECT_EQ(c.value, i.value);
+    if (guard_fails) {
+      EXPECT_EQ(c.exit, uint32_t{GRJIT_EXIT_DEOPT}) << "the guard's exit, far from its branch, rebuilt the chain";
+      EXPECT_EQ(e.st.deopts, 1);
+      EXPECT_TRUE(c.interpreted_rest);
+    } else {
+      EXPECT_EQ(c.exit, uint32_t{GRJIT_EXIT_RETURNED});
+      EXPECT_EQ(e.st.deopts, 0);
+      EXPECT_FALSE(c.interpreted_rest);
+    }
+    EXPECT_EQ(e.st.pushes, e.st.pops);
+    EXPECT_EQ(c.frames_left, 0u);
+  }
+}
+
 /* ---- An entry is on a sixteen-byte boundary ------------------------------------------------ */
 
 TEST(Calls, AnAddressNotOnASixteenByteBoundaryIsNoEntryEvenInsideRegisteredCodeWithAValidTagBeforeIt) {
