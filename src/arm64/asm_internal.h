@@ -40,6 +40,15 @@
  * ::grjit_a64_finish reports ::GRJIT_A64_FAR (a forward short branch cannot
  * reach its label), assembles again in long mode. A `b` that cannot reach (a
  * cap set above 128 MiB) is ::GRJIT_A64_LIMIT.
+ *
+ * `adr` reaches +-1 MiB and follows the same rule: a short `adr` when the label
+ * is bound within reach; a forward one a short `adr` with a fixup, unless the
+ * assembler is in long mode; and otherwise the long form, `adrp` and `add`, which
+ * reaches +-4 GiB. The long form counts pages from the start of the code, so it
+ * is right only for code that starts on a 4 KiB boundary, which a page mapping
+ * does. (An `adr` in this library is always a few instructions from its label:
+ * the address after the call it precedes. The long form exists so that the rule
+ * is the same for every label, not because an emitter needs it.)
  */
 
 #ifndef GHOTI_IO_GRJIT_SRC_ARM64_ASM_INTERNAL_H
@@ -102,7 +111,10 @@ typedef enum GRJIT_A64Status {
 /** How a fixup is patched. */
 typedef enum GRJIT_A64FixupKind {
   GRJIT_A64_FIXUP_B,     ///< `b`: imm26 in bits 0..25.
-  GRJIT_A64_FIXUP_COND   ///< `b.cond`, `cbz`, `cbnz`: imm19 in bits 5..23.
+  GRJIT_A64_FIXUP_COND,  ///< `b.cond`, `cbz`, `cbnz`: imm19 in bits 5..23.
+  GRJIT_A64_FIXUP_ADR,   ///< `adr`: a byte offset, immlo in bits 29..30 and immhi in 5..23.
+  GRJIT_A64_FIXUP_ADRP,  ///< `adrp`: the same fields, in pages.
+  GRJIT_A64_FIXUP_LO12   ///< The `add` after an `adrp`: the target's low 12 bits, in 10..21.
 } GRJIT_A64FixupKind;
 
 typedef struct GRJIT_A64Fixup {
@@ -221,6 +233,14 @@ void grjit_a64_pop_frame_record(GRJIT_A64Asm * a);
 
 void grjit_a64_ret(GRJIT_A64Asm * a);
 void grjit_a64_blr(GRJIT_A64Asm * a, GRJIT_A64Reg rn);
+void grjit_a64_br(GRJIT_A64Asm * a, GRJIT_A64Reg rn);
+/** `adr rd, label`: the address of a label, in one instruction when it reaches
+ *  (see the reach rule above), else `adrp` and `add`. */
+void grjit_a64_adr(GRJIT_A64Asm * a, GRJIT_A64Reg rd, GRJIT_Label label);
+/** `cmp rn, #imm12` (`subs xzr, rn, #imm12`), 64-bit. */
+void grjit_a64_cmp_imm(GRJIT_A64Asm * a, GRJIT_A64Reg rn, uint32_t imm12);
+/** Appends a 64-bit value as data, little-endian: the tag before an internal entry. */
+void grjit_a64_data64(GRJIT_A64Asm * a, uint64_t value);
 void grjit_a64_brk(GRJIT_A64Asm * a, uint16_t imm);
 void grjit_a64_b(GRJIT_A64Asm * a, GRJIT_Label label);
 void grjit_a64_bcond(GRJIT_A64Asm * a, GRJIT_A64Cond cond, GRJIT_Label label);

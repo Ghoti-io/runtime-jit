@@ -418,6 +418,45 @@ std::vector<Case> cases() {
       {"brk #0x1234", [](A a) { grjit_a64_brk(a, 0x1234); },
           {0x80, 0x46, 0x22, 0xD4},
           "brk #0x1234"},
+      {"br x16", [](A a) { grjit_a64_br(a, GRJIT_A64_X16); },
+          {0x00, 0x02, 0x1F, 0xD6},
+          "br x16"},
+      {"br x0", [](A a) { grjit_a64_br(a, GRJIT_A64_X0); },
+          {0x00, 0x00, 0x1F, 0xD6},
+          "br x0"},
+      {"cmp x16, #1", [](A a) { grjit_a64_cmp_imm(a, GRJIT_A64_X16, 1); },
+          {0x1F, 0x06, 0x00, 0xF1},
+          "cmp x16, #0x1"},
+      {"cmp x0, #4095", [](A a) { grjit_a64_cmp_imm(a, GRJIT_A64_X0, 4095); },
+          {0x1F, 0xFC, 0x3F, 0xF1},
+          "cmp x0, #0xfff"},
+      {"adr x16, the instruction after next (a label ahead, bound)", [](A a) {
+            GRJIT_Label l = grjit_a64_label(a);
+            grjit_a64_adr(a, GRJIT_A64_X16, l);
+            grjit_a64_word(a, 0xD503201Fu); // nop
+            grjit_a64_bind(a, l);
+            grjit_a64_finish(a);
+          },
+          {0x50, 0x00, 0x00, 0x10, 0x1F, 0x20, 0x03, 0xD5},
+          "adr x16, 0x8; nop"},
+      {"adr x16, the previous instruction (a label behind)", [](A a) {
+            GRJIT_Label l = grjit_a64_label(a);
+            grjit_a64_bind(a, l);
+            grjit_a64_word(a, 0xD503201Fu); // nop
+            grjit_a64_adr(a, GRJIT_A64_X16, l);
+          },
+          {0x1F, 0x20, 0x03, 0xD5, 0xF0, 0xFF, 0xFF, 0x10},
+          "nop; adr x16, 0x0"},
+      {"adrp and add to a label ahead (long mode, the label 12 bytes on)", [](A a) {
+            grjit_a64_set_long_branches(a, true);
+            GRJIT_Label l = grjit_a64_label(a);
+            grjit_a64_adr(a, GRJIT_A64_X16, l);
+            grjit_a64_word(a, 0xD503201Fu); // nop
+            grjit_a64_bind(a, l);
+            grjit_a64_finish(a);
+          },
+          {0x10, 0x00, 0x00, 0x90, 0x10, 0x32, 0x00, 0x91, 0x1F, 0x20, 0x03, 0xD5},
+          "adrp x16, 0x0; add x16, x16, #0xc; nop"},
   };
 }
 
@@ -799,6 +838,157 @@ TEST(AsmArm64, EveryAllocationOfTheAssemblerCanFailAndIsReportedAsOom) {
     grjit_a64_free(&a);
     EXPECT_EQ(t.live, 0) << n;
   }
+}
+
+/* ---- adr ------------------------------------------------------------------------ */
+
+TEST(AsmArm64, AdrReachesExactlyAMebibyteEitherWayThenIsAdrpAndAdd) {
+  const int64_t reach = int64_t{1} << 20;
+  // Behind: the label is bound, `bytes` before the adr. -1 MiB reaches, one word more does not.
+  for (int64_t behind : {int64_t{4}, reach, reach + 4}) {
+    Asm as(1u << 26);
+    GRJIT_Label l = grjit_a64_label(&as.a);
+    grjit_a64_bind(&as.a, l);
+    for (int64_t i = 0; i < behind / 4; i++) {
+      grjit_a64_brk(&as.a, 0);
+    }
+    const size_t at = as.words();
+    grjit_a64_adr(&as.a, GRJIT_A64_X16, l);
+    grjit_a64_finish(&as.a);
+    ASSERT_EQ(grjit_a64_status(&as.a), GRJIT_A64_OK) << behind;
+    if (behind <= reach) {
+      ASSERT_EQ(as.words(), at + 1) << behind << ": one instruction while it reaches";
+      const uint32_t w = as.word(at);
+      EXPECT_EQ(w & 0x9F000000u, 0x10000000u) << "an adr, not an adrp";
+      const int64_t imm = (static_cast<int64_t>((w >> 5) & 0x7FFFFu) << 2) | ((w >> 29) & 3u);
+      const int64_t signed_imm = (imm ^ (int64_t{1} << 20)) - (int64_t{1} << 20);
+      EXPECT_EQ(signed_imm, -behind);
+    } else {
+      ASSERT_EQ(as.words(), at + 2) << behind << ": adrp and add when it does not";
+      const uint32_t p = as.word(at);
+      const uint32_t add = as.word(at + 1);
+      EXPECT_EQ(p & 0x9F000000u, 0x90000000u) << "an adrp";
+      EXPECT_EQ(add & 0xFFC00000u, 0x91000000u) << "then an add of the low twelve bits";
+      EXPECT_EQ(add & 31u, 16u);
+      EXPECT_EQ((add >> 5) & 31u, 16u);
+      const int64_t pages = (static_cast<int64_t>((p >> 5) & 0x7FFFFu) << 2) | ((p >> 29) & 3u);
+      const int64_t signed_pages = (pages ^ (int64_t{1} << 20)) - (int64_t{1} << 20);
+      EXPECT_EQ(signed_pages, -static_cast<int64_t>(at >> 10) + 0) << "the label is at page 0 (the code's own start)";
+      EXPECT_EQ((add >> 10) & 0xFFFu, 0u);
+    }
+  }
+}
+
+TEST(AsmArm64, AForwardAdrIsFarWhenItsLabelIsOutOfReachAndLongModeEmitsAdrpAndAdd) {
+  const int64_t reach = int64_t{1} << 20;
+  // The label is `ahead` bytes past the adr. +1 MiB - 4 reaches; +1 MiB does not.
+  for (int64_t ahead : {int64_t{8}, reach - 4, reach}) {
+    for (bool long_mode : {false, true}) {
+      SCOPED_TRACE(ahead);
+      SCOPED_TRACE(long_mode);
+      Asm as(1u << 26);
+      grjit_a64_set_long_branches(&as.a, long_mode);
+      GRJIT_Label l = grjit_a64_label(&as.a);
+      grjit_a64_adr(&as.a, GRJIT_A64_X9, l);
+      const size_t adr_words = long_mode ? 2 : 1;
+      for (int64_t i = 0; i < (ahead - 4 * static_cast<int64_t>(adr_words)) / 4; i++) {
+        grjit_a64_brk(&as.a, 0);
+      }
+      grjit_a64_bind(&as.a, l);
+      grjit_a64_ret(&as.a);
+      grjit_a64_finish(&as.a);
+      if (!long_mode && ahead >= reach) {
+        EXPECT_EQ(grjit_a64_status(&as.a), GRJIT_A64_FAR) << "assemble again in long mode";
+        continue;
+      }
+      ASSERT_EQ(grjit_a64_status(&as.a), GRJIT_A64_OK);
+      const size_t target = grjit_a64_label_offset(&as.a, l);
+      const uint32_t w = as.word(0);
+      if (!long_mode) {
+        EXPECT_EQ(w & 0x9F000000u, 0x10000000u);
+        const int64_t imm = (static_cast<int64_t>((w >> 5) & 0x7FFFFu) << 2) | ((w >> 29) & 3u);
+        EXPECT_EQ(imm, static_cast<int64_t>(target)) << "the offset to the label from the adr at 0";
+      } else {
+        const uint32_t add = as.word(1);
+        EXPECT_EQ(w & 0x9F000000u, 0x90000000u);
+        EXPECT_EQ(add & 0xFFC00000u, 0x91000000u);
+        const int64_t pages = (static_cast<int64_t>((w >> 5) & 0x7FFFFu) << 2) | ((w >> 29) & 3u);
+        EXPECT_EQ(pages, static_cast<int64_t>(target >> 12));
+        EXPECT_EQ((add >> 10) & 0xFFFu, static_cast<uint32_t>(target & 0xFFFu));
+      }
+    }
+  }
+}
+
+TEST(AsmArm64, AnAdrFixupPatchesItsOwnFieldsAndRefusesWhatItCannotEncode) {
+  struct Probe {
+    int64_t delta;  // bytes for adr, pages for adrp, the target's low twelve bits for the add
+    GRJIT_A64FixupKind kind;
+    GRJIT_A64Status want;
+  };
+  const int64_t r = int64_t{1} << 20;
+  const Probe probes[] = {
+      {r - 4, GRJIT_A64_FIXUP_ADR, GRJIT_A64_OK},
+      {r, GRJIT_A64_FIXUP_ADR, GRJIT_A64_FAR},
+      {-r, GRJIT_A64_FIXUP_ADR, GRJIT_A64_OK},
+      {-r - 4, GRJIT_A64_FIXUP_ADR, GRJIT_A64_FAR},
+      {1, GRJIT_A64_FIXUP_ADR, GRJIT_A64_OK},
+      {3, GRJIT_A64_FIXUP_ADR, GRJIT_A64_OK},
+      {r - 1, GRJIT_A64_FIXUP_ADRP, GRJIT_A64_OK},
+      {r, GRJIT_A64_FIXUP_ADRP, GRJIT_A64_LIMIT},
+      {1, GRJIT_A64_FIXUP_ADRP, GRJIT_A64_OK},
+      {-1, GRJIT_A64_FIXUP_ADRP, GRJIT_A64_OK},
+      {0x123, GRJIT_A64_FIXUP_LO12, GRJIT_A64_OK},
+      {0xFFF, GRJIT_A64_FIXUP_LO12, GRJIT_A64_OK},
+  };
+  for (const Probe & p : probes) {
+    SCOPED_TRACE(p.delta);
+    SCOPED_TRACE(p.kind);
+    GRJIT_A64Asm a;
+    grjit_a64_init(&a, grjit_allocator_default(), SIZE_MAX / 2);
+    // The instruction sits 8 MiB up, so a distance behind it lands at a non-negative offset. (An adrp
+    // 2^20 pages behind would need a 4 GiB buffer: the probes behind stop at one page.)
+    const size_t at = size_t{8} << 20;
+    a.buffer = static_cast<uint8_t *>(std::calloc(1, at + 8));
+    ASSERT_NE(a.buffer, nullptr);
+    a.length = at + 4;
+    a.capacity = at + 8;
+    GRJIT_Label l = grjit_a64_label(&a);
+    int64_t target = static_cast<int64_t>(at);
+    switch (p.kind) {
+      case GRJIT_A64_FIXUP_ADR: target += p.delta; break;
+      case GRJIT_A64_FIXUP_ADRP: target += p.delta * 4096; break;
+      default: target += p.delta; break;
+    }
+    a.label_at[l] = static_cast<size_t>(target);
+    a.fixups = static_cast<GRJIT_A64Fixup *>(std::malloc(sizeof(GRJIT_A64Fixup)));
+    a.fixups[0] = {at, l, p.kind};
+    a.fixup_count = 1;
+    a.fixup_capacity = 1;
+    grjit_a64_finish(&a);
+    EXPECT_EQ(grjit_a64_status(&a), p.want);
+    if (p.want == GRJIT_A64_OK) {
+      uint32_t w;
+      std::memcpy(&w, a.buffer + at, 4);
+      if (p.kind == GRJIT_A64_FIXUP_LO12) {
+        EXPECT_EQ((w >> 10) & 0xFFFu, static_cast<uint32_t>(target & 0xFFF));
+        EXPECT_EQ(w & ~(0xFFFu << 10), 0u) << "nothing else is touched";
+      } else {
+        int64_t imm = (static_cast<int64_t>((w >> 5) & 0x7FFFFu) << 2) | ((w >> 29) & 3u);
+        imm = (imm ^ (int64_t{1} << 20)) - (int64_t{1} << 20);
+        EXPECT_EQ(imm, p.delta);
+        EXPECT_EQ(w & ~((3u << 29) | (0x7FFFFu << 5)), 0u) << "nothing else is touched";
+      }
+    }
+    grjit_a64_free(&a);
+  }
+}
+
+TEST(AsmArm64, TheTagBetweenCodeIsTwoLittleEndianWordsOfTheValue) {
+  Asm as;
+  grjit_a64_data64(&as.a, UINT64_C(0x4752494E00000003));
+  grjit_a64_data64(&as.a, UINT64_C(0x0123456789ABCDEF));
+  EXPECT_EQ(hex(as.bytes()), "030000004e495247efcdab8967452301");
 }
 
 GRJIT_TEST_MAIN()

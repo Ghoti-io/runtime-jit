@@ -166,6 +166,8 @@ static void add_fixup(GRJIT_A64Asm * a, GRJIT_Label label, GRJIT_A64FixupKind ki
 
 #define B_RANGE (INT64_C(1) << 25)   /* words, signed 26 bits */
 #define COND_RANGE (INT64_C(1) << 18) /* words, signed 19 bits */
+#define ADR_RANGE (INT64_C(1) << 20)  /* bytes, signed 21 bits */
+#define ADRP_RANGE (INT64_C(1) << 20) /* pages, signed 21 bits */
 
 /* `b label`: always the one instruction. */
 void grjit_a64_b(GRJIT_A64Asm * a, GRJIT_Label label) {
@@ -233,6 +235,47 @@ void grjit_a64_cbnz(GRJIT_A64Asm * a, GRJIT_A64Reg rt, GRJIT_Label label) {
   cond_branch(a, 0xB5000000u | (uint32_t)rt, 0xB4000000u | (uint32_t)rt, label);
 }
 
+/* The immediate fields of `adr` and `adrp`: the low two bits in 29..30 and the
+ * rest in 5..23. */
+static uint32_t adr_fields(int64_t imm21) {
+  uint32_t u = (uint32_t)imm21 & 0x1FFFFFu;
+  return ((u & 3u) << 29) | ((u >> 2) << 5);
+}
+
+/* `adr rd, label`. */
+void grjit_a64_adr(GRJIT_A64Asm * a, GRJIT_A64Reg rd, GRJIT_Label label) {
+  if (a->status != GRJIT_A64_OK) {
+    return;
+  }
+  if (label >= a->label_count) {
+    fail(a, GRJIT_A64_BAD);
+    return;
+  }
+  size_t target = a->label_at[label];
+  if (target != SIZE_MAX) {
+    int64_t bytes = (int64_t)target - (int64_t)a->length;
+    if (bytes >= -ADR_RANGE && bytes < ADR_RANGE) {
+      grjit_a64_word(a, 0x10000000u | adr_fields(bytes) | (uint32_t)rd);
+      return;
+    }
+    /* The long form of a label already bound: the pages are known. */
+    int64_t pages = (int64_t)(target >> 12) - (int64_t)(a->length >> 12);
+    grjit_a64_word(a, 0x90000000u | adr_fields(pages) | (uint32_t)rd);
+    grjit_a64_word(a, 0x91000000u | (((uint32_t)target & 0xFFFu) << 10) |
+        ((uint32_t)rd << 5) | (uint32_t)rd);
+    return;
+  }
+  if (!a->long_branches) {
+    add_fixup(a, label, GRJIT_A64_FIXUP_ADR);
+    grjit_a64_word(a, 0x10000000u | (uint32_t)rd);
+    return;
+  }
+  add_fixup(a, label, GRJIT_A64_FIXUP_ADRP);
+  grjit_a64_word(a, 0x90000000u | (uint32_t)rd);
+  add_fixup(a, label, GRJIT_A64_FIXUP_LO12);
+  grjit_a64_word(a, 0x91000000u | ((uint32_t)rd << 5) | (uint32_t)rd);
+}
+
 void grjit_a64_finish(GRJIT_A64Asm * a) {
   if (a->status != GRJIT_A64_OK) {
     return;
@@ -249,7 +292,23 @@ void grjit_a64_finish(GRJIT_A64Asm * a) {
     for (int k = 0; k < 4; k++) {
       insn |= (uint32_t)a->buffer[f->at + (size_t)k] << (8 * k);
     }
-    if (f->kind == GRJIT_A64_FIXUP_B) {
+    if (f->kind == GRJIT_A64_FIXUP_ADR) {
+      int64_t bytes = (int64_t)target - (int64_t)f->at;
+      if (bytes < -ADR_RANGE || bytes >= ADR_RANGE) {
+        fail(a, GRJIT_A64_FAR);
+        return;
+      }
+      insn |= adr_fields(bytes);
+    } else if (f->kind == GRJIT_A64_FIXUP_ADRP) {
+      int64_t pages = (int64_t)(target >> 12) - (int64_t)(f->at >> 12);
+      if (pages < -ADRP_RANGE || pages >= ADRP_RANGE) {
+        fail(a, GRJIT_A64_LIMIT);
+        return;
+      }
+      insn |= adr_fields(pages);
+    } else if (f->kind == GRJIT_A64_FIXUP_LO12) {
+      insn |= ((uint32_t)target & 0xFFFu) << 10;
+    } else if (f->kind == GRJIT_A64_FIXUP_B) {
       if (words < -B_RANGE || words >= B_RANGE) {
         fail(a, GRJIT_A64_LIMIT);
         return;
@@ -581,6 +640,24 @@ void grjit_a64_ret(GRJIT_A64Asm * a) {
 
 void grjit_a64_blr(GRJIT_A64Asm * a, GRJIT_A64Reg rn) {
   grjit_a64_word(a, 0xD63F0000u | ((uint32_t)rn << 5));
+}
+
+void grjit_a64_br(GRJIT_A64Asm * a, GRJIT_A64Reg rn) {
+  grjit_a64_word(a, 0xD61F0000u | ((uint32_t)rn << 5));
+}
+
+void grjit_a64_cmp_imm(GRJIT_A64Asm * a, GRJIT_A64Reg rn, uint32_t imm12) {
+  if (imm12 > 0xFFFu) {
+    fail(a, GRJIT_A64_BAD);
+    return;
+  }
+  /* subs xzr, xn, #imm12 */
+  grjit_a64_word(a, 0xF100001Fu | (imm12 << 10) | ((uint32_t)rn << 5));
+}
+
+void grjit_a64_data64(GRJIT_A64Asm * a, uint64_t value) {
+  grjit_a64_word(a, (uint32_t)value);
+  grjit_a64_word(a, (uint32_t)(value >> 32));
 }
 
 void grjit_a64_brk(GRJIT_A64Asm * a, uint16_t imm) {
