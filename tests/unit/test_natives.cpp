@@ -1323,6 +1323,8 @@ TEST(Natives, AStatusOfZeroContinuesInCompiledCodeAndAnyOtherLeavesThroughTheCha
       EXPECT_EQ(e2.st.deopts, 1);
       EXPECT_EQ(e2.st.status_exits, 1);
       EXPECT_EQ(e2.st.last_cause, GRJIT_CAUSE_NATIVE | c.cause_low) << "the native bit and the status";
+      EXPECT_EQ(p.c.entry_cause, GRJIT_CAUSE_NATIVE | c.cause_low)
+          << "and the entry reports it in out[0], through every frame's return";
       EXPECT_EQ(e2.st.deopt_frames, 3) << "every frame of the chain is rebuilt";
       EXPECT_TRUE(p.c.interpreted_rest);
       EXPECT_EQ(e2.st.native_exits, 0) << "this is the exit after the call and not the one before it";

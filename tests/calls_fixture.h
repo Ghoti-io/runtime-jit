@@ -285,6 +285,7 @@ struct Outcome {
   bool unwound = false;    // an unwind reached the base of the run with no scope to catch it
   bool rebuild_failed = false; // the adapter reported GRJIT_EXIT_REBUILD_FAILED
   u64 failed_with = 0;     // and the hook's answer, out[0]
+  u64 entry_cause = 0xDEADBEEFu; // out[0] of a compiled run that deoptimized: the cause the entry reports
   std::vector<u64> pcs_after_failure; // each guest frame's pc slot, before the unwind
 };
 
@@ -1738,6 +1739,7 @@ inline Outcome Engine::run_compiled_core(int fn, const std::vector<u64> & args, 
     return out;
   }
   EXPECT_EQ(exit, GRJIT_EXIT_DEOPT);
+  out.entry_cause = res[0];
   reset_reservation();
   if (unwind_run) {
     // A native's UNWIND with no scope in this run to catch it: the hook popped the frames above

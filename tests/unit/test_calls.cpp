@@ -594,6 +594,7 @@ TEST(Calls, AGuardFailingThreeFramesDownRebuildsEveryCompiledFrameAndTheInterpre
   EXPECT_EQ(e.st.deopt_frames, 4) << "n = 10, 9, 8 waiting at their calls, and n = 7";
   EXPECT_EQ(e.st.rebuild, GRCORE_OK);
   EXPECT_EQ(e.st.last_cause, 0u);
+  EXPECT_EQ(o.entry_cause, 0u) << "a guard's cause, at the entry, is zero";
   EXPECT_EQ(o.frames_left, 0u);
   EXPECT_EQ(e.st.pushes, e.st.pops);
 }
@@ -632,6 +633,7 @@ TEST(Calls, AFailedPollInACalleeRebuildsTheChainAndCarriesThePollHelpersAnswer) 
   EXPECT_EQ(e.st.poll_slow, 3);
   EXPECT_EQ(e.st.deopts, 1);
   EXPECT_EQ(e.st.last_cause, 1u) << "the helper's answer is the cause";
+  EXPECT_EQ(o.entry_cause, 1u) << "and the entry reports it in out[0], through every frame's return";
   EXPECT_EQ(e.st.deopt_frames, 3) << "n = 10, 9 waiting and n = 8 polling";
   EXPECT_EQ(e.st.rebuild, GRCORE_OK);
 }
