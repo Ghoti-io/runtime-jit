@@ -1737,9 +1737,15 @@ inline Outcome Engine::run_compiled_core(int fn, const std::vector<u64> & args, 
 
 /* The stack pointer of the function it is inlined into. */
 __attribute__((always_inline)) inline uintptr_t current_sp() {
+#if defined(__x86_64__)
   uintptr_t sp;
   asm volatile("mov %%rsp, %0" : "=r"(sp));
   return sp;
+#else
+  /* Only the x86-64 SysV backend emits a native call, so no native runs here under a compiled
+   * caller; the frame address stands in for the stack pointer so the fixture still builds. */
+  return reinterpret_cast<uintptr_t>(__builtin_frame_address(0));
+#endif
 }
 
 /* A native's record: an activation record of `kind` (NATIVE, or REENTRY for a native that
