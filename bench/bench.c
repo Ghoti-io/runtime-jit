@@ -82,6 +82,7 @@ typedef struct {
   uint64_t (*run)(uint64_t iterations);
   uint64_t iterations;       /* per repeat, full run */
   uint64_t smoke_iterations; /* per repeat, --smoke */
+  int needs_calls;           /* only where calls between compiled functions exist */
 } Case;
 
 /* A case that cannot set itself up must not report a short, fast run as a
@@ -440,13 +441,13 @@ static int compare_double(const void * a, const void * b) {
 }
 
 static const Case cases[] = {
-    {"calibration", calibration_run, 50000000, 100000},
-    {"compile-100", compile_run, 2000, 3},
-    {"compile-12k-sites", compile_sites_run, 3, 1},
-    {"loop-plain", loop_plain_run, 10000000, 1000},
-    {"loop-poll", loop_poll_run, 10000000, 1000},
-    {"loop-call", loop_call_run, 10000000, 1000},
-    {"loop-compiled-call", loop_compiled_call_run, 10000000, 1000},
+    {"calibration", calibration_run, 50000000, 100000, 0},
+    {"compile-100", compile_run, 2000, 3, 0},
+    {"compile-12k-sites", compile_sites_run, 3, 1, 0},
+    {"loop-plain", loop_plain_run, 10000000, 1000, 0},
+    {"loop-poll", loop_poll_run, 10000000, 1000, 0},
+    {"loop-call", loop_call_run, 10000000, 1000, 0},
+    {"loop-compiled-call", loop_compiled_call_run, 10000000, 1000, 1},
 };
 
 int main(int argc, char ** argv) {
@@ -472,6 +473,13 @@ int main(int argc, char ** argv) {
 
   int repeats = smoke ? 1 : REPEATS;
   for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+    if (cases[c].needs_calls && !grjit_backend_calls_available()) {
+      /* Named, not silently left out: this target refuses calls between
+       * compiled functions (arm64 and Win64 have them in a later story). */
+      printf("%-12s skipped: this target has no calls between compiled functions\n",
+          cases[c].name);
+      continue;
+    }
     uint64_t n = smoke ? cases[c].smoke_iterations : cases[c].iterations;
     double ns[REPEATS];
     uint64_t sink = 0;

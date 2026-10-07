@@ -1087,7 +1087,9 @@ struct Child {
 
 Child in_child(const std::function<void()> & fn) {
   Child r;
-#ifndef _WIN32
+#ifdef _WIN32
+  (void)fn; // no fork here; the callers that need one do not run on this target
+#else
   int fds[2];
   EXPECT_EQ(pipe(fds), 0);
   std::fflush(nullptr);
