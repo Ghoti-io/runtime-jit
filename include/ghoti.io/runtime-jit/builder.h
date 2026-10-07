@@ -142,7 +142,8 @@ GRJIT_API GRJIT_Result grjit_builder_set_block(
  * A callable function has, besides the entry of ::grjit_code_entry, an
  * *internal entry* (::grjit_code_internal_entry) that uses the internal calling
  * convention, and the entry adapts to it. Without this a function is compiled
- * exactly as before and may not contain `CALL_SLOT` or `CALL_PTR`. `hooks` is
+ * exactly as before and may not contain `CALL_SLOT`, `CALL_PTR`, `TAIL_CALL_SLOT` or
+ * `TAIL_CALL_PTR`. `hooks` is
  * copied; its `deopt` is required, and its other members as the function's
  * operations need (the verifier says which).
  *
@@ -153,7 +154,7 @@ GRJIT_API GRJIT_Result grjit_builder_set_callable(
 
 /**
  * @brief Names a callable function for the engine's calls to it: the token a
- *   `CALL_SLOT` or `CALL_PTR` that means this function passes as `callee`.
+ *   `CALL_SLOT`, `CALL_PTR` or tail call that means this function passes as `callee`.
  *
  * The token and the parameter count are written before the internal entry, and
  * a call through a code pointer refuses, at run time, a target whose token is

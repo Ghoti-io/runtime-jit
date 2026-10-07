@@ -68,8 +68,9 @@ typedef struct GRJIT_Limits {
                                ///< working memory. The code and frame caps do
                                ///< not bound it: sites times live registers
                                ///< can be many times either.
-  size_t max_guest_call_arguments; ///< Arguments of a call to another compiled
-                               ///< function (`CALL_SLOT`, `CALL_PTR`), which
+  size_t max_guest_call_arguments; ///< Arguments of a call or a tail call to
+                               ///< another compiled function (`CALL_SLOT`,
+                               ///< `CALL_PTR`, `TAIL_CALL_SLOT`, `TAIL_CALL_PTR`), which
                                ///< the internal convention passes in six
                                ///< registers and then on the stack. Default
                                ///< and ceiling 16.

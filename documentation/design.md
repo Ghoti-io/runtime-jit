@@ -688,6 +688,190 @@ under one open JIT record held 832,640 bytes, 400 retired references, all
 released when it left (`Calls.RepeatedReplacementUnderOneLongLivedActivation...`
 prints it; runtime-core's `design.md` says why no bound or epoch is added).
 
+## Tail calls (AD-28, CAP-8)
+
+A compiled function can call another (above); this is the call that replaces the
+caller. Wasm 3.0's `return_call`, `return_call_indirect` and `return_call_ref`
+need it, and so does any tail-recursive guest program: without it a loop written
+as a tail call grows the native stack and the guest stack at every iteration. It
+is x86-64 SysV only, as calls are: arm64 and Win64 refuse a function that has one
+with `GRJIT_ERR_UNSUPPORTED` before a byte is emitted (story 7), and nothing
+about a function without one changes (the three pins, and a fourth, over
+callable functions with calls and no tail call, were recorded at the commit
+before and hold).
+
+**The IR.** `TAIL_CALL_SLOT` and `TAIL_CALL_PTR`: terminators with no result and
+*one* frame state, up to sixteen arguments (registers or immediates), the
+callee's token, and an entry slot or a code pointer (a `ptr` register or a
+non-null immediate: `return_call_indirect`, and `return_call_ref` once the engine
+has read the pointer out of its function object). Dispatch, the compile-at-call
+helper, the refused-slot compare and the pointer check (registered, not retired,
+tagged with the callee's token and *this call's* argument count) are a call's,
+unchanged, and share their code (`emit_dispatch`). A callee that cannot be
+entered is an exit. The verifier requires a callable function with the `tail` and
+`deopt` hooks (and `compile` for a slot), a last-in-block position (the operation
+is a terminator, so "not last" is the existing refusal, naming the operation), at
+most `max_guest_call_arguments`, a `ptr` register or non-null immediate, and a
+frame state of the function's length. **The IR declares no signature**, so the
+library does not check argument types against the callee or the result type
+against the caller's: what a tail call is held to at run time is the callee's
+token and parameter count, which the tag and the slot's binding check, and that
+types agree is the engine's compiler's, exactly as for a call. (A library that
+checked would carry an engine's types, or a table by token that duplicates the
+engine's own.)
+
+**The `tail` hook** (`GRJIT_CallHooks::tail`, `push`'s signature) replaces the top
+guest frame, the caller's, with the callee's, and the reservation extension, as
+one step: extend by the callee's maximum, then give back the caller's, so a
+refusal leaves everything as it was. Everything that can fail or collect (the
+extension, the stack's room, `grcore_stack_reserve` for a callee whose frame is
+larger) is done before the guest stack changes; the pop and push that follow
+cannot fail, and the hook reaches no GC point after it commits. It reads its
+arguments after any collection it causes. A non-zero return changes nothing and
+is an exit at the tail site, where the interpreter makes the tail call itself. A
+tail call from a frame that owns a budget scope or an engine call record is
+refused by the hook (the engine knows; the library has no notion of scopes), so it
+goes through that exit and the interpreter makes it as a call whose result the
+frame returns. The guest depth does not change, and memory is counted as the
+interpreter's own tail call counts it. `pop` is not called for a tail call: the
+pop of the original call, when the callee returns, pops the guest frame the hook
+left on top.
+
+**The sites.** The hook is a `GRCORE_SITE_GC_POINT_FRAME_PUSH` site of the caller,
+whose guest frame is still the caller's: its map names the live references, the
+frame state's registers *and the arguments area* (so a collection in the hook
+updates the arguments, derived pointers rewritten from their bases, before it
+reads them); the exit before the replacement is a `GRCORE_SITE_GUARD` site in the
+same state and goes through the same `deopt` hook and `DEOPTED` return as a call's.
+No new site kind and no change to the metadata format (the version stays 1).
+Liveness makes two site sets per tail call (the hook, the exit), and the hook's
+includes everything the exit's state names: a hook that collected and then refused
+leaves the references the exit's rebuild reads updated
+(`Tail.ARefusedTailHookThatCollectedLeavesTheExitStatesReferencesUpdated`).
+
+**The replacement.** After the hook succeeds, with no GC point until the jump. Let
+`ra` be the address of the caller's return address (`rbp + 8`), `in_A` and `in_T`
+the bytes of stack arguments the caller's and the callee's convention take (whole
+16-byte units), `R = ra + 8 + in_A`, where the original caller expects `rsp` after
+the return, and `ra' = R - 8 - in_T`. In order: load the context into `r10`, the
+return address into `r11` and the caller's saved base into `rax`; copy the callee's
+stack arguments from the arguments area to `[ra' + 8, R)` through `rdi`; store
+`r11` at `ra'`; load the register arguments from the area; load the entry from the
+entry-save slot into `r11`; `lea rsp, [ra']`; `mov rbp, rax`; `jmp r11`. The
+callee's prologue then finds exactly what a call leaves, and its `ret imm16`
+leaves `rsp` at `R`: that is why **the callee pops its own stack arguments** (above)
+and what makes the original caller's stack right whatever the widths in between.
+Alignment holds because `in_A` and `in_T` are multiples of 16. The signal safety
+argument is that every write is above `rsp` until `rsp` moves, and nothing below
+the new `rsp` is read after.
+
+One emitted tail call (`A(v0, v1)` tail-calling a callee of nine arguments, three of
+them on the stack: `in_A = 0`, `in_T = 32`, so `ra' = ra - 32` = `rbp - 0x18`; the area is `rbp - 0x70` to `rbp - 0x28`, which ends
+below `ra'` and below the registers' slots; the printed IR is
+`tail_call.slot 0x... callee=2(v0, v1, #2, #3, #4, #5, #6, #7, #8) state fn=1 off=7 [v0, v1]`):
+
+```
+  184: mov  r10,[rbp-0x8]      ; the context, before the copies reach its slot
+  188: mov  r11,[rbp+0x8]      ; the return address
+  18c: mov  rax,[rbp+0x0]      ; the caller's saved base
+  190: mov  rdi,[rbp-0x40]     ; stack argument 6 ...
+  194: mov  [rbp-0x10],rdi     ; ... to [ra'+8]
+  198: mov  rdi,[rbp-0x38]     ; 7
+  19c: mov  [rbp-0x8],rdi
+  1a0: mov  rdi,[rbp-0x30]     ; 8: lands on the saved-base word, already in rax
+  1a4: mov  [rbp+0x0],rdi
+  1a8: mov  [rbp-0x18],r11     ; the return address, at ra'
+  1ac: mov  rdi,[rbp-0x70] ... r9,[rbp-0x48]   ; the six register arguments
+  1c4: mov  r11,[rbp-0x78]     ; the entry the dispatch saved
+  1c8: lea  rsp,[rbp-0x18]
+  1cc: mov  rbp,rax
+  1cf: jmp  r11
+```
+
+**The staging area never overlaps the destination.** The arguments area is the
+staging area, and the stack arguments' destination reaches below the caller's own
+incoming area when `in_T > in_A` (`ra'` is below `ra`). Moving arguments in place
+would need a copy direction chosen from the frame's shape, and the register
+arguments' sources can lie in the destination, so the registers would have to be
+loaded first, and there are not enough scratch registers to hold the context, the
+return address, the caller's base and a copy temporary at once. With the area kept
+at or below `ra'`, nothing is order-sensitive and every one of those is loaded
+before the first write. A function with tail calls therefore gets `pad` slots
+between its register slots and the area, `max over its tail calls of
+max(0, (in_T - in_A) / 8 - (vreg_count + 4))`; it is zero for every function that
+has none, and the macros and the metadata take it as part of the register count.
+The frame is small (a function of two parameters tail-calling sixteen arguments
+needs six slots of padding; most functions need none), and a test derives it from
+the frame sizes and shows that one slot less would overlap
+(`Tail.TheFramesPaddingIsExactlyWhatTheStagingAreaNeeds...`). It is representation
+independent: a float argument is a spilled word loaded into an xmm register last.
+
+**The walk is unchanged, and so is runtime-core.** After the jump the callee's
+frame has the caller's saved base and return address in the two words at its base,
+so the walk meets it as any frame: it ends at the same chain-end marker or caller,
+and sees one compiled frame paired with one guest frame (the callee's), because the
+hook replaced the guest frame as the jump replaced the native one. Compiled frames
+and guest frames still correspond one for one, which is what the positional pairing
+of `grcore_compiled_guest_index` asks. The walk-start cell holds a dead frame after
+the jump and is not cleared: it is read only after a store that precedes every call
+that can reach a GC point, and the native-stack stub stores it itself. Read from a
+probe in a callee that a widening tail call entered, the word at its base is the
+original caller's base, constant over a million tail calls
+(`Tail.MutualRecursion...`: `saved` and `rets` at the first probe and the last).
+The callee's guard, poll or pause deoptimizes as any frame's: the chain, which no
+longer holds the replaced caller, is rebuilt into its guest frames and every frame
+returns `DEOPTED`; a million-call chain found by a guard has exactly its callers' and
+the callee's frames (`Tail.AGuardAfterAHundredThousandTailCalls...`).
+
+**Native stack in bytes.** No check at the tail site, which makes no stack: the
+replacement writes only inside the caller's own frame (`pad` guarantees `ra'` is above
+its bottom). The callee's prologue check is the only one and is judged as for a call.
+At the same depth a callee whose frame is no larger than the caller's passes whenever
+the caller did; one that does not fit deoptimizes once, at its prologue, with the guest
+frame the hook made at its entry, and the interpreter continues
+(`Tail.ACalleeWhoseFrameDoesNotFit...`; a budget that fits the first frame exactly
+runs a million tail calls with no exit, and one frame's width less deoptimizes at the
+entry).
+
+**Rejected.** *A trampoline or a self-loop in the adapter*: only self calls, and the
+frame state of the loop would differ from the callee's; the story's mutual recursion
+through slots and pointers would not run. *The existing `push` and `pop` hooks as two
+steps*: a refusal between them leaves no guest frame under compiled code. *A core
+"replace frame" API*: reserve, pop and push over today's API cannot fail after the
+reserve, and it is one fewer thing for every engine to call. *A new site kind*: every
+reader of the metadata would change for a site that is a frame push. *The callee
+signature in the IR*: above. *Clearing the walk-start cell at the jump*: two stores per
+tail call for a value nothing reads before a fresh store. *Caller-pops stack arguments*:
+above, and the reason the replacement can leave `rsp` at `R` at all.
+
+**Measured.** (2026-10-06, x86-64, GCC 14.2; a loaded machine, so the nanoseconds are
+only good against the rows next to them.) *Constant*: a million tail calls through a
+function's own slot, in a native budget of 64 KiB (a frame kept would run out in a few
+hundred), leave the native stack pointer, the frame base, the guest frame count, the
+guest depth and the reservation capacity where they were at the first call, and the
+caller's saved base and return address in the callee's frame the same, for self
+recursion, for `even`/`odd` mutual recursion through slots and through code pointers,
+and for a ping-pong between a function of two parameters and one of sixteen, whose
+incoming area widens and narrows every time (`test_tail.cpp`; the figures it prints:
+`1000000 tail calls ... native sp 0x7f -> 0x7f, frame base 0x140 -> 0x140, guest
+frames 1 -> 1, guest depth 1 -> 1, reservation capacity 0 -> 0`, low 12 bits of the
+addresses, and a test with an engine whose extensions are not nothing, so that the
+capacity is a real zero-sum, and one that plants the hook keeping its extension and
+sees the capacity grow). *Cost*: `loop-tail-call` in `make bench`, a loop of
+`n == 0 ? sum : tail_call(n - 1, sum + 1)` through the function's own entry slot with
+the `tail` hook doing nothing, against the same loop's other forms:
+`loop-tail-call` 3.51 to 3.85 ns per iteration in the three quiet runs of four (6.2 and
+7.3 in the two loaded ones), against 0.92 to 1.06 for the plain loop, 5.55 to 5.99 for
+`loop-compiled-call` (a call and return through a slot, `push` and `pop` doing nothing),
+2.13 to 2.27 for the loop calling a no-op C helper, and 1.63 to 2.26 for the
+calibration step. So a tail call through a slot, with the `tail` hook doing nothing,
+costs about 2.6 to 2.8 ns over the loop's own work (the compare, the subtraction and the
+addition it also does): about 1.6 times the calibration step and 0.6 of a call and
+return, which is what it should be, since it does the same dispatch, staging and one
+hook call and neither makes a stack frame nor pops one. An engine's `tail` hook (a pop
+and a push of guest frames, an extension and a retraction) is what dominates it in
+practice, as `push` and `pop` do a call.
+
 ## Gates
 
 `make check-labels` requires every header to carry exactly one `@stability free`
@@ -697,8 +881,8 @@ library, over the `#include` lines and the shared object's `NEEDED` entries;
 refuses. `make check-gates` proves each by running the real scripts against a
 planted fixture that must fail, naming what it found, a control that must pass,
 and an empty tree that must fail rather than report success over nothing.
-`check-planted` is the same idea for the backend, and `check-planted-calls` for the call protocol: it plants, in a scratch copy, the defects of the story
-(a frame missed in a deep rebuild, an early free under a waiting frame, a short reservation, a status not tested after a call through a pointer, references left out of a call site's map, the walk start not stored, retired code entered, a token or an arity not checked, a refused rebuild not noticed, a derived argument not recorded) and requires a test of this library or of `runtime-core` to fail on each. Its verdicts are CAUGHT, MISSED, TIMEOUT and BUILD FAILED, and only the first is a catch; it runs the unplanted tree first and requires it to pass, and `--self-test` runs it against edits of known outcome (one that changes nothing, one that does not compile, one that hangs) so a harness that calls everything a catch fails. The direction gate is not
+`check-planted` is the same idea for the backend (including three planted defects of tail calls: the last stack argument not copied, the hook's site leaving the arguments area out of the stack map, no padding), and `check-planted-calls` for the call protocol: it plants, in a scratch copy, the defects of the story
+(a frame missed in a deep rebuild, an early free under a waiting frame, a short reservation, a status not tested after a call through a pointer, references left out of a call site's map, the walk start not stored, retired code entered, a token or an arity not checked, a refused rebuild not noticed, a derived argument not recorded; and for tail calls a refused hook ignored, the walk start not stored before the hook, the return address left where it was, the verifier not needing the hook) and requires a test of this library or of `runtime-core` to fail on each. Its verdicts are CAUGHT, MISSED, TIMEOUT and BUILD FAILED, and only the first is a catch; it runs the unplanted tree first and requires it to pass, and `--self-test` runs it against edits of known outcome (one that changes nothing, one that does not compile, one that hangs) so a harness that calls everything a catch fails. The direction gate is not
 here: the headers are flat.
 
 ## Benchmarks
@@ -738,8 +922,8 @@ numbers; the calibration row is what to read them against.
   through the `deopt` hook (above). Walking native frames for roots is
   `runtime-core`'s walk (`a/compiled.h`), which a callable function feeds by
   storing its walk start before every call that can reach a GC point.
-- **Calls on arm64 and Win64**, tail calls and calls to natives: story 7, story 5
-  and story 6 of the calls spec.
+- **Calls and tail calls on arm64 and Win64**, and calls to natives: story 7 and
+  story 6 of the calls spec.
 - **Windows arm64 and macOS.** No backend: `grjit_backend_available()` is false,
   `grjit_compile` returns `GRJIT_ERR_UNSUPPORTED`, and every test that needs
   compiled code is reported SKIPPED (`GRJIT_REQUIRE_BACKEND`), the encoders and
