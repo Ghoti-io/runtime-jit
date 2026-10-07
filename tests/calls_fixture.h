@@ -996,8 +996,10 @@ __attribute__((noinline)) inline uint64_t Engine::h_probe(uint64_t v) {
   Engine & e = *g_engine;
   e.st.probes++;
   e.st.probed.push_back(v);
-  volatile char here = 0;
-  e.st.sps.push_back(reinterpret_cast<uintptr_t>(&here));
+  /* This function keeps a frame pointer, so its own frame address is the native
+   * stack pointer of its caller, less a constant. (The address of a local would be
+   * on ASan's fake stack, which says nothing about the native one.) */
+  e.st.sps.push_back(reinterpret_cast<uintptr_t>(__builtin_frame_address(0)));
   /* This function keeps a frame pointer, so its caller's frame base is the word
    * at its own: the compiled frame that called it. */
   e.st.bases.push_back(*reinterpret_cast<const uintptr_t *>(__builtin_frame_address(0)));
