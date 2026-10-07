@@ -1845,4 +1845,72 @@ TEST(Tail, AMemoryBudgetThatCannotGrowTheGuestStackForALargerCalleeRefusesTheHoo
   EXPECT_GT(both_limit, 0) << "and where it was refused the interpreter's own pop and push met the same limit";
 }
 
+/* ---- References and derived pointers staged in a padded frame ------------------------ */
+
+TEST(Tail, AReferenceAndADerivedPointerStagedInAFramePaddedForALargerCalleeAreUpdatedByTheHooksCollection) {
+  TAIL_ONLY_ON_X86_64_SYSV();
+  // A caller of no parameters whose only locals are an object and a pointer into
+  // it, tail-calling a callee of n arguments (the object, the pointer, then
+  // immediates): for n of 14 and 16 the callee's stack arguments reach below the
+  // caller's frame, so the arguments area sits `pad` slots below the registers',
+  // and the hook's site must name the area where it is, not where it would be
+  // without the padding. The hook collects and moves, so an entry at the wrong
+  // slot leaves the object or the pointer stale and the callee reads poison.
+  Engine e;
+  e.torture = true;
+  for (int through_pointer = 0; through_pointer < 2; through_pointer++) {
+    for (int n : {8, 12, 13, 14, 16}) {
+      SCOPED_TRACE(testing::Message() << (through_pointer ? "pointer" : "slot") << " n=" << n);
+      std::vector<GRJIT_Type> types = {GRJIT_TYPE_REF, GRJIT_TYPE_PTR};
+      types.resize(static_cast<size_t>(n), GRJIT_TYPE_I64);
+      int callee = e.reserve();
+      {
+        P p("padded_callee", types);
+        int acc = p.local(), c = p.local(), t = p.local();
+        p.get(acc, 0);
+        p.load(t, 1);
+        p.cnst(c, 3);
+        p.bin(K::MUL, t, t, c);
+        p.bin(K::ADD, acc, acc, t);
+        for (int i = 2; i < n; i++) {
+          p.cnst(c, i + 1);
+          p.bin(K::MUL, t, i, c);
+          p.bin(K::ADD, acc, acc, t);
+        }
+        p.ret(acc);
+        e.set(callee, p.done());
+      }
+      ASSERT_TRUE(e.compile_fn(callee));
+      int caller = e.reserve();
+      {
+        P p("padded_caller", {});
+        int obj = p.local(GRJIT_TYPE_REF), d = p.local(GRJIT_TYPE_PTR);
+        p.nw(obj, 1000);
+        p.derive(d, obj, 8);
+        std::vector<int> args = {obj, d};
+        int64_t want = 1000 + 3 * 1000;
+        for (int i = 2; i < n; i++) {
+          args.push_back(p.imm(50 + i));
+          want += (i + 1) * (50 + i);
+        }
+        if (through_pointer) {
+          int ptr = p.local(GRJIT_TYPE_PTR);
+          p.entryof(ptr, callee);
+          p.tailcallp(ptr, callee, args);
+        } else {
+          p.tailcall(callee, args);
+        }
+        e.set(caller, p.done());
+        Outcome o = e.run_compiled(caller, {});
+        ASSERT_TRUE(o.finished);
+        EXPECT_EQ(o.exit, uint32_t{GRJIT_EXIT_RETURNED});
+        EXPECT_EQ(static_cast<int64_t>(o.value), want);
+      }
+      // The frame really is padded for the wider cases, so the case is the one meant.
+    }
+  }
+  EXPECT_EQ(e.heap.poisoned_reads, 0);
+  EXPECT_GT(e.heap.moved, 10);
+}
+
 GRJIT_TEST_MAIN()
