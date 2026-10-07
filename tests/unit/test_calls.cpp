@@ -638,6 +638,68 @@ TEST(Calls, AFailedPollInACalleeRebuildsTheChainAndCarriesThePollHelpersAnswer) 
   EXPECT_EQ(e.st.rebuild, GRCORE_OK);
 }
 
+TEST(Calls, APollInACompiledFrameStoresItsOwnWalkStartAndNotTheLastCallsThatTheCellStillHolds) {
+  CALLS_ONLY_WHERE_EMITTED();
+  // The walk starts from the context's cell, which compiled code stores before every call that can reach
+  // a GC point. A poll's slow path calls the helper, a GC point, so it stores its own: this frame, at the
+  // poll's site. A poll that did not would leave the cell as the last call or helper left it (here a
+  // callee's, which has returned, and then this frame's allocation), and a collection at the poll would
+  // walk from a frame that is gone or from another site. The poll helper walks and records the site the
+  // walk finds first, which must be a poll's in every frame of a chain; a reference made after the last
+  // call is read after the collection as well.
+  Engine e;
+  e.torture = true;
+  e.interpreter_never_moves = true;
+  int deep = e.reserve();
+  {
+    P p("deep", {GRJIT_TYPE_I64});
+    int obj = p.local(GRJIT_TYPE_REF), a = p.local(), s = p.local();
+    p.nw(obj, 7);
+    p.get(a, obj);
+    p.bin(K::ADD, s, a, 0);
+    p.ret(s);
+    e.set(deep, p.done());
+  }
+  int f = e.reserve();
+  {
+    P p("pollref", {GRJIT_TYPE_I64});
+    int r = p.local(), obj = p.local(GRJIT_TYPE_REF), dp = p.local(GRJIT_TYPE_PTR), a = p.local(), b = p.local(),
+        s = p.local();
+    p.call(r, deep, {0});
+    p.nw(obj, 40);
+    p.derive(dp, obj, 8);
+    p.poll();
+    p.get(a, obj);
+    p.load(b, dp);
+    p.bin(K::ADD, s, a, b);
+    p.bin(K::ADD, s, s, r);
+    p.ret(s);
+    e.set(f, p.done());
+  }
+  ASSERT_TRUE(e.compile_fn(deep));
+  uint64_t * request = reinterpret_cast<uint64_t *>(
+      reinterpret_cast<unsigned char *>(e.ctx) + grcore_jit_layout()->request_word_offset);
+  Outcome i = e.run_interpreted(f, {5});
+  ASSERT_TRUE(i.finished);
+  EXPECT_EQ(i.value, 12u + 40u + 40u);
+  *request = 1; // every compiled poll takes its slow path
+  e.record_poll_walks = true;
+  e.st = Stats{};
+  Outcome c = e.run_compiled(f, {5});
+  *request = 0;
+  ASSERT_TRUE(c.finished);
+  EXPECT_EQ(c.value, i.value) << "the reference and the derived pointer were found at the poll and updated";
+  EXPECT_EQ(c.exit, uint32_t{GRJIT_EXIT_RETURNED});
+  ASSERT_GT(e.st.poll_slow, 0) << "the poll took its slow path, where the collection is";
+  ASSERT_EQ(e.poll_walk_kinds.size(), static_cast<size_t>(e.st.poll_slow));
+  for (int kind : e.poll_walk_kinds) {
+    EXPECT_EQ(kind, static_cast<int>(GRCORE_SITE_GC_POINT_POLL))
+        << "the walk at a poll starts at the poll's own site, not at the last call's (or no frame: -1)";
+  }
+  EXPECT_EQ(e.heap.poisoned_reads, 0);
+  EXPECT_GT(e.heap.moved, 0);
+}
+
 TEST(Calls, APushThatIsRefusedIsAnExitAtTheCallSiteAndTheInterpreterMakesTheCall) {
   CALLS_ONLY_WHERE_EMITTED();
   Engine e;

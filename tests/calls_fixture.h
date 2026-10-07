@@ -399,6 +399,8 @@ class Engine {
   bool bad_native_ctx = false;     // a native was called with a context that is not this one
   bool bad_hook_ctx = false;       // a hook was handed a context that is not this one
   bool sp_misaligned = false;      // a hook was entered with the stack not 16-aligned
+  bool record_poll_walks = false;  // at a compiled poll's slow path, record the site the walk starts at
+  std::vector<int> poll_walk_kinds; // each: the innermost compiled frame's site kind, or -1 if there is none
 
   explicit Engine(uint64_t guest_depth = GRCORE_UNLIMITED,
       uint64_t native_bytes = GRCORE_UNLIMITED, bool conv = false,
@@ -1183,6 +1185,18 @@ inline uint32_t Engine::h_poll(void * ctx, uint64_t, uint64_t) {
   e.check_hook_ctx(ctx);
   e.check_sp();
   e.st.poll_slow++;
+  if (e.record_poll_walks) {
+    // What the walk finds first is what the poll stored before it called this helper: this frame, at
+    // this poll's site (and not at an earlier call's, which an unstored start would leave in the cell).
+    GRCORE_CompiledWalk w;
+    GRCORE_CompiledFrame f;
+    if (grcore_compiled_walk_begin(e.ctx, &w) == GRCORE_OK &&
+        grcore_compiled_walk_next(&w, &f) == GRCORE_CWALK_FRAME) {
+      e.poll_walk_kinds.push_back(static_cast<int>(f.site->kind));
+    } else {
+      e.poll_walk_kinds.push_back(-1);
+    }
+  }
   if (e.torture) {
     e.collect();
   }
