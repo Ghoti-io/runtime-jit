@@ -258,6 +258,7 @@ struct Stats {
   std::vector<size_t> caps;      // the reservation's capacity at each PROBE
   long tails = 0;                // the tail hook's calls
   long tail_refusals = 0;        // ... that it refused
+  long reserve_refusals = 0;     // ... of those, for want of room on the guest stack
 };
 
 /* An engine whose I64 locals are held boxed in its guest frames (the converting
@@ -321,7 +322,7 @@ class Engine {
 
   explicit Engine(uint64_t guest_depth = GRCORE_UNLIMITED,
       uint64_t native_bytes = GRCORE_UNLIMITED, bool conv = false,
-      const GRCORE_Allocator * allocator = nullptr);
+      const GRCORE_Allocator * allocator = nullptr, uint64_t memory_bytes = GRCORE_UNLIMITED);
   ~Engine();
   Engine(const Engine &) = delete;
   Engine & operator=(const Engine &) = delete;
@@ -398,12 +399,16 @@ inline const GRCORE_EngineDescriptor kConvDescriptor = GRCORE_ENGINE_DESCRIPTOR_
 /* ---- Construction and teardown --------------------------------------------- */
 
 inline Engine::Engine(uint64_t guest_depth, uint64_t native_bytes, bool conv,
-    const GRCORE_Allocator * allocator) {
+    const GRCORE_Allocator * allocator, uint64_t memory_bytes) {
   boxed = conv;
   GRCORE_Options * o = nullptr;
   EXPECT_EQ(grcore_options_create(nullptr, &o), GRCORE_OK);
   grcore_options_set_guest_depth(o, guest_depth);
   grcore_options_set_native_stack_bytes(o, native_bytes);
+  if (memory_bytes != GRCORE_UNLIMITED) {
+    grcore_options_set_memory_bytes(o, memory_bytes);
+    grcore_options_set_memory_reserve(o, 0);
+  }
   EXPECT_EQ(grcore_group_create(allocator, nullptr, &group), GRCORE_OK);
   EXPECT_EQ(grcore_context_create(group, o, &ctx), GRCORE_OK);
   grcore_options_destroy(o);
@@ -852,6 +857,7 @@ inline uint32_t Engine::h_tail(void *, uint64_t callee, const uint64_t * args, u
   if (want > have && grcore_stack_reserve(e.stack, 8 * (want - have)) != GRCORE_OK) {
     grcore_deopt_reservation_retract(e.reservation, ext);
     e.st.tail_refusals++;
+    e.st.reserve_refusals++;
     return 1;
   }
   // Committed: nothing below can fail or collect.

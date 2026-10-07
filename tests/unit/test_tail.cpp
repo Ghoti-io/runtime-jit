@@ -1782,4 +1782,67 @@ TEST(Tail, TheFramesPaddingIsExactlyWhatTheStagingAreaNeedsAndNoFunctionWithoutA
   }
 }
 
+/* ---- The guest stack has no room for the callee's larger frame: a memory refusal ----- */
+
+TEST(Tail, AMemoryBudgetThatCannotGrowTheGuestStackForALargerCalleeRefusesTheHookAndTheInterpreterReachesTheSameVerdict) {
+  TAIL_ONLY_ON_X86_64_SYSV();
+  // small(n) tail-calls big(n), whose guest frame (2000 locals) is far larger than
+  // small's, so the hook has to make room (grcore_stack_reserve) before it
+  // replaces the frame. The memory budget is swept from what the context holds
+  // when the tail call is made, a kilobyte at a time: wherever the room for the larger frame is refused, the
+  // hook refuses (nothing half done), the exit is taken, and the interpreter,
+  // whose own pop and push needs the same room, reaches the budget's verdict, as
+  // the interpreted run does. Where there is room the tail call is made.
+  auto build = [](Engine & e, int * top) {
+    int small;
+    *top = add_small_big(e, 2000, &small);
+    for (size_t fn = 0; fn < e.funcs.size(); fn++) {
+      EXPECT_TRUE(e.compile_fn(static_cast<int>(fn)));
+    }
+  };
+  // What the context holds when small makes its tail call, learnt from a run with
+  // no budget (the same compiles, the same records, the same first frames).
+  uint64_t base = 0;
+  {
+    Engine probe;
+    int top;
+    build(probe, &top);
+    probe.on_probe = [&](Engine & en) { base = grcore_context_memory_in_use(en.ctx); };
+    Outcome o = probe.run_compiled(top, {5});
+    ASSERT_TRUE(o.finished);
+    ASSERT_GT(base, 0u);
+  }
+  long refused = 0, made = 0, both_limit = 0;
+  for (uint64_t slack = 0; slack <= 64 * 1024; slack += 1024) {
+    SCOPED_TRACE(slack);
+    Engine e(GRCORE_UNLIMITED, GRCORE_UNLIMITED, false, nullptr, base + slack);
+    int top;
+    build(e, &top);
+    Outcome i = e.run_interpreted(top, {5});
+    e.st = Stats{};
+    Outcome c = e.run_compiled(top, {5});
+    EXPECT_EQ(c.limit, i.limit) << "the budget's verdict is the same in both tiers";
+    EXPECT_EQ(c.finished, i.finished);
+    if (i.finished) {
+      EXPECT_EQ(c.value, i.value);
+      EXPECT_EQ(c.value, 5u + 2000u);
+    }
+    if (e.st.reserve_refusals > 0) {
+      refused++;
+      EXPECT_EQ(c.exit, uint32_t{GRJIT_EXIT_DEOPT}) << "an exit at the tail site";
+      EXPECT_EQ(e.st.tail_refusals, e.st.reserve_refusals);
+      EXPECT_EQ(e.st.deopt_frames, 2) << "top and small, as the hook left them";
+      both_limit += c.limit ? 1 : 0;
+    } else if (e.st.tails > 0) {
+      made++;
+      EXPECT_TRUE(c.finished);
+      EXPECT_EQ(c.exit, uint32_t{GRJIT_EXIT_RETURNED});
+    }
+    EXPECT_EQ(c.frames_left, 0u);
+  }
+  EXPECT_GT(refused, 0) << "the room was refused for some budgets";
+  EXPECT_GT(made, 0) << "and given for others";
+  EXPECT_GT(both_limit, 0) << "and where it was refused the interpreter's own pop and push met the same limit";
+}
+
 GRJIT_TEST_MAIN()
