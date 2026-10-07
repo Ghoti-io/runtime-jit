@@ -49,12 +49,35 @@ static GRCORE_CodeLocation slot_location(GRJIT_VReg v, GRJIT_Type type) {
   return l;
 }
 
+/* The arguments a push site's hook reads from the arguments area of the frame
+ * are references the collector must update before it does (AD-28): each REF
+ * argument is a VALUE entry at its area slot. */
+static bool rec_is_push(const GRJIT_SiteRec * rec) {
+  return rec->op != NULL && rec->kind == GRCORE_SITE_GC_POINT_FRAME_PUSH;
+}
+
+static size_t push_ref_args(const GRJIT_Function * f, const GRJIT_SiteRec * rec) {
+  size_t n = 0;
+  if (rec->op == NULL || rec->kind != GRCORE_SITE_GC_POINT_FRAME_PUSH) {
+    return 0;
+  }
+  for (size_t k = 0; k < rec->op->arg_count; k++) {
+    const GRJIT_Operand * o = &rec->op->args[k];
+    if (o->kind == GRJIT_OPERAND_VREG && f->vregs[o->vreg].type == GRJIT_TYPE_REF) {
+      n++;
+    }
+  }
+  return n;
+}
+
 GRJIT_Result grjit_metadata_build(const GRJIT_Function * f,
     const GRJIT_LiveSites * live, const GRJIT_SiteRec * recs, size_t count,
     uint32_t frame_bytes, uint32_t code_bytes, const GRJIT_Allocator * a,
     GRJIT_MetaStorage * out) {
   memset(out, 0, sizeof *out);
   out->allocator = a;
+  GRJIT_CallableShape shape;
+  grjit_callable_shape(f, &shape);
   size_t loc_total = 0;
   size_t der_total = 0;
   for (size_t i = 0; i < count; i++) {
@@ -67,6 +90,7 @@ GRJIT_Result grjit_metadata_build(const GRJIT_Function * f,
       }
     }
     loc_total += f->states[recs[i].state].slot_count;
+    loc_total += push_ref_args(f, &recs[i]);
   }
   if (count > SIZE_MAX / sizeof *out->sites ||
       loc_total > SIZE_MAX / sizeof *out->locations ||
@@ -143,6 +167,19 @@ GRJIT_Result grjit_metadata_build(const GRJIT_Function * f,
         d->slot = grjit_emit_slot(v);
         d->base_slot = grjit_emit_slot(info->base);
         d->delta = info->delta;
+      }
+    }
+    if (rec_is_push(r)) {
+      for (size_t k = 0; k < r->op->arg_count; k++) {
+        const GRJIT_Operand * o = &r->op->args[k];
+        if (o->kind == GRJIT_OPERAND_VREG && f->vregs[o->vreg].type == GRJIT_TYPE_REF) {
+          GRCORE_CodeLocation l;
+          l.kind = GRCORE_LOC_FRAME_SLOT;
+          l.slot_kind = GRCORE_SLOT_VALUE;
+          l.value = GRJIT_ARGS_SLOT(f->vreg_count, shape.args_area, k);
+          l.representation = GRCORE_REPR_BITS;
+          out->locations[loc_at + refs++] = l;
+        }
       }
     }
     s->live_count = refs;

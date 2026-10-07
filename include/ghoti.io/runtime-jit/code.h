@@ -36,6 +36,16 @@
  * here. Destroying a code object unmaps its pages, so destroying one that a
  * thread is still running is the caller's error.
  *
+ * **Callable code** (AD-28; `ir.h`) has this entry and also an *internal entry*
+ * (::grjit_code_internal_entry), which other compiled functions call and which
+ * the entry adapts to: the adapter marks the end of the chain of compiled frames
+ * and turns the internal status into the exits below. For callable code a
+ * ::GRJIT_EXIT_DEOPT means every compiled frame of the call chain, this
+ * function's included, has been rebuilt into its guest frame by the function's
+ * deopt hook, and `out[0]` is the cause (zero, or the poll helper's non-zero
+ * answer); `out` holds no frame state. The interpreter continues in the guest
+ * frames. ::GRJIT_EXIT_REFUSED is then only the entry hook's answer.
+ *
  * **The calling convention** is the target's own for
  * `uint32_t (void * context, const uint64_t * args, uint64_t * out)`: SysV on
  * Linux x86-64 (`rdi`, `rsi`, `rdx`), Microsoft x64 on Windows x86-64 (`rcx`,
@@ -57,6 +67,7 @@
 
 #include <ghoti.io/runtime-core/a/codemeta.h>
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -104,6 +115,23 @@ GRJIT_API const GRCORE_CodeMeta * grjit_code_meta(const GRJIT_Code * code);
 
 /** @brief The entry point, with the calling convention above. */
 GRJIT_API GRJIT_EntryFn grjit_code_entry(const GRJIT_Code * code);
+
+/**
+ * @brief The internal entry of a callable function (AD-28): the address other
+ *   compiled functions call, through an entry slot or a code pointer.
+ *
+ * It uses the internal calling convention, not the C ABI, so C code must never
+ * call it: it is for `grcore_entry_slot_set`, for the `CALL_PTR` target of
+ * another function, and for registering the code. Register the code with
+ * `grcore_code_register` first: a call through a code pointer to an address that
+ * is not the internal entry of registered code is refused at the call.
+ *
+ * @return The address, or zero for NULL or a function that is not callable.
+ */
+GRJIT_API uintptr_t grjit_code_internal_entry(const GRJIT_Code * code);
+
+/** @brief Whether the code is callable (has an internal entry). */
+GRJIT_API bool grjit_code_callable(const GRJIT_Code * code);
 
 /** @brief The address of the first byte of code. */
 GRJIT_API const void * grjit_code_address(const GRJIT_Code * code);

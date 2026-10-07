@@ -30,6 +30,10 @@
 
 #include "backend_internal.h"
 
+#include "../ir/ir_internal.h"
+
+#include <ghoti.io/runtime-core/a/layout.h>
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -44,11 +48,47 @@ void grjit_emit_common_init(GRJIT_EmitCommon * c, const GRJIT_Function * f,
   c->hook = hook;
   c->live = live;
   c->error = GRJIT_OK;
+  c->callable = f->callable;
+  if (f->callable) {
+    const GRCORE_JitLayout * layout = grcore_jit_layout();
+    c->walk_cell_offset = layout->walk_cell_offset;
+    c->native_limit_offset = layout->native_limit_offset;
+    grjit_callable_shape(f, &c->shape);
+  }
+}
+
+void grjit_callable_shape(const GRJIT_Function * f, GRJIT_CallableShape * out) {
+  memset(out, 0, sizeof *out);
+  if (!f->callable) {
+    return;
+  }
+  for (size_t b = 0; b < f->block_count; b++) {
+    for (size_t i = 0; i < f->blocks[b].count; i++) {
+      const GRJIT_Op * op = &f->blocks[b].ops[i];
+      if (op->kind == GRJIT_OP_CALL_SLOT || op->kind == GRJIT_OP_CALL_PTR) {
+        out->has_calls = true;
+        if (op->arg_count > out->args_area) {
+          out->args_area = op->arg_count;
+        }
+      }
+    }
+  }
+  out->extra_slots = out->args_area + (out->has_calls ? 1u : 0u);
+  size_t stack_args =
+      f->param_count > GRJIT_INTERNAL_REG_ARGS ? f->param_count - GRJIT_INTERNAL_REG_ARGS : 0;
+  /* Whole 16-byte units, so the stack stays 16-aligned across the call. */
+  out->incoming_bytes = (uint32_t)((stack_args * 8 + 15) / 16 * 16);
 }
 
 void grjit_emit_add_site(GRJIT_EmitCommon * c, uint32_t offset,
     GRCORE_CodeSiteKind kind, GRCORE_PollIdentity identity, size_t live_index,
     uint32_t state) {
+  grjit_emit_add_site_for(c, offset, kind, identity, live_index, state, NULL);
+}
+
+void grjit_emit_add_site_for(GRJIT_EmitCommon * c, uint32_t offset,
+    GRCORE_CodeSiteKind kind, GRCORE_PollIdentity identity, size_t live_index,
+    uint32_t state, const GRJIT_Op * op) {
   if (c->error != GRJIT_OK) {
     return;
   }
@@ -69,6 +109,7 @@ void grjit_emit_add_site(GRJIT_EmitCommon * c, uint32_t offset,
   s->identity = identity;
   s->live_index = live_index;
   s->state = state;
+  s->op = op;
 }
 
 void grjit_emit_add_pending(GRJIT_EmitCommon * c, const GRJIT_Pending * p) {

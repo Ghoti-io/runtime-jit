@@ -3,9 +3,8 @@
  *
  * The IR of calls between compiled functions (AD-28, CAP-1): the callable
  * attribute, the two call operations, the hooks, what the verifier refuses, and
- * the printer. Emission is the next story's tests (`test_calls.cpp`); here the
- * point is that the function can be built, judged and printed, and that no
- * backend that has no emitter for it pretends to.
+ * the printer. Emission is `test_calls.cpp`'s; here the point is that the
+ * function can be built, judged and printed.
  *
  * Copyright 2026 by Corey Pennycuff
  */
@@ -433,21 +432,6 @@ TEST(CallIr, ThePrinterShowsBothCallsTheirTokensAndBothStates) {
   plain.ret();
   Fn pf(plain.finish());
   EXPECT_EQ(print(pf).find("callable"), std::string::npos);
-}
-
-TEST(CallIr, NoBackendCompilesACallableFunctionYetAndEveryArchitectureSaysSo) {
-  B b("caller", 1);
-  GRJIT_CallHooks h = all_hooks();
-  GRJIT_VReg x = b.param(GRJIT_TYPE_I64);
-  b.callable(h);
-  b.at(b.block());
-  b.ret(V(x));
-  Fn f(b.finish());
-  JitWorld w;
-  Compiled c(f, w.pages());
-  EXPECT_EQ(c.result, GRJIT_ERR_UNSUPPORTED);
-  EXPECT_FALSE(c);
-  EXPECT_EQ(w.bytes_in_use(), 0u) << "nothing was mapped";
 }
 
 GRJIT_TEST_MAIN()

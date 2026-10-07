@@ -179,6 +179,16 @@ void grjit_asm_sub_rsp(GRJIT_Asm * a, uint32_t bytes);
 void grjit_asm_add_rsp(GRJIT_Asm * a, uint32_t bytes);
 void grjit_asm_call_r(GRJIT_Asm * a, GRJIT_Reg r);
 void grjit_asm_ret(GRJIT_Asm * a);
+/** `ret imm16`: returns and pops `bytes` more (the callee pops its own stack
+ *  arguments in the internal convention). */
+void grjit_asm_ret_imm(GRJIT_Asm * a, uint16_t bytes);
+/** `lea dst, [rip + label]`: the address of a label, for a return address the
+ *  code stores before it makes the call that returns to it. */
+void grjit_asm_lea_rip(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Label label);
+/** `cmp r, imm32` (sign-extended to 64 bits). */
+void grjit_asm_cmp_ri(GRJIT_Asm * a, GRJIT_Reg r, int32_t imm);
+/** `cmp r, [base + disp]`: the flags of `r - [base + disp]`. */
+void grjit_asm_cmp_rm(GRJIT_Asm * a, GRJIT_Reg r, GRJIT_Reg base, int32_t disp);
 void grjit_asm_leave(GRJIT_Asm * a);
 void grjit_asm_ud2(GRJIT_Asm * a);
 void grjit_asm_jmp(GRJIT_Asm * a, GRJIT_Label label);

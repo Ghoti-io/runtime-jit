@@ -393,6 +393,30 @@ void grjit_asm_ret(GRJIT_Asm * a) {
   byte(a, 0xC3);
 }
 
+void grjit_asm_ret_imm(GRJIT_Asm * a, uint16_t bytes) {
+  byte(a, 0xC2);
+  byte(a, (uint8_t)(bytes & 0xFF));
+  byte(a, (uint8_t)(bytes >> 8));
+}
+
+void grjit_asm_cmp_ri(GRJIT_Asm * a, GRJIT_Reg r, int32_t imm) {
+  note(a, r);
+  rex(a, true, 0, r, false);
+  if (imm >= -128 && imm <= 127) {
+    byte(a, 0x83);
+    modrm_rr(a, 7, r);
+    byte(a, (uint8_t)(int8_t)imm);
+  } else {
+    byte(a, 0x81);
+    modrm_rr(a, 7, r);
+    imm32(a, (uint32_t)imm);
+  }
+}
+
+void grjit_asm_cmp_rm(GRJIT_Asm * a, GRJIT_Reg r, GRJIT_Reg base, int32_t disp) {
+  inst_mem(a, false, true, 0x3B, -1, r, base, disp, false);
+}
+
 void grjit_asm_leave(GRJIT_Asm * a) {
   byte(a, 0xC9);
 }
@@ -490,6 +514,27 @@ void grjit_asm_jmp(GRJIT_Asm * a, GRJIT_Label label) {
 
 void grjit_asm_jcc(GRJIT_Asm * a, GRJIT_Cond cond, GRJIT_Label label) {
   branch(a, (uint8_t)(0x70 + cond), true, (uint8_t)(0x80 + cond), label);
+}
+
+void grjit_asm_lea_rip(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Label label) {
+  if (a->status != GRJIT_ASM_OK) {
+    return;
+  }
+  if (label >= a->label_count) {
+    fail(a, GRJIT_ASM_BAD);
+    return;
+  }
+  note(a, dst);
+  rex(a, true, dst, 0, false);
+  byte(a, 0x8D);
+  byte(a, (uint8_t)(((dst & 7) << 3) | 5)); /* mod 00, rm 101: [rip + disp32] */
+  size_t target = a->label_at[label];
+  if (target != SIZE_MAX) {
+    imm32(a, (uint32_t)(int32_t)((int64_t)target - (int64_t)(a->length + 4)));
+  } else {
+    add_fixup(a, label);
+    imm32(a, 0);
+  }
 }
 
 void grjit_asm_finish(GRJIT_Asm * a) {

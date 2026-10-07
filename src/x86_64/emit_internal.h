@@ -56,6 +56,11 @@ typedef struct GRJIT_Emit {
   GRJIT_Label refuse;
   bool win64;              ///< The Microsoft x64 flavour (see ::GRJIT_WIN64_OUTGOING).
   GRJIT_Prologue prologue; ///< Where the prologue's instructions end.
+  /* A callable function (AD-28; backend_internal.h for the convention). */
+  GRJIT_Label internal;     ///< The internal entry.
+  GRJIT_Label ret_deopted;  ///< Returns DEOPTED with `rax` untouched.
+  GRJIT_Label overflow;     ///< The prologue's native-stack exit.
+  uint32_t internal_offset; ///< Where the internal entry is, after the adapter.
 } GRJIT_Emit;
 
 /** The outgoing area at the bottom of a Win64 frame: 32 bytes of shadow space
@@ -92,6 +97,18 @@ void grjit_emit_free(GRJIT_Emit * e);
 
 /** The shared refusal path: `out[0] = rax; return REFUSED`. */
 void grjit_emit_refuse_stub(GRJIT_Emit * e);
+/** Records where the walk starts (a/layout.h): stores the frame base and the
+ *  address of `ret_label`, the return address of the call about to be made, in
+ *  the context's cell. Uses `rax` and `rcx`, and leaves the context in `rcx`. */
+void grjit_emit_store_walk_cell(GRJIT_Emit * e, GRJIT_Label ret_label);
+/** The shared exits of a callable function: a call through an empty slot, the
+ *  call's exit, the native-stack exit, and the return of `DEOPTED`. */
+void grjit_emit_call_slow_stub(GRJIT_Emit * e, const GRJIT_Pending * p);
+void grjit_emit_call_exit_stub(GRJIT_Emit * e, const GRJIT_Pending * p);
+void grjit_emit_overflow_stub(GRJIT_Emit * e);
+void grjit_emit_ret_deopted(GRJIT_Emit * e);
+/** `leave; ret` of a callable function: the callee pops its stack arguments. */
+void grjit_emit_callable_epilogue(GRJIT_Emit * e);
 /** A poll's slow path: call the helper, refuse on non-zero, resume. */
 void grjit_emit_poll_stub(GRJIT_Emit * e, const GRJIT_Pending * p);
 /** A guard's exit: write the frame state to `out`, return DEOPT. */

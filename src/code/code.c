@@ -100,6 +100,16 @@ size_t grjit_code_mapped_size(const GRJIT_Code * code) {
   return code == NULL ? 0 : code->mapped_size;
 }
 
+uintptr_t grjit_code_internal_entry(const GRJIT_Code * code) {
+  return code == NULL || !code->callable
+      ? 0
+      : (uintptr_t)code->mapping + code->internal_offset;
+}
+
+bool grjit_code_callable(const GRJIT_Code * code) {
+  return code != NULL && code->callable;
+}
+
 size_t grjit_code_out_words(const GRJIT_Code * code) {
   return code == NULL ? 0 : code->out_words;
 }
@@ -126,7 +136,10 @@ uint32_t grjit_code_call(const GRJIT_Code * code, void * context,
    * out[0] (when there is somewhere to put it), and costs one compare on a
    * call that has just loaded the entry point. */
   if (code == NULL ||
-      code->request_offset != grcore_jit_layout()->request_word_offset) {
+      code->request_offset != grcore_jit_layout()->request_word_offset ||
+      (code->callable &&
+          (code->walk_cell_offset != grcore_jit_layout()->walk_cell_offset ||
+              code->native_limit_offset != grcore_jit_layout()->native_limit_offset))) {
     if (out != NULL) {
       out[0] = (uint64_t)GRCORE_ERR_INVALID;
     }
@@ -146,12 +159,15 @@ static GRJIT_Result verify_for_compile(
 }
 #endif
 
-/* Calls between compiled functions (AD-28) have no emitter yet. A function that
- * has the new operations, or is callable, is refused with
- * GRJIT_ERR_UNSUPPORTED and nothing of it is emitted, so the bytes of every
- * other function are exactly what they were. */
+/* Calls between compiled functions (AD-28) are emitted for x86-64 SysV only,
+ * until the other two backends have them (story 7 of the calls spec). A
+ * function that has the new operations, or is callable, is refused for the
+ * others with GRJIT_ERR_UNSUPPORTED before a byte is emitted, so the bytes of
+ * every other function are exactly what they were. */
 static bool grjit_emit_supports(GRJIT_Arch arch, const GRJIT_Function * f) {
-  (void)arch;
+  if (arch == GRJIT_ARCH_X86_64) {
+    return true;
+  }
   if (f->callable) {
     return false;
   }
@@ -177,7 +193,9 @@ GRJIT_Result grjit_emit_for(GRJIT_Arch arch, const GRJIT_Function * function,
   }
   /* Three fixed slots and one per register, rounded to keep the stack pointer
    * 16-aligned. */
-  size_t slots = function->vreg_count + GRJIT_FIXED_SLOTS;
+  GRJIT_CallableShape shape;
+  grjit_callable_shape(function, &shape);
+  size_t slots = function->vreg_count + GRJIT_FIXED_SLOTS + shape.extra_slots;
   size_t frame = (slots * 8 + 15) / 16 * 16;
   if (frame > limits.max_frame_bytes) {
     return GRJIT_ERR_LIMIT;
@@ -207,6 +225,7 @@ GRJIT_Result grjit_emit_for(GRJIT_Arch arch, const GRJIT_Function * function,
         request_offset, (uint32_t)frame, arch == GRJIT_ARCH_X86_64_WIN64,
         &live, &x86);
     out->prologue = x86.prologue;
+    out->internal_offset = x86.internal_offset;
     out->regs_used = grjit_asm_regs_used(&x86.as);
     bytes = grjit_asm_bytes(&x86.as);
     code_bytes = grjit_asm_size(&x86.as);
@@ -296,6 +315,7 @@ GRJIT_Result grjit_compile(const GRJIT_CompileOptions * options,
   code->allocator = a;
   code->pages = options->pages;
   code->code_bytes = emitted.size;
+  code->internal_offset = emitted.internal_offset;
   code->meta = emitted.meta;
   code->meta.meta.sites = code->meta.sites;
   /* The metadata now belongs to the code; the bytes were copied into the
@@ -305,6 +325,9 @@ GRJIT_Result grjit_compile(const GRJIT_CompileOptions * options,
   code->out_words = function->interp_slots + 1;
   code->param_count = function->param_count;
   code->request_offset = grcore_jit_layout()->request_word_offset;
+  code->walk_cell_offset = grcore_jit_layout()->walk_cell_offset;
+  code->native_limit_offset = grcore_jit_layout()->native_limit_offset;
+  code->callable = function->callable;
   memcpy(&code->entry, &code->mapping, sizeof code->entry);
   *out_code = code;
   return GRJIT_OK;

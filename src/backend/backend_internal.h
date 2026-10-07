@@ -47,6 +47,7 @@
 #include <ghoti.io/runtime-jit/ir.h>
 
 #include <ghoti.io/runtime-core/a/codemeta.h>
+#include <ghoti.io/runtime-core/a/registry.h>
 
 #include "liveness_internal.h"
 
@@ -84,18 +85,81 @@ typedef struct GRJIT_SiteRec {
   GRCORE_PollIdentity identity;
   size_t live_index;  ///< Index into the liveness table.
   uint32_t state;     ///< The operation's frame state.
+  const GRJIT_Op * op; ///< The operation, for the sites of a call to compiled
+                       ///< code (the push's arguments live in the frame); NULL
+                       ///< for every other site.
 } GRJIT_SiteRec;
+
+/* ---- Calls between compiled functions (AD-28), x86-64 SysV ----------------
+ *
+ * The internal calling convention:
+ *
+ *  - integer-class arguments in `rdi, rsi, rdx, rcx, r8, r9`, the rest on the
+ *    stack above the return address, in order, in an area of whole 16-byte
+ *    units that the *callee* pops (`ret imm16`). The callee knowing its own
+ *    parameter count is what lets a tail call (story 5) to a callee with more
+ *    stack arguments than its caller has shift the return address and reuse
+ *    the frame; with a caller that pops, the caller would have to be told;
+ *  - the context in `r10`, which is caller-saved and no argument register;
+ *  - the result in `rax`, the status in `rdx` (RETURNED or DEOPTED; `rax` then
+ *    holds the deopt's cause, which every frame returns unchanged);
+ *  - nothing callee-saved is used or needs saving: `rbx`, `rbp` (as a
+ *    register), `r12`-`r15` come back as they went in;
+ *  - the frame is `rbp`-linked as a/compiled.h requires.
+ *
+ * The frame of a callable function has, below the vreg slots, the *arguments
+ * area* (one slot for each argument of its widest call: the push hook reads
+ * the arguments there, and a moving collector updates them, which is why the
+ * area is in the stack map of a push site) and one slot that holds the entry
+ * address a call loaded across the push. */
+#define GRJIT_STATUS_RETURNED 0u
+#define GRJIT_STATUS_DEOPTED 1u
+/** The eight bytes before every internal entry: the check a call through a
+ *  code pointer makes that the target is the entry of compiled code. */
+#define GRJIT_ENTRY_TAG UINT64_C(0x4752494E54454E54)
+/** The most arguments passed in registers by the internal convention. */
+#define GRJIT_INTERNAL_REG_ARGS 6u
+
+/** How a callable function's frame is shaped. */
+typedef struct GRJIT_CallableShape {
+  size_t args_area;    ///< Slots in the arguments area: the widest call.
+  bool has_calls;      ///< Whether it calls compiled code at all.
+  size_t extra_slots;  ///< Slots below the vreg slots: area, plus one for the
+                       ///< saved entry when it has calls.
+  uint32_t incoming_bytes; ///< Bytes of stack arguments its callers push.
+} GRJIT_CallableShape;
+
+/** Whether `target` is the internal entry of compiled code registered in the
+ *  context (src/code/target.c): the check a call through a code pointer makes.
+ *  Called from compiled code, through the C ABI. */
+uint32_t grjit_call_target_ok(void * context, uint64_t target);
+
+/** The shape of `f`, which need not be callable (then all zero). */
+void grjit_callable_shape(const GRJIT_Function * f, GRJIT_CallableShape * out);
+
+/** The frame offset of argument `k` in the arguments area of a function with
+ *  `vreg_count` registers and `area` slots in it: the area follows the registers'
+ *  slots and is laid out as an array, `k` rising with the address, so the push
+ *  hook is handed `&area[0]` and reads `arg_count` words. */
+#define GRJIT_ARGS_SLOT(vreg_count, area, k) \
+  (-8 * ((int32_t)(vreg_count) + GRJIT_FIXED_SLOTS + (int32_t)(area)) + 8 * (int32_t)(k))
+/** The slot that holds the entry across the push: the one below the area. */
+#define GRJIT_ENTRY_SAVE_SLOT(vreg_count, shape) \
+  (-8 * ((int32_t)(vreg_count) + GRJIT_FIXED_SLOTS + (int32_t)(shape).args_area + 1))
 
 /** An out-of-line stub still to be emitted after the blocks. */
 typedef enum GRJIT_PendingKind {
   GRJIT_PENDING_POLL,
-  GRJIT_PENDING_GUARD
+  GRJIT_PENDING_GUARD,
+  GRJIT_PENDING_CALL_SLOW, ///< A call through an empty or refused slot.
+  GRJIT_PENDING_CALL_EXIT  ///< A call's exit before the call.
 } GRJIT_PendingKind;
 
 typedef struct GRJIT_Pending {
   GRJIT_PendingKind kind;
   GRJIT_Label entry;  ///< Where the fast path jumps to.
-  GRJIT_Label back;   ///< Where a poll's slow path resumes.
+  GRJIT_Label back;   ///< Where a poll's (or a slot call's) slow path resumes.
+  GRJIT_Label exit;   ///< A slot call's exit stub, for its slow path.
   const GRJIT_Op * op;
   size_t live_index;
 } GRJIT_Pending;
@@ -107,6 +171,10 @@ typedef struct GRJIT_EmitCommon {
   uint32_t frame_bytes;
   uint32_t request_offset;
   GRJIT_EntryHook hook;
+  uint32_t walk_cell_offset;   ///< From the layout descriptor (callable only).
+  uint32_t native_limit_offset;
+  bool callable;               ///< The function uses the internal convention.
+  GRJIT_CallableShape shape;
   GRJIT_SiteRec * sites;
   size_t site_count;
   size_t site_capacity;
@@ -127,6 +195,12 @@ void grjit_emit_common_init(GRJIT_EmitCommon * c, const GRJIT_Function * f,
 void grjit_emit_add_site(GRJIT_EmitCommon * c, uint32_t offset,
     GRCORE_CodeSiteKind kind, GRCORE_PollIdentity identity, size_t live_index,
     uint32_t state);
+
+/** ::grjit_emit_add_site, for a site of a call to compiled code, which keeps
+ *  the operation so the metadata can add the arguments the push reads. */
+void grjit_emit_add_site_for(GRJIT_EmitCommon * c, uint32_t offset,
+    GRCORE_CodeSiteKind kind, GRCORE_PollIdentity identity, size_t live_index,
+    uint32_t state, const GRJIT_Op * op);
 
 /** Queues a stub. Sets `error` on out-of-memory. */
 void grjit_emit_add_pending(GRJIT_EmitCommon * c, const GRJIT_Pending * p);

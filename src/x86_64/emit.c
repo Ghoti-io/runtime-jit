@@ -37,6 +37,8 @@
 
 #include "../ir/ir_internal.h"
 
+#include <ghoti.io/runtime-core/a/compiled.h>
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -177,6 +179,16 @@ static void emit_binary(GRJIT_Emit * e, const GRJIT_Op * op) {
 
 static void emit_call(GRJIT_Emit * e, const GRJIT_Op * op) {
   GRJIT_Asm * a = &e->as;
+  /* In a callable function every call that can reach a GC point records where
+   * the walk starts first (AD-28), so a collection under the helper sees this
+   * frame and the compiled frames below it. It uses rax and rcx, which the
+   * arguments are loaded over afterwards. */
+  GRJIT_Label walk_ret = 0;
+  bool record = e->c.callable && op->attr == GRJIT_CALL_GC_POINT;
+  if (record) {
+    walk_ret = grjit_asm_label(a);
+    grjit_emit_store_walk_cell(e, walk_ret);
+  }
   if (e->win64) {
     /* The stack arguments first, through rax: they are stores to the outgoing
      * area, and the register arguments are loads straight from slots, so no
@@ -196,6 +208,9 @@ static void emit_call(GRJIT_Emit * e, const GRJIT_Op * op) {
   }
   grjit_asm_mov_ri(a, GRJIT_RAX, op->address);
   grjit_asm_call_r(a, GRJIT_RAX);
+  if (record) {
+    grjit_asm_bind(a, walk_ret);
+  }
   if (op->attr == GRJIT_CALL_GC_POINT) {
     /* The return address is the site. */
     const GRJIT_FrameState * s = &e->c.f->states[op->state];
@@ -205,6 +220,120 @@ static void emit_call(GRJIT_Emit * e, const GRJIT_Op * op) {
   if (op->dst != GRJIT_NO_VREG) {
     store_result(e, op->dst, GRJIT_RAX);
   }
+}
+
+/* A call to another compiled function (AD-28), through an entry slot or a code
+ * pointer. In order: find the entry (the slot's word, or the checked pointer);
+ * copy the arguments into the frame's arguments area, where the push hook reads
+ * them and a moving collector updates them; push the callee's guest frame (the
+ * frame-push GC point); call through the internal convention; test the status
+ * for DEOPTED; store the result; pop. Every way out before the call is an
+ * exit through the exit state; every way out after it is DEOPTED. */
+static void emit_guest_call(GRJIT_Emit * e, const GRJIT_Op * op) {
+  GRJIT_Asm * a = &e->as;
+  const GRJIT_Function * f = e->c.f;
+  const GRJIT_FrameState * st = &f->states[op->state];
+  const bool slot = op->kind == GRJIT_OP_CALL_SLOT;
+  const size_t n = op->arg_count;
+  const int32_t entry_slot = GRJIT_ENTRY_SAVE_SLOT(f->vreg_count, e->c.shape);
+  const size_t live = e->c.live_cursor;
+  e->c.live_cursor += 3; /* the push, the call and the exit */
+
+  GRJIT_Label exit = grjit_asm_label(a);
+  GRJIT_Pending p;
+  memset(&p, 0, sizeof p);
+  p.op = op;
+  if (slot) {
+    GRJIT_Label slow = grjit_asm_label(a);
+    GRJIT_Label back = grjit_asm_label(a);
+    grjit_asm_mov_ri(a, GRJIT_RAX, op->address);
+    grjit_asm_load64(a, GRJIT_RAX, GRJIT_RAX, 0);
+    /* One compare tells compiled code (above one) from empty (zero) and from
+     * refused (one). */
+    grjit_asm_cmp_ri(a, GRJIT_RAX, (int32_t)GRCORE_ENTRY_REFUSED);
+    grjit_asm_jcc(a, GRJIT_COND_BE, slow);
+    grjit_asm_bind(a, back);
+    p.kind = GRJIT_PENDING_CALL_SLOW;
+    p.entry = slow;
+    p.back = back;
+    p.exit = exit;
+    p.live_index = live;
+    grjit_emit_add_pending(&e->c, &p);
+  } else {
+    load_operand(e, GRJIT_RAX, &op->a);
+    grjit_asm_store64(a, GRJIT_RBP, entry_slot, GRJIT_RAX);
+    /* The target must be the internal entry of code registered in this context:
+     * an address that is not is never entered. */
+    grjit_asm_load64(a, GRJIT_RDI, GRJIT_RBP, GRJIT_SLOT_CTX);
+    grjit_asm_mov_rr(a, GRJIT_RSI, GRJIT_RAX);
+    grjit_asm_mov_ri(a, GRJIT_RAX, (uint64_t)(uintptr_t)grjit_call_target_ok);
+    grjit_asm_call_r(a, GRJIT_RAX);
+    grjit_asm_mov32_rr(a, GRJIT_RAX, GRJIT_RAX);
+    grjit_asm_test_rr(a, GRJIT_RAX, GRJIT_RAX);
+    grjit_asm_jcc(a, GRJIT_COND_E, exit);
+  }
+  memset(&p, 0, sizeof p);
+  p.kind = GRJIT_PENDING_CALL_EXIT;
+  p.entry = exit;
+  p.op = op;
+  p.live_index = live + 2;
+  grjit_emit_add_pending(&e->c, &p);
+  if (slot) {
+    grjit_asm_store64(a, GRJIT_RBP, entry_slot, GRJIT_RAX);
+  }
+
+  /* The arguments, into the area. */
+  for (size_t i = 0; i < n; i++) {
+    load_operand(e, GRJIT_RAX, &op->args[i]);
+    grjit_asm_store64(a, GRJIT_RBP, GRJIT_ARGS_SLOT(f->vreg_count, e->c.shape.args_area, i), GRJIT_RAX);
+  }
+
+  /* The push: the callee's guest frame, counted as the interpreter counts it. */
+  GRJIT_Label push_ret = grjit_asm_label(a);
+  grjit_emit_store_walk_cell(e, push_ret);
+  grjit_asm_mov_rr(a, GRJIT_RDI, GRJIT_RCX);
+  grjit_asm_mov_ri(a, GRJIT_RSI, op->callee);
+  grjit_asm_lea(a, GRJIT_RDX, GRJIT_RBP, GRJIT_ARGS_SLOT(f->vreg_count, e->c.shape.args_area, 0));
+  grjit_asm_mov_ri(a, GRJIT_RCX, n);
+  grjit_asm_mov_ri(a, GRJIT_RAX, (uint64_t)(uintptr_t)f->hooks.push);
+  grjit_asm_call_r(a, GRJIT_RAX);
+  grjit_asm_bind(a, push_ret);
+  grjit_emit_add_site_for(&e->c, (uint32_t)grjit_asm_size(a),
+      GRCORE_SITE_GC_POINT_FRAME_PUSH, st->identity, live, op->state, op);
+  grjit_asm_mov32_rr(a, GRJIT_RAX, GRJIT_RAX);
+  grjit_asm_test_rr(a, GRJIT_RAX, GRJIT_RAX);
+  grjit_asm_jcc(a, GRJIT_COND_NE, exit);
+
+  /* The call. The stack arguments are pushed just before it and popped by the
+   * callee, which keeps the stack 16-aligned (the area is whole 16-byte units). */
+  const uint32_t stack_args = n > GRJIT_INTERNAL_REG_ARGS ? (uint32_t)(n - GRJIT_INTERNAL_REG_ARGS) : 0;
+  const uint32_t area = (stack_args * 8 + 15) / 16 * 16;
+  if (area != 0) {
+    grjit_asm_sub_rsp(a, area);
+    for (size_t i = GRJIT_INTERNAL_REG_ARGS; i < n; i++) {
+      grjit_asm_load64(a, GRJIT_RAX, GRJIT_RBP, GRJIT_ARGS_SLOT(f->vreg_count, e->c.shape.args_area, i));
+      grjit_asm_store64(a, GRJIT_RSP,
+          (int32_t)(8 * (i - GRJIT_INTERNAL_REG_ARGS)), GRJIT_RAX);
+    }
+  }
+  for (size_t i = 0; i < n && i < GRJIT_INTERNAL_REG_ARGS; i++) {
+    grjit_asm_load64(a, arg_regs[i], GRJIT_RBP, GRJIT_ARGS_SLOT(f->vreg_count, e->c.shape.args_area, i));
+  }
+  grjit_asm_load64(a, GRJIT_R10, GRJIT_RBP, GRJIT_SLOT_CTX);
+  grjit_asm_load64(a, GRJIT_RAX, GRJIT_RBP, entry_slot);
+  grjit_asm_call_r(a, GRJIT_RAX);
+  /* The return address is the site: this frame, with the callee running. */
+  grjit_emit_add_site_for(&e->c, (uint32_t)grjit_asm_size(a),
+      GRCORE_SITE_GC_POINT_CALL, st->identity, live + 1, op->state, op);
+  grjit_asm_test_rr(a, GRJIT_RDX, GRJIT_RDX);
+  grjit_asm_jcc(a, GRJIT_COND_NE, e->ret_deopted);
+  if (op->dst != GRJIT_NO_VREG) {
+    store_result(e, op->dst, GRJIT_RAX);
+  }
+  /* The call is complete: pop the callee's guest frame. */
+  grjit_asm_load64(a, GRJIT_RDI, GRJIT_RBP, GRJIT_SLOT_CTX);
+  grjit_asm_mov_ri(a, GRJIT_RAX, (uint64_t)(uintptr_t)f->hooks.pop);
+  grjit_asm_call_r(a, GRJIT_RAX);
 }
 
 static void emit_op(GRJIT_Emit * e, const GRJIT_Op * op, size_t block) {
@@ -304,6 +433,18 @@ static void emit_op(GRJIT_Emit * e, const GRJIT_Op * op, size_t block) {
       }
       break;
     case GRJIT_OP_RET:
+      if (e->c.callable) {
+        /* The internal convention: the result in rax (zero for none), the
+         * status in rdx, and the callee pops its own stack arguments. */
+        if (op->a.kind != GRJIT_OPERAND_NONE) {
+          load_operand(e, GRJIT_RAX, &op->a);
+        } else {
+          grjit_asm_mov_ri(a, GRJIT_RAX, 0);
+        }
+        grjit_asm_mov_ri(a, GRJIT_RDX, GRJIT_STATUS_RETURNED);
+        grjit_emit_callable_epilogue(e);
+        break;
+      }
       if (op->a.kind != GRJIT_OPERAND_NONE) {
         load_operand(e, GRJIT_RAX, &op->a);
         grjit_asm_load64(a, GRJIT_RDX, GRJIT_RBP, GRJIT_SLOT_OUT);
@@ -314,7 +455,8 @@ static void emit_op(GRJIT_Emit * e, const GRJIT_Op * op, size_t block) {
       break;
     case GRJIT_OP_CALL_SLOT:
     case GRJIT_OP_CALL_PTR:
-      /* Refused before emission (grjit_emit_for), so never reached. */
+      emit_guest_call(e, op);
+      break;
     case GRJIT_OP_COUNT:
       e->c.error = GRJIT_ERR_INTERNAL;
       break;
@@ -357,6 +499,155 @@ static void emit_stack_probe(GRJIT_Emit * e, uint32_t alloc) {
   grjit_asm_probe(a, GRJIT_R10, 0);
 }
 
+/* The stubs the blocks queued. A stub may add sites but never another stub. */
+static void emit_pending(GRJIT_Emit * e) {
+  for (size_t i = 0; i < e->c.pending_count && e->c.error == GRJIT_OK; i++) {
+    const GRJIT_Pending * p = &e->c.pending[i];
+    switch (p->kind) {
+      case GRJIT_PENDING_POLL:
+        grjit_emit_poll_stub(e, p);
+        break;
+      case GRJIT_PENDING_GUARD:
+        grjit_emit_guard_stub(e, p);
+        break;
+      case GRJIT_PENDING_CALL_SLOW:
+        grjit_emit_call_slow_stub(e, p);
+        break;
+      case GRJIT_PENDING_CALL_EXIT:
+        grjit_emit_call_exit_stub(e, p);
+        break;
+    }
+  }
+}
+
+/* The entry adapter of a callable function (AD-28): the C ABI of
+ * ::GRJIT_EntryFn on one side and the internal convention on the other. It
+ * saves the caller's `rbp`, keeps `out` and the context in its own frame,
+ * runs the entry hook, loads the arguments from the `args` array into the
+ * registers and the stack area, sets `rbp` to the chain-end marker (so the
+ * first compiled frame's saved caller base is the marker, which ends a walk;
+ * a/compiled.h), calls the internal entry, and turns its status into an exit.
+ * It uses no callee-saved register but `rbp`, which it restores. It clears the
+ * walk-start cell on the way out, so a walk after the run reads no dead frames. */
+static void emit_adapter(GRJIT_Emit * e) {
+  GRJIT_Asm * a = &e->as;
+  const GRJIT_Function * f = e->c.f;
+  const size_t params = f->param_count;
+  const uint32_t in_bytes = e->c.shape.incoming_bytes;
+  GRJIT_Label deopted = grjit_asm_label(a);
+  GRJIT_Label done = grjit_asm_label(a);
+  grjit_asm_push(a, GRJIT_RBP);
+  grjit_asm_mov_rr(a, GRJIT_RBP, GRJIT_RSP);
+  grjit_asm_sub_rsp(a, 32);
+  grjit_asm_store64(a, GRJIT_RSP, 24, GRJIT_RDX); /* out */
+  grjit_asm_store64(a, GRJIT_RSP, 16, GRJIT_RDI); /* context */
+  grjit_asm_store64(a, GRJIT_RSP, 8, GRJIT_RSI);  /* args */
+  if (e->c.hook != NULL) {
+    grjit_asm_mov_ri(a, GRJIT_RAX, (uint64_t)(uintptr_t)e->c.hook);
+    grjit_asm_call_r(a, GRJIT_RAX);
+    grjit_asm_mov32_rr(a, GRJIT_RAX, GRJIT_RAX);
+    grjit_asm_test_rr(a, GRJIT_RAX, GRJIT_RAX);
+    grjit_asm_jcc(a, GRJIT_COND_NE, e->refuse);
+  }
+  grjit_asm_load64(a, GRJIT_R11, GRJIT_RSP, 8);
+  if (in_bytes != 0) {
+    grjit_asm_sub_rsp(a, in_bytes);
+    for (size_t i = GRJIT_INTERNAL_REG_ARGS; i < params; i++) {
+      grjit_asm_load64(a, GRJIT_RAX, GRJIT_R11, (int32_t)(8 * i));
+      grjit_asm_store64(a, GRJIT_RSP,
+          (int32_t)(8 * (i - GRJIT_INTERNAL_REG_ARGS)), GRJIT_RAX);
+    }
+  }
+  for (size_t i = 0; i < params && i < GRJIT_INTERNAL_REG_ARGS; i++) {
+    grjit_asm_load64(a, arg_regs[i], GRJIT_R11, (int32_t)(8 * i));
+  }
+  grjit_asm_load64(a, GRJIT_R10, GRJIT_RSP, (int32_t)(in_bytes + 16));
+  grjit_asm_mov_ri64(a, GRJIT_RBP, (uint64_t)GRCORE_COMPILED_CHAIN_END);
+  grjit_asm_lea_rip(a, GRJIT_RAX, e->internal);
+  grjit_asm_call_r(a, GRJIT_RAX);
+  /* rsp is where it was after the frame was made: the callee popped the stack
+   * arguments. */
+  grjit_asm_load64(a, GRJIT_RCX, GRJIT_RSP, 24);
+  grjit_asm_load64(a, GRJIT_R8, GRJIT_RSP, 16);
+  grjit_asm_alu_rr(a, GRJIT_ALU_XOR, GRJIT_R9, GRJIT_R9);
+  grjit_asm_store64(a, GRJIT_R8, (int32_t)e->c.walk_cell_offset, GRJIT_R9);
+  grjit_asm_store64(a, GRJIT_R8, (int32_t)e->c.walk_cell_offset + 8, GRJIT_R9);
+  grjit_asm_test_rr(a, GRJIT_RDX, GRJIT_RDX);
+  grjit_asm_jcc(a, GRJIT_COND_NE, deopted);
+  grjit_asm_store64(a, GRJIT_RCX, 0, GRJIT_RAX);
+  grjit_asm_mov_ri(a, GRJIT_RAX, GRJIT_EXIT_RETURNED);
+  grjit_asm_jmp(a, done);
+  /* DEOPTED: every compiled frame was rebuilt into its guest frame before any
+   * of them returned; out[0] is the cause. */
+  grjit_asm_bind(a, deopted);
+  grjit_asm_store64(a, GRJIT_RCX, 0, GRJIT_RAX);
+  grjit_asm_mov_ri(a, GRJIT_RAX, GRJIT_EXIT_DEOPT);
+  grjit_asm_bind(a, done);
+  grjit_asm_add_rsp(a, 32);
+  grjit_asm_pop(a, GRJIT_RBP);
+  grjit_asm_ret(a);
+  /* The entry hook refused (eax is its answer). */
+  grjit_asm_bind(a, e->refuse);
+  grjit_asm_load64(a, GRJIT_RCX, GRJIT_RSP, 24);
+  grjit_asm_store64(a, GRJIT_RCX, 0, GRJIT_RAX);
+  grjit_asm_mov_ri(a, GRJIT_RAX, GRJIT_EXIT_REFUSED);
+  grjit_asm_add_rsp(a, 32);
+  grjit_asm_pop(a, GRJIT_RBP);
+  grjit_asm_ret(a);
+}
+
+/* A callable function: the adapter, the tag, the internal entry with the
+ * stack-limit check, the blocks and the stubs. */
+static GRJIT_Result emit_callable(const GRJIT_Function * f, GRJIT_Emit * e,
+    uint32_t frame_bytes) {
+  GRJIT_Asm * a = &e->as;
+  e->internal = grjit_asm_label(a);
+  e->overflow = grjit_asm_label(a);
+  e->ret_deopted = grjit_asm_label(a);
+  emit_adapter(e);
+  /* The internal entry on a 16-byte boundary with the tag just before it. */
+  static const uint8_t trap = 0xCC;
+  while ((grjit_asm_size(a) + 8) % 16 != 0) {
+    grjit_asm_raw(a, &trap, 1);
+  }
+  const uint64_t tag = GRJIT_ENTRY_TAG;
+  grjit_asm_raw(a, &tag, sizeof tag);
+  grjit_asm_bind(a, e->internal);
+  e->internal_offset = (uint32_t)grjit_asm_size(a);
+
+  const uint32_t alloc = frame_bytes;
+  grjit_asm_push(a, GRJIT_RBP);
+  grjit_asm_mov_rr(a, GRJIT_RBP, GRJIT_RSP);
+  /* The native-stack check, in bytes (AD-28): the lowest address this frame
+   * will use, against the context's limit word (r10 holds the context). Below
+   * it, the chain deopts at the call site and the interpreter continues. */
+  grjit_asm_lea(a, GRJIT_RAX, GRJIT_RSP, -(int32_t)alloc);
+  grjit_asm_cmp_rm(a, GRJIT_RAX, GRJIT_R10, (int32_t)e->c.native_limit_offset);
+  grjit_asm_jcc(a, GRJIT_COND_B, e->overflow);
+  grjit_asm_sub_rsp(a, alloc);
+  grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_CTX, GRJIT_R10);
+  for (size_t i = 0; i < f->param_count; i++) {
+    if (i < GRJIT_INTERNAL_REG_ARGS) {
+      grjit_asm_store64(a, GRJIT_RBP, grjit_emit_slot((GRJIT_VReg)i), arg_regs[i]);
+    } else {
+      grjit_asm_load64(a, GRJIT_RAX, GRJIT_RBP,
+          (int32_t)(16 + 8 * (i - GRJIT_INTERNAL_REG_ARGS)));
+      grjit_asm_store64(a, GRJIT_RBP, grjit_emit_slot((GRJIT_VReg)i), GRJIT_RAX);
+    }
+  }
+  for (size_t b = 0; b < f->block_count && e->c.error == GRJIT_OK; b++) {
+    grjit_asm_bind(a, e->blocks[b]);
+    const GRJIT_BlockInfo * blk = &f->blocks[b];
+    for (size_t i = 0; i < blk->count; i++) {
+      emit_op(e, &blk->ops[i], b);
+    }
+  }
+  emit_pending(e);
+  grjit_emit_ret_deopted(e);
+  grjit_emit_overflow_stub(e);
+  return e->c.error;
+}
+
 GRJIT_Result grjit_emit_function(const GRJIT_Function * f,
     const GRJIT_Allocator * allocator, size_t max_code_bytes,
     GRJIT_EntryHook hook, uint32_t request_offset, uint32_t frame_bytes,
@@ -375,6 +666,14 @@ GRJIT_Result grjit_emit_function(const GRJIT_Function * f,
     e->blocks[b] = grjit_asm_label(a);
   }
   e->refuse = grjit_asm_label(a);
+
+  if (f->callable) {
+    GRJIT_Result cr = emit_callable(f, e, frame_bytes);
+    if (cr != GRJIT_OK) {
+      return cr;
+    }
+    goto finish;
+  }
 
   /* Prologue: frame, the three fixed slots, the entry hook, the parameters. */
   uint32_t alloc = frame_bytes;
@@ -443,14 +742,9 @@ GRJIT_Result grjit_emit_function(const GRJIT_Function * f,
     }
   }
   /* A pending stub may add sites but never another pending stub. */
-  for (size_t i = 0; i < e->c.pending_count && e->c.error == GRJIT_OK; i++) {
-    if (e->c.pending[i].kind == GRJIT_PENDING_POLL) {
-      grjit_emit_poll_stub(e, &e->c.pending[i]);
-    } else {
-      grjit_emit_guard_stub(e, &e->c.pending[i]);
-    }
-  }
+  emit_pending(e);
   grjit_emit_refuse_stub(e);
+finish:
   grjit_asm_finish(a);
   if (e->c.error != GRJIT_OK) {
     return e->c.error;
