@@ -83,7 +83,8 @@ bool grjit_backend_available(void) {
 }
 
 bool grjit_backend_calls_available(void) {
-  return GRJIT_HAVE_BACKEND != 0 && GRJIT_NATIVE == GRJIT_ARCH_X86_64;
+  return GRJIT_HAVE_BACKEND != 0 &&
+      (GRJIT_NATIVE == GRJIT_ARCH_X86_64 || GRJIT_NATIVE == GRJIT_ARCH_ARM64);
 }
 
 void grjit_code_destroy(GRJIT_Code * code) {
@@ -198,14 +199,13 @@ static GRJIT_Result verify_for_compile(
 }
 #endif
 
-/* Calls between compiled functions (AD-28) are emitted for x86-64 SysV only,
- * until the other two backends have them (story 7 of the calls spec), tail calls
- * with them. A function that has the new operations, or is callable (a tail
- * call is in a callable function only), is refused for the
- * others with GRJIT_ERR_UNSUPPORTED before a byte is emitted, so the bytes of
- * every other function are exactly what they were. */
+/* Calls between compiled functions (AD-28), tail calls and calls to natives are emitted for
+ * x86-64 SysV and arm64; Windows x86-64 has them in story 7b of the calls spec. A function
+ * that has the new operations, or is callable (a tail call and a native call are in a
+ * callable function only), is refused for Win64 with GRJIT_ERR_UNSUPPORTED before a byte is
+ * emitted, so the bytes of every other function are exactly what they were. */
 static bool grjit_emit_supports(GRJIT_Arch arch, const GRJIT_Function * f) {
-  if (arch == GRJIT_ARCH_X86_64) {
+  if (arch != GRJIT_ARCH_X86_64_WIN64) {
     return true;
   }
   if (f->callable) {
@@ -260,6 +260,7 @@ GRJIT_Result grjit_emit_for(GRJIT_Arch arch, const GRJIT_Function * function,
         request_offset, (uint32_t)frame, &live, &a64);
     bytes = grjit_a64_bytes(&a64.as);
     code_bytes = grjit_a64_size(&a64.as);
+    out->internal_offset = a64.internal_offset;
     recs = a64.c.sites;
     rec_count = a64.c.site_count;
   } else {

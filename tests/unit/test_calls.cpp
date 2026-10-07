@@ -54,11 +54,11 @@ int add_fib(Engine & e) {
 
 } // namespace
 
-/* Calls are emitted for x86-64 SysV only (arm64 and Win64 are story 7's). Where
- * they are not, a test does not skip, which would count as a test that proved
- * nothing: it shows the refusal instead, which is what those targets promise. */
-#if defined(__x86_64__) && defined(__linux__)
-#define CALLS_ONLY_ON_X86_64_SYSV() (void)0
+/* Calls are emitted for x86-64 SysV and arm64 (Win64 is story 7b's). Where they are not, a
+ * test does not skip, which would count as a test that proved nothing: it shows the refusal
+ * instead, which is what that target promises. */
+#if FX_HAVE_CALLS_ASM
+#define CALLS_ONLY_WHERE_EMITTED() (void)0
 #else
 namespace {
 void expect_calls_refused_here() {
@@ -76,7 +76,7 @@ void expect_calls_refused_here() {
   EXPECT_FALSE(c);
 }
 } // namespace
-#define CALLS_ONLY_ON_X86_64_SYSV() \
+#define CALLS_ONLY_WHERE_EMITTED() \
   do { \
     expect_calls_refused_here(); \
     return; \
@@ -84,7 +84,7 @@ void expect_calls_refused_here() {
 #endif
 
 TEST(Calls, FibCompiledMatchesTheInterpreterAndTheCReferenceAndNeverLeavesCompiledCode) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   Engine e;
   int fib = add_fib(e);
   for (int64_t n = 0; n <= 15; n++) {
@@ -162,7 +162,7 @@ int64_t args_ref(int n, int64_t x) {
 } // namespace
 
 TEST(Calls, ZeroToSixteenArgumentsPassedInRegistersAndOnTheStackMatchTheReference) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   Engine e;
   for (int n = 0; n <= 16; n++) {
     SCOPED_TRACE(n);
@@ -209,7 +209,7 @@ int add_echo(Engine & e, GRJIT_Type t, const char * name) {
 } // namespace
 
 TEST(Calls, AnI64AReferenceAndAPointerEachGoThroughACallAndComeBackIntact) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   Engine e;
   e.torture = true; // a moving collection at every push, new object and poll
   int echo_i = add_echo(e, GRJIT_TYPE_I64, "echo_i64");
@@ -277,7 +277,7 @@ namespace {
 } // namespace
 
 TEST(Calls, AFiftyDeepChainWithACollectionAtTheBottomKeepsEveryFramesReferenceAndMovesIt) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   Engine e;
   // Each frame's object holds the value 7; the sum over a chain of n+1 frames is
   // 7 * (n + 1), and a frame whose reference was not updated reads the poison.
@@ -364,7 +364,7 @@ int add_via_slot(Engine & e, int inc) {
 } // namespace
 
 TEST(Calls, ACallThroughACodePointerOfRegisteredCompiledCodeGivesTheSameResults) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   Engine e;
   int inc = add_inc(e);
   ASSERT_TRUE(e.compile_fn(inc));
@@ -400,7 +400,7 @@ TEST(Calls, ACallThroughACodePointerOfRegisteredCompiledCodeGivesTheSameResults)
 }
 
 TEST(Calls, ACodePointerThatIsNotTheInternalEntryOfRegisteredCodeIsNeverEntered) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   Engine e;
   int inc = add_inc(e);
   ASSERT_TRUE(e.compile_fn(inc));
@@ -456,7 +456,7 @@ TEST(Calls, ACodePointerThatIsNotTheInternalEntryOfRegisteredCodeIsNeverEntered)
 }
 
 TEST(Calls, AnEmptySlotIsCompiledAtTheFirstCallAndCalledDirectlyAfterwards) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   Engine e;
   int inc = add_inc(e);
   int top = add_via_slot(e, inc);
@@ -476,7 +476,7 @@ TEST(Calls, AnEmptySlotIsCompiledAtTheFirstCallAndCalledDirectlyAfterwards) {
 }
 
 TEST(Calls, ACalleeThatTiersUpLaterIsCalledDirectlyWithoutRecompilingItsCallers) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   Engine e;
   int inc = add_inc(e);
   int top = add_via_slot(e, inc);
@@ -494,7 +494,7 @@ TEST(Calls, ACalleeThatTiersUpLaterIsCalledDirectlyWithoutRecompilingItsCallers)
 }
 
 TEST(Calls, ACalleeThatCannotBeCompiledIsAnExitRememberedInItsSlotAndNotAskedAgain) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   Engine e;
   int inc = add_inc(e);
   int top = add_via_slot(e, inc);
@@ -528,7 +528,7 @@ TEST(Calls, ACalleeThatCannotBeCompiledIsAnExitRememberedInItsSlotAndNotAskedAga
 }
 
 TEST(Calls, AHookThatSaysItInstalledButLeftTheSlotEmptyIsAnExitNotAnEntry) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   Engine e;
   int inc = add_inc(e);
   int top = add_via_slot(e, inc);
@@ -576,7 +576,7 @@ int add_gchain(Engine & e, int64_t fail_at, bool with_poll = false) {
 } // namespace
 
 TEST(Calls, AGuardFailingThreeFramesDownRebuildsEveryCompiledFrameAndTheInterpreterFinishes) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   Engine e;
   int g = add_gchain(e, /*fail_at=*/7);
   // Ten frames deep with the guard failing in the fourth (n == 7): frames for
@@ -599,7 +599,7 @@ TEST(Calls, AGuardFailingThreeFramesDownRebuildsEveryCompiledFrameAndTheInterpre
 }
 
 TEST(Calls, AGuardAtTheEntryFunctionAndAtTheBottomOfTheChainBothFinishCorrectly) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   for (int64_t fail_at : {10, 0, 5}) {
     SCOPED_TRACE(fail_at);
     Engine e;
@@ -615,7 +615,7 @@ TEST(Calls, AGuardAtTheEntryFunctionAndAtTheBottomOfTheChainBothFinishCorrectly)
 }
 
 TEST(Calls, AFailedPollInACalleeRebuildsTheChainAndCarriesThePollHelpersAnswer) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   Engine e;
   int g = add_gchain(e, /*fail_at=*/-1, /*with_poll=*/true);
   // A request is pending, so every compiled poll takes its slow path; the third
@@ -637,7 +637,7 @@ TEST(Calls, AFailedPollInACalleeRebuildsTheChainAndCarriesThePollHelpersAnswer) 
 }
 
 TEST(Calls, APushThatIsRefusedIsAnExitAtTheCallSiteAndTheInterpreterMakesTheCall) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   Engine e;
   int g = add_gchain(e, -1);
   e.refuse_push_at = 4; // the fourth call, three frames down
@@ -652,7 +652,7 @@ TEST(Calls, APushThatIsRefusedIsAnExitAtTheCallSiteAndTheInterpreterMakesTheCall
 }
 
 TEST(Calls, TheGuestDepthBudgetRefusesAPushAtTheSameDepthCompiledAndInterpreted) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   for (uint64_t depth : {uint64_t{3}, uint64_t{10}, uint64_t{25}}) {
     SCOPED_TRACE(depth);
     Engine e(depth);
@@ -701,7 +701,7 @@ int add_rec(Engine & e) {
 } // namespace
 
 TEST(Calls, ATinyNativeStackDeoptimizesTheChainAtTheCallSiteAndTheInterpreterFinishes) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   Engine e(GRCORE_UNLIMITED, /*native_bytes=*/6000);
   int rec = add_rec(e);
   Outcome i = e.run_interpreted(rec, {400});
@@ -722,7 +722,7 @@ TEST(Calls, ATinyNativeStackDeoptimizesTheChainAtTheCallSiteAndTheInterpreterFin
 }
 
 TEST(Calls, TheStackLimitIsMeasuredInBytesAndTheFirstFrameThatDoesNotFitIsTheOneRefused) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   // The budget swept across a frame's width, so the boundary falls at every
   // alignment: every frame admitted lies wholly above the limit, and the next one
   // would not have.
@@ -754,7 +754,7 @@ TEST(Calls, TheStackLimitIsMeasuredInBytesAndTheFirstFrameThatDoesNotFitIsTheOne
 }
 
 TEST(Calls, NoNativeStackBudgetMeansNoLimitAndADeepChainRunsToTheEndCompiled) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   Engine e;
   int rec = add_rec(e);
   Outcome c = e.run_compiled(rec, {2000});
@@ -765,7 +765,7 @@ TEST(Calls, NoNativeStackBudgetMeansNoLimitAndADeepChainRunsToTheEndCompiled) {
 }
 
 TEST(Calls, AStackLimitTheEntryFunctionItselfCannotMeetLeavesItsGuestFrameAtItsEntry) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   // So small that not even the entry function's own frame fits: it deoptimizes
   // before it starts, with no compiled frame to rebuild, and the interpreter runs
   // the function from its entry.
@@ -783,7 +783,7 @@ TEST(Calls, AStackLimitTheEntryFunctionItselfCannotMeetLeavesItsGuestFrameAtItsE
 /* ---- The reservation ---------------------------------------------------------- */
 
 TEST(Calls, EveryCallExtendsTheReservationByTheCalleesMaximumAndAChainRebuildNeverFails) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   // An engine whose I64 locals are held converted in its frames: the IR has no
   // converting type, so the engine's table says its frame-state words are raw
   // I64 values, and a rebuild converts them from the reservation.
@@ -810,7 +810,7 @@ TEST(Calls, EveryCallExtendsTheReservationByTheCalleesMaximumAndAChainRebuildNev
 }
 
 TEST(Calls, AReservationExtensionOneCellShortIsRefusedUpFrontAndNothingIsWritten) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   // A reservation sized one cell short is an engine's defect, not a resource
   // that ran out (that is the allocator refusing an extension, below, which is
   // an exit at the call site). The chain rebuild refuses it before writing
@@ -841,7 +841,7 @@ TEST(Calls, AReservationExtensionOneCellShortIsRefusedUpFrontAndNothingIsWritten
 /* ---- Code a frame returns into ------------------------------------------------ */
 
 TEST(Calls, ACodeFunctionWhoseSlotIsClearedUnderItsOwnFrameKeepsRunningAndIsReleasedAfterTheLastJitActivation) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   Engine e;
   // inner() clears its own slot, then runs on: a helper that allocates and a
   // read of what it allocated, all in code whose slot is empty and whose range
@@ -887,7 +887,7 @@ TEST(Calls, ACodeFunctionWhoseSlotIsClearedUnderItsOwnFrameKeepsRunningAndIsRele
 }
 
 TEST(Calls, RepeatedReplacementUnderOneLongLivedActivationRetainsEachReplacedFunction) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   Engine e;
   int inc = add_inc(e);
   GRCORE_ActivationRef jit;
@@ -921,7 +921,7 @@ TEST(Calls, RepeatedReplacementUnderOneLongLivedActivationRetainsEachReplacedFun
 /* ---- Registers a callee must not touch ------------------------------------------ */
 
 TEST(Calls, NoCalleeSavedRegisterIsEverChangedByCompiledCodeThroughTheEntryOrAChain) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
 #if FX_HAVE_CALLS_ASM
   Engine e;
   int g = add_gchain(e, -1);
@@ -961,7 +961,7 @@ TEST(Calls, NoCalleeSavedRegisterIsEverChangedByCompiledCodeThroughTheEntryOrACh
 /* ---- A collection at every GC point, in a deep chain ---------------------------- */
 
 TEST(Calls, CollectingAtEveryGcPointInAFiftyDeepChainWithAGuardFailingMidwayLosesNothing) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   Engine e;
   e.torture = true;
   int deep = e.reserve();
@@ -1047,7 +1047,7 @@ Child in_child(const std::function<void()> & fn) {
 } // namespace
 
 TEST(Calls, ACorruptLinkOrReturnWordInARealChainStopsEnumerationWithAMessage) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   Engine e;
   int deep = e.reserve();
   {
@@ -1153,7 +1153,7 @@ GRJIT_Function * callable_identity(GRJIT_Type t) {
 } // namespace
 
 TEST(Calls, TheEntryHookRunsInTheAdapterBeforeAnythingAndItsRefusalIsReportedAsRefused) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   JitWorld w;
   Fn f(callable_identity(GRJIT_TYPE_I64));
   {
@@ -1175,7 +1175,7 @@ TEST(Calls, TheEntryHookRunsInTheAdapterBeforeAnythingAndItsRefusalIsReportedAsR
 }
 
 TEST(Calls, ACallableFunctionHasAnInternalEntryAndAPlainOneHasNone) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   JitWorld w;
   Fn f(callable_identity(GRJIT_TYPE_I64));
   Compiled c(f, w.pages());
@@ -1203,27 +1203,37 @@ TEST(Calls, ACallableFunctionHasAnInternalEntryAndAPlainOneHasNone) {
   EXPECT_FALSE(grjit_code_callable(nullptr));
 }
 
-TEST(Calls, EveryArchitectureButX86SysVRefusesACallableFunctionBeforeEmittingAByte) {
+TEST(Calls, Win64RefusesACallableFunctionBeforeEmittingAByteAndTheOtherTwoEmitItOnAnyHost) {
   Fn f(callable_identity(GRJIT_TYPE_I64));
   GRCORE_JitLayout layout = *grcore_jit_layout();
-  for (GRJIT_Arch arch : {GRJIT_ARCH_ARM64, GRJIT_ARCH_X86_64_WIN64}) {
-    SCOPED_TRACE(arch);
+  {
     GRJIT_Emitted out;
     TrackingAllocator alloc;
-    EXPECT_EQ(grjit_emit_for(arch, f, alloc.get(), nullptr, nullptr, layout.request_word_offset, &out),
+    EXPECT_EQ(grjit_emit_for(GRJIT_ARCH_X86_64_WIN64, f, alloc.get(), nullptr, nullptr,
+                  layout.request_word_offset, &out),
         GRJIT_ERR_UNSUPPORTED);
     EXPECT_EQ(alloc.live, 0) << "nothing was left allocated";
     EXPECT_EQ(alloc.calls, 0) << "and nothing was even asked for";
     EXPECT_EQ(out.size, 0u);
+    EXPECT_EQ(out.bytes, nullptr);
   }
-  // And the same function is emitted for x86-64 SysV on any host.
-  GRJIT_Emitted out;
-  EXPECT_EQ(grjit_emit_for(GRJIT_ARCH_X86_64, f, grjit_allocator_default(), nullptr, nullptr,
-                layout.request_word_offset, &out),
-      GRJIT_OK);
-  EXPECT_GT(out.size, 0u);
-  EXPECT_GT(out.internal_offset, 0u);
-  grjit_emitted_free(&out);
+  // And the same function is emitted for x86-64 SysV and for arm64 on any host, with its internal
+  // entry on a sixteen-byte boundary and the tag (the magic and the parameter count, then the
+  // token) in the sixteen bytes before it.
+  for (GRJIT_Arch arch : {GRJIT_ARCH_X86_64, GRJIT_ARCH_ARM64}) {
+    SCOPED_TRACE(arch);
+    GRJIT_Emitted out;
+    ASSERT_EQ(grjit_emit_for(arch, f, grjit_allocator_default(), nullptr, nullptr, layout.request_word_offset, &out),
+        GRJIT_OK);
+    EXPECT_GT(out.size, 0u);
+    ASSERT_GE(out.internal_offset, 16u);
+    EXPECT_EQ(out.internal_offset % 16, 0u) << "the code starts on a page, so the entry is 16-aligned";
+    uint64_t tag[2];
+    std::memcpy(tag, out.bytes + out.internal_offset - 16, sizeof tag);
+    EXPECT_EQ(tag[0], (uint64_t{0x4752494E} << 32) | 1u) << "the magic, and the parameter count";
+    EXPECT_EQ(tag[1], 0u) << "the function's token";
+    grjit_emitted_free(&out);
+  }
 }
 
 TEST(Calls, AFunctionWithoutTheNewOperationsCarriesNoCallMachineryOnAnyArchitecture) {
@@ -1257,7 +1267,7 @@ TEST(Calls, AFunctionWithoutTheNewOperationsCarriesNoCallMachineryOnAnyArchitect
 }
 
 TEST(Calls, AnOverflowingCalleesGuestFrameHoldsTheArgumentsItWasCalledWith) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   // The push hook is handed the arguments in the caller's frame, in order. A
   // callee that cannot start (its stack check fails) is finished by the
   // interpreter from the guest frame the hook made, so the arguments must have
@@ -1309,7 +1319,7 @@ TEST(Calls, AnOverflowingCalleesGuestFrameHoldsTheArgumentsItWasCalledWith) {
 }
 
 TEST(Calls, ArgumentsOfAllThreeTypesMixedAtEveryCountFromOneToSixteenArriveIntactUnderCollection) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   // callee(a0 ... a{n-1}) with a_i an I64, a REF or a PTR in turn; it returns the
   // sum of (i + 1) times each one's value: the integer, the integer an object
   // holds, or the pointer's low byte. The caller makes them, and every push
@@ -1389,7 +1399,7 @@ TEST(Calls, ArgumentsOfAllThreeTypesMixedAtEveryCountFromOneToSixteenArriveIntac
 }
 
 TEST(Calls, AnExitAtAnUncompilableCalleeIsNotCountedAgainstTheCallersDiscardLimitButAGuardIs) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   {
     Engine e;
     int inc = add_inc(e);
@@ -1429,8 +1439,8 @@ TEST(Calls, AnExitAtAnUncompilableCalleeIsNotCountedAgainstTheCallersDiscardLimi
   }
 }
 
-TEST(Calls, TheBackendSaysWhetherItCanCompileCallsAndOnlyX86SysVCan) {
-#if defined(__x86_64__) && defined(__linux__)
+TEST(Calls, TheBackendSaysWhetherItCanCompileCallsAndOnlyX86SysVAndArm64Can) {
+#if FX_HAVE_CALLS_ASM
   EXPECT_TRUE(grjit_backend_calls_available());
 #else
   EXPECT_FALSE(grjit_backend_calls_available());
@@ -1453,7 +1463,7 @@ TEST(Calls, TheBackendSaysWhetherItCanCompileCallsAndOnlyX86SysVCan) {
 }
 
 TEST(Calls, AReservationExtensionTheAllocatorRefusesIsAnExitAtTheCallSiteAndNothingIsHalfDone) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   TrackingAllocator tracker;
   Engine e(GRCORE_UNLIMITED, GRCORE_UNLIMITED, /*conv=*/true, tracker.get());
   int g = add_gchain(e, /*fail_at=*/-1);
@@ -1559,7 +1569,7 @@ void generate(Engine & e, std::mt19937 & rng, int n, std::vector<int> * fns, boo
 } // namespace
 
 TEST(Calls, GeneratedCallGraphsGiveTheSameResultsCompiledAndInterpretedWithAndWithoutCollections) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   long deopted = 0, direct = 0;
   for (unsigned seed = 0; seed < 150; seed++) {
     SCOPED_TRACE(seed);
@@ -1593,7 +1603,7 @@ TEST(Calls, GeneratedCallGraphsGiveTheSameResultsCompiledAndInterpretedWithAndWi
 /* ---- A derived pointer passed as an argument ------------------------------------ */
 
 TEST(Calls, ADerivedPointerPassedAsAnArgumentFollowsItsBaseWhenThePushCollects) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   // The push hook collects (a moving collection at the push), so the object the
   // pointer is into moves between the arguments being copied and the callee
   // being called. The pointer is read from the arguments area afterwards, so the
@@ -1661,7 +1671,7 @@ int add_ptr_caller(Engine & e, int target, int token, int n) {
 } // namespace
 
 TEST(Calls, ACodePointerToAnotherFunctionOrOfAnotherArityIsRefusedAndNeverEntered) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   Engine e;
   int c2, c2caller, c8, c8caller;
   add_args_pair(e, 2, &c2, &c2caller);
@@ -1708,7 +1718,7 @@ TEST(Calls, ACodePointerToAnotherFunctionOrOfAnotherArityIsRefusedAndNeverEntere
 }
 
 TEST(Calls, CodeInstalledInASlotMustBeTheFunctionTheSlotIsForAndTakeItsParameterCount) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   Engine e;
   int c2, c2caller, c8, c8caller;
   add_args_pair(e, 2, &c2, &c2caller);
@@ -1744,7 +1754,7 @@ TEST(Calls, CodeInstalledInASlotMustBeTheFunctionTheSlotIsForAndTakeItsParameter
 /* ---- A refused rebuild is a distinct, unmissable exit -------------------------- */
 
 TEST(Calls, ARebuildTheEngineRefusesIsAFatalExitWithNothingWrittenAndNeverAnInterpreterRun) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   for (int refuse : {0, 1}) {
     SCOPED_TRACE(refuse);
     Engine e;
@@ -1771,7 +1781,7 @@ TEST(Calls, ARebuildTheEngineRefusesIsAFatalExitWithNothingWrittenAndNeverAnInte
 }
 
 TEST(Calls, ARebuildTheEngineRefusesAtANativeStackOverflowIsTheSameFatalExit) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   // The overflow stub calls the deopt hook from its own code, apart from the
   // guard and call exits, so it is a separate place to ignore the answer.
   for (int refuse : {0, 1}) {
@@ -1840,7 +1850,7 @@ int add_gchain_ptr(Engine & e, int64_t fail_at, bool with_obj = false) {
 } // namespace
 
 TEST(Calls, AGuardBelowCodePointerCallsDeoptimizesThroughEveryFrame) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   Engine e;
   int g = add_gchain_ptr(e, /*fail_at=*/7);
   ASSERT_TRUE(e.compile_fn(g));
@@ -1855,7 +1865,7 @@ TEST(Calls, AGuardBelowCodePointerCallsDeoptimizesThroughEveryFrame) {
 }
 
 TEST(Calls, AFiftyDeepChainOfCodePointerCallsIsSeenPreciselyWithAReferenceLiveAcrossEachCall) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   Engine e;
   e.torture = true; // a moving collection at every push, new object and collect
   int g = add_gchain_ptr(e, /*fail_at=*/-1, /*with_obj=*/true);
@@ -1890,7 +1900,7 @@ TEST(Calls, AFiftyDeepChainOfCodePointerCallsIsSeenPreciselyWithAReferenceLiveAc
 }
 
 TEST(Calls, APointerIntoCodeThatWasRetiredIsRefusedAndNeverEnteredEvenWhileItStillMaps) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   Engine e;
   int target = add_inc(e);
   ASSERT_TRUE(e.compile_fn(target));
@@ -1917,7 +1927,7 @@ TEST(Calls, APointerIntoCodeThatWasRetiredIsRefusedAndNeverEnteredEvenWhileItSti
 }
 
 TEST(Calls, GeneratedCallGraphsMixingCodePointerCallsAndSlotCallsAgreeWithTheInterpreter) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   long deopted = 0, direct = 0;
   for (unsigned seed = 1000; seed < 1100; seed++) {
     SCOPED_TRACE(seed);
@@ -1946,7 +1956,7 @@ TEST(Calls, GeneratedCallGraphsMixingCodePointerCallsAndSlotCallsAgreeWithTheInt
 }
 
 TEST(Calls, AnInnerFunctionThatClearsItsOuterCallersSlotLeavesTheOuterCodeAliveUntilTheActivationLeaves) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   Engine e;
   // top -> outer -> inner. inner clears OUTER's slot (retiring the code outer is
   // running in), collects, and returns; outer then fails a guard, so the chain is
@@ -2000,7 +2010,7 @@ TEST(Calls, AnInnerFunctionThatClearsItsOuterCallersSlotLeavesTheOuterCodeAliveU
 }
 
 TEST(Calls, CallableCodeBuiltForAnotherLayoutIsRefusedBeforeAnyOfItRuns) {
-  CALLS_ONLY_ON_X86_64_SYSV();
+  CALLS_ONLY_WHERE_EMITTED();
   JitWorld w;
   Fn f(callable_identity(GRJIT_TYPE_I64));
   Compiled c(f, w.pages());

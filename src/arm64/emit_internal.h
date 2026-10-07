@@ -39,6 +39,30 @@
  * x0; x2 holds `out` in the exits; the arguments of a helper call are x0-x5;
  * a call goes through x16 loaded by `movz`/`movk`; x17 holds a displacement
  * that does not fit an instruction.
+ *
+ * **A callable function** (AD-28; ../backend/backend_internal.h) uses the same
+ * frame, with the internal convention between compiled functions:
+ *
+ *  - arguments in `x0`-`x7`, the rest at `[sp + 8 i]` at the call, in an area
+ *    of whole 16-byte units that the *callee* pops (`mov sp, x29; ldp x29, x30,
+ *    [sp], #16; add sp, sp, #in; ret`, the `add` omitted for no stack
+ *    arguments), so a tail call to a callee with more stack arguments than its
+ *    caller can move the frame (the reason is story 4's);
+ *  - the context in `x9`, the result in `x0`, the status in `x1` (RETURNED 0,
+ *    DEOPTED 1, FAILED 2; `x0` then holds the cause or the hook's answer);
+ *  - `x10` is the copy temporary of a stack argument, `x15` holds the context
+ *    while the walk-start cell is stored, `x16` is the call target and
+ *    `adr`'s destination, and `x17` holds a displacement that fits no
+ *    immediate;
+ *  - **no callee-saved register is used** (`x19`-`x28`, `d8`-`d15`) and `x18`
+ *    is never touched. The entry adapter sets `x29` to the chain-end marker
+ *    before it calls the first compiled function and gives it back from its
+ *    own frame record on the way out, so the caller of the entry sees `x29`
+ *    as it left it.
+ *
+ * `sp` is a multiple of 16 at every instruction that uses it as a base: the
+ * frame is made once, an argument area is whole 16-byte units, and nothing
+ * else moves it.
  */
 
 #ifndef GHOTI_IO_GRJIT_SRC_ARM64_EMIT_INTERNAL_H
@@ -64,6 +88,13 @@ typedef struct GRJIT_A64Emit {
   GRJIT_A64Asm as;
   GRJIT_Label * blocks;
   GRJIT_Label refuse;
+  /* A callable function. */
+  GRJIT_Label internal;      ///< The internal entry.
+  GRJIT_Label ret_deopted;   ///< Returns DEOPTED with `x0` untouched.
+  GRJIT_Label ret_failed;    ///< Returns FAILED with the hook's answer in `x0`.
+  GRJIT_Label ret_propagate; ///< Returns what a callee returned, `x1` and `x0` as they are.
+  GRJIT_Label overflow;      ///< The prologue's native-stack exit.
+  uint32_t internal_offset;  ///< Where the internal entry is, after the adapter and the tag.
 } GRJIT_A64Emit;
 
 /**
@@ -91,6 +122,21 @@ void grjit_a64_emit_poll_stub(GRJIT_A64Emit * e, const GRJIT_Pending * p);
 void grjit_a64_emit_guard_stub(GRJIT_A64Emit * e, const GRJIT_Pending * p);
 /** The epilogue and `ret`. */
 void grjit_a64_emit_epilogue(GRJIT_A64Emit * e);
+/** A callable function's epilogue: the frame, then the callee pops its stack arguments. */
+void grjit_a64_emit_callable_epilogue(GRJIT_A64Emit * e);
+/** Records where the walk starts (a/layout.h): stores the frame base and the address of
+ *  `ret_label`, the return address of the call about to be made, in the context's cell.
+ *  Uses `x15` and `x16`, and leaves the context in `x15`. */
+void grjit_a64_emit_store_walk_cell(GRJIT_A64Emit * e, GRJIT_Label ret_label);
+/** The shared exits of a callable function: a call through an empty slot, the call's
+ *  exit, a native call's two exits, the native-stack exit and the returns. */
+void grjit_a64_emit_call_slow_stub(GRJIT_A64Emit * e, const GRJIT_Pending * p);
+void grjit_a64_emit_call_exit_stub(GRJIT_A64Emit * e, const GRJIT_Pending * p);
+void grjit_a64_emit_native_exit_stub(GRJIT_A64Emit * e, const GRJIT_Pending * p);
+void grjit_a64_emit_native_status_stub(GRJIT_A64Emit * e, const GRJIT_Pending * p);
+void grjit_a64_emit_overflow_stub(GRJIT_A64Emit * e);
+void grjit_a64_emit_ret_deopted(GRJIT_A64Emit * e);
+void grjit_a64_emit_ret_status(GRJIT_A64Emit * e);
 
 #ifdef __cplusplus
 }

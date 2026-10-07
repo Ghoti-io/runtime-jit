@@ -21,14 +21,22 @@
  * with calls to other compiled functions and no tail call (AD-28). It was
  * measured at the commit before tail calls (story 5 of the calls spec) and
  * holds the claim that adding them left every byte of such a function as it
- * was. It is emitted for x86-64 SysV only, the one target that has calls.
+ * was. It is the x86-64 SysV one; arm64 has its own (below).
  *
  * A fifth covers callable functions with calls to natives (story 6): one for
  * every combination of a parameter count, a native's arity, its status and its
  * result type, in two shapes, measured after the emitter landed. It holds the
  * claim that the bytes of a native call, and of everything around one, do not
- * change without a commit that says why. The other two targets refuse such a
- * function before a byte, which the same test shows for each.
+ * change without a commit that says why. Win64 refuses such a function before
+ * a byte, which the same test shows for each.
+ *
+ * Three more are arm64's (story 7 of the calls spec), each measured when its part of the
+ * emitter landed and held from then on: the same callable functions with calls, one tail
+ * call to each form of callee for every combination of a parameter count and an argument
+ * count, and the same functions with calls to natives. On arm64 an address is materialised
+ * by `movz` and `movk`, so the one thing in the bytes that is the process's, the library's
+ * own target check, is found as that instruction sequence and replaced by a marker, which
+ * is counted.
  *
  * Copyright 2026 by Corey Pennycuff
  */
@@ -37,6 +45,7 @@
 
 #include "../ir_gen.h"
 
+#include "../../src/arm64/asm_internal.h"
 #include "../../src/code/code_internal.h"
 
 namespace {
@@ -93,7 +102,48 @@ Pin pin_of(GRJIT_Arch arch) {
 constexpr unsigned kParams[] = {0, 1, 2, 3, 6, 7, 9, 16};
 constexpr unsigned kArgs[] = {0, 1, 4, 6, 7, 10, 16};
 
-Pin callable_pin(unsigned * pointer_calls) {
+/* The instruction words that materialise `value` in x16, for finding it in arm64 code. */
+std::vector<uint8_t> a64_address_words(uint64_t value) {
+  GRJIT_A64Asm a;
+  grjit_a64_init(&a, grjit_allocator_default(), 64);
+  grjit_a64_mov_ri(&a, GRJIT_A64_X16, value);
+  std::vector<uint8_t> out(grjit_a64_bytes(&a), grjit_a64_bytes(&a) + grjit_a64_size(&a));
+  grjit_a64_free(&a);
+  return out;
+}
+
+/* Replaces every occurrence of the library's own target check's address in `bytes` by a marker,
+ * and returns how many there were: the one thing in the code that is the process's and not the
+ * emitter's, so the hash would otherwise change with the load address. On arm64 the address is
+ * the `movz`/`movk` sequence, whatever its length, and the marker is three words. */
+unsigned mask_target_check(GRJIT_Arch arch, std::vector<uint8_t> * bytes) {
+  const uint64_t check = reinterpret_cast<uint64_t>(&grjit_call_target_ok);
+  unsigned found = 0;
+  if (arch == GRJIT_ARCH_ARM64) {
+    const std::vector<uint8_t> seq = a64_address_words(check);
+    const std::vector<uint8_t> marker(12, 0x7A);
+    for (size_t i = 0; i + seq.size() <= bytes->size(); i += 4) {
+      if (std::memcmp(bytes->data() + i, seq.data(), seq.size()) == 0) {
+        bytes->erase(bytes->begin() + static_cast<long>(i), bytes->begin() + static_cast<long>(i + seq.size()));
+        bytes->insert(bytes->begin() + static_cast<long>(i), marker.begin(), marker.end());
+        i += marker.size() - 4;
+        found++;
+      }
+    }
+    return found;
+  }
+  for (size_t i = 0; i + 8 <= bytes->size(); i++) {
+    if (std::memcmp(&(*bytes)[i], &check, 8) == 0) {
+      const uint64_t marker = 0x7A7A7A7A7A7A7A7Aull;
+      std::memcpy(&(*bytes)[i], &marker, 8);
+      found++;
+      i += 7;
+    }
+  }
+  return found;
+}
+
+Pin callable_pin(GRJIT_Arch arch, unsigned * pointer_calls, unsigned * functions) {
   Pin pin;
   unsigned id = 0;
   unsigned checks = 0;
@@ -170,7 +220,7 @@ Pin callable_pin(unsigned * pointer_calls) {
           char why[256];
           EXPECT_EQ(grjit_function_verify(f, nullptr, why, sizeof why), GRJIT_OK) << id << why;
           GRJIT_Emitted e;
-          GRJIT_Result res = grjit_emit_for(GRJIT_ARCH_X86_64, f, grjit_allocator_default(),
+          GRJIT_Result res = grjit_emit_for(arch, f, grjit_allocator_default(),
               nullptr, nullptr, kRequestOffset, &e);
           EXPECT_EQ(res, GRJIT_OK) << "function " << id << ": " << grjit_result_string(res);
           if (res != GRJIT_OK) {
@@ -180,23 +230,85 @@ Pin callable_pin(unsigned * pointer_calls) {
            * address is the one thing in the bytes that is the process's and not
            * the emitter's. It is replaced by a marker before hashing, and the
            * marker is counted: one for each such call, or the pin proved less. */
-          const uint64_t check = reinterpret_cast<uint64_t>(&grjit_call_target_ok);
           std::vector<uint8_t> bytes(e.bytes, e.bytes + e.size);
-          for (size_t i = 0; i + 8 <= bytes.size(); i++) {
-            if (std::memcmp(&bytes[i], &check, 8) == 0) {
-              const uint64_t marker = 0x7A7A7A7A7A7A7A7Aull;
-              std::memcpy(&bytes[i], &marker, 8);
-              checks++;
-              i += 7;
-            }
-          }
+          checks += mask_target_check(arch, &bytes);
           for (uint8_t byte : bytes) {
             pin.hash = fold(pin.hash, byte);
           }
           pin.hash = fold(pin.hash, 0xFF);
-          pin.bytes += e.size;
+          pin.bytes += bytes.size();
           grjit_emitted_free(&e);
+          *functions += 1;
         }
+      }
+    }
+  }
+  *pointer_calls = checks;
+  return pin;
+}
+
+/* ---- Callable functions with tail calls ---------------------------------------------------
+ *
+ * One tail call, in each form, for every combination of a parameter count and the callee's
+ * argument count: the frame replacement is the part of a callable function that depends most
+ * on both. The parameters rotate through the three types. Nothing here is run. */
+
+Pin tail_pin(GRJIT_Arch arch, unsigned * pointer_calls, unsigned * functions) {
+  Pin pin;
+  unsigned id = 0;
+  unsigned checks = 0;
+  GRJIT_CallHooks hooks{};
+  hooks.push = reinterpret_cast<decltype(hooks.push)>(0x30000);
+  hooks.pop = reinterpret_cast<decltype(hooks.pop)>(0x30100);
+  hooks.compile = reinterpret_cast<decltype(hooks.compile)>(0x30200);
+  hooks.deopt = reinterpret_cast<decltype(hooks.deopt)>(0x30300);
+  hooks.tail = reinterpret_cast<decltype(hooks.tail)>(0x30400);
+  for (unsigned params : kParams) {
+    for (unsigned args : kArgs) {
+      for (unsigned form = 0; form < 3; form++, id++) {
+        B b("pin", 3);
+        b.callable(hooks);
+        EXPECT_EQ(grjit_builder_set_token(b.b, 3000 + id), GRJIT_OK);
+        b.poll_helper(kFakePoll);
+        const GRJIT_Type rotate[3] = {GRJIT_TYPE_I64, GRJIT_TYPE_REF, GRJIT_TYPE_PTR};
+        std::vector<GRJIT_VReg> p;
+        for (unsigned i = 0; i < params; i++) {
+          p.push_back(b.param(rotate[i % 3]));
+        }
+        b.at(b.block());
+        const GRCORE_PollIdentity at{3, id};
+        std::vector<GRJIT_FrameSlot> state = {grjit_frame_slot_constant(id),
+            params > 0 ? grjit_frame_slot_vreg(p[0]) : grjit_frame_slot_dead(),
+            params > 1 ? grjit_frame_slot_vreg(p[1]) : grjit_frame_slot_dead()};
+        std::vector<GRJIT_Operand> ops;
+        for (unsigned i = 0; i < args; i++) {
+          ops.push_back(i < params ? V(p[i]) : I(static_cast<int64_t>(i) * 3 + 1));
+        }
+        if (form == 0) {
+          b.tail_call_slot(reinterpret_cast<const void *>(0x40000 + 8 * id), 700 + id, ops, at, state);
+        } else if (form == 1 && params >= 3) {
+          b.tail_call_ptr(V(p[2]), 700 + id, ops, at, state);
+        } else {
+          b.tail_call_ptr(I(0x50000 + 16 * id), 700 + id, ops, at, state);
+        }
+        Fn f(b.finish());
+        char why[256];
+        EXPECT_EQ(grjit_function_verify(f, nullptr, why, sizeof why), GRJIT_OK) << id << why;
+        GRJIT_Emitted e;
+        GRJIT_Result res = grjit_emit_for(arch, f, grjit_allocator_default(), nullptr, nullptr, kRequestOffset, &e);
+        EXPECT_EQ(res, GRJIT_OK) << "tail function " << id << ": " << grjit_result_string(res);
+        if (res != GRJIT_OK) {
+          return pin;
+        }
+        std::vector<uint8_t> bytes(e.bytes, e.bytes + e.size);
+        checks += mask_target_check(arch, &bytes);
+        for (uint8_t byte : bytes) {
+          pin.hash = fold(pin.hash, byte);
+        }
+        pin.hash = fold(pin.hash, 0xFF);
+        pin.bytes += bytes.size();
+        grjit_emitted_free(&e);
+        *functions += 1;
       }
     }
   }
@@ -215,7 +327,7 @@ Pin callable_pin(unsigned * pointer_calls) {
 constexpr unsigned kNativeParams[] = {0, 1, 3, 7};
 constexpr unsigned kNativeArgs[] = {0, 1, 4, 5, 6, 7, 10, 16};
 
-Pin native_pin(unsigned * functions, bool * all_refused_elsewhere) {
+Pin native_pin(GRJIT_Arch arch, unsigned * functions, bool * all_refused_elsewhere) {
   Pin pin;
   unsigned id = 0;
   GRJIT_CallHooks hooks{};
@@ -313,7 +425,7 @@ Pin native_pin(unsigned * functions, bool * all_refused_elsewhere) {
             char why[256];
             EXPECT_EQ(grjit_function_verify(f, nullptr, why, sizeof why), GRJIT_OK) << id << why;
             GRJIT_Emitted e;
-            GRJIT_Result res = grjit_emit_for(GRJIT_ARCH_X86_64, f, grjit_allocator_default(),
+            GRJIT_Result res = grjit_emit_for(arch, f, grjit_allocator_default(),
                 nullptr, nullptr, kRequestOffset, &e);
             EXPECT_EQ(res, GRJIT_OK) << "function " << id << ": " << grjit_result_string(res);
             if (res != GRJIT_OK) {
@@ -325,10 +437,11 @@ Pin native_pin(unsigned * functions, bool * all_refused_elsewhere) {
             pin.hash = fold(pin.hash, 0xFF);
             pin.bytes += e.size;
             grjit_emitted_free(&e);
-            for (GRJIT_Arch arch : {GRJIT_ARCH_ARM64, GRJIT_ARCH_X86_64_WIN64}) {
+            {
+              /* Win64 refuses every one of them before a byte. */
               GRJIT_Emitted other;
-              if (grjit_emit_for(arch, f, grjit_allocator_default(), nullptr, nullptr, kRequestOffset, &other) !=
-                      GRJIT_ERR_UNSUPPORTED ||
+              if (grjit_emit_for(GRJIT_ARCH_X86_64_WIN64, f, grjit_allocator_default(), nullptr, nullptr,
+                      kRequestOffset, &other) != GRJIT_ERR_UNSUPPORTED ||
                   other.size != 0 || other.bytes != nullptr) {
                 *all_refused_elsewhere = false;
               }
@@ -356,8 +469,9 @@ TEST(Pin, TheX86_64CodeOfCallableFunctionsWithCallsAndNoTailCallIsByteForByteWha
   /* The bytes depend on the core's layout of the walk-start cell and the
    * native-stack limit (which the code stores to and reads); a change to those
    * offsets is a change to the code, and records a new pin. */
-  unsigned pointer_calls = 0;
-  Pin pin = callable_pin(&pointer_calls);
+  unsigned pointer_calls = 0, functions = 0;
+  Pin pin = callable_pin(GRJIT_ARCH_X86_64, &pointer_calls, &functions);
+  EXPECT_EQ(functions, 8u * 7u * 3u * 2u);
   EXPECT_EQ(pointer_calls, 8u * 7u * 2u * 2u) << "a call through a pointer per function of forms 1 and 2";
   std::printf("pin x86-64 callable: %llu bytes, hash %016llx\n",
       static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
@@ -370,11 +484,11 @@ TEST(Pin, TheX86_64CodeOfCallableFunctionsWithCallsToNativesIsByteForByteWhatWas
    * spec), and held from then on. */
   unsigned functions = 0;
   bool refused = false;
-  Pin pin = native_pin(&functions, &refused);
+  Pin pin = native_pin(GRJIT_ARCH_X86_64, &functions, &refused);
   std::printf("pin x86-64 natives: %u functions, %llu bytes, hash %016llx\n", functions,
       static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
   EXPECT_EQ(functions, 4u * 8u * 2u * 4u * 2u);
-  EXPECT_TRUE(refused) << "arm64 and Win64 refuse every one of them before a byte";
+  EXPECT_TRUE(refused) << "Win64 refuses every one of them before a byte";
   EXPECT_EQ(pin.hash, 0xd2d04cb10df6dce8ull) << pin.bytes << " bytes";
   EXPECT_EQ(pin.bytes, 355876u);
 }
@@ -385,6 +499,47 @@ TEST(Pin, TheArm64CodeOfTheGeneratedFunctionsIsByteForByteWhatWasRecorded) {
       static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
   EXPECT_EQ(pin.hash, 0xf250e0a928cf9231ull) << pin.bytes << " bytes";
   EXPECT_EQ(pin.bytes % 4, 0u);
+}
+
+TEST(Pin, TheArm64CodeOfCallableFunctionsWithCallsIsByteForByteWhatWasRecorded) {
+  /* Measured after the arm64 emitter of calls landed (story 7 of the calls spec), and held from
+   * then on: the code depends on the core's layout of the walk-start cell and the native-stack
+   * limit, which it stores to and reads. The same functions as the x86-64 pin above. */
+  unsigned pointer_calls = 0, functions = 0;
+  Pin pin = callable_pin(GRJIT_ARCH_ARM64, &pointer_calls, &functions);
+  EXPECT_EQ(functions, 8u * 7u * 3u * 2u);
+  EXPECT_EQ(pointer_calls, 8u * 7u * 2u * 2u) << "a call through a pointer per function of forms 1 and 2";
+  std::printf("pin arm64 callable: %u functions, %llu bytes, hash %016llx\n", functions,
+      static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
+  EXPECT_EQ(pin.bytes % 4, 0u);
+  EXPECT_EQ(pin.hash, 0x8ff93d28f8d8ec19ull) << pin.bytes << " bytes";
+  EXPECT_EQ(pin.bytes, 266492u);
+}
+
+TEST(Pin, TheArm64CodeOfCallableFunctionsWithTailCallsIsByteForByteWhatWasRecorded) {
+  /* Measured after the arm64 emitter of tail calls landed. */
+  unsigned pointer_calls = 0, functions = 0;
+  Pin pin = tail_pin(GRJIT_ARCH_ARM64, &pointer_calls, &functions);
+  EXPECT_EQ(functions, 8u * 7u * 3u);
+  EXPECT_EQ(pointer_calls, 8u * 7u * 2u) << "a target check per tail call through a pointer";
+  std::printf("pin arm64 tail calls: %u functions, %llu bytes, hash %016llx\n", functions,
+      static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
+  EXPECT_EQ(pin.bytes % 4, 0u);
+  EXPECT_EQ(pin.hash, 0x2d55af8cac9d87baull) << pin.bytes << " bytes";
+  EXPECT_EQ(pin.bytes, 110712u);
+}
+
+TEST(Pin, TheArm64CodeOfCallableFunctionsWithCallsToNativesIsByteForByteWhatWasRecorded) {
+  unsigned functions = 0;
+  bool refused = false;
+  Pin pin = native_pin(GRJIT_ARCH_ARM64, &functions, &refused);
+  std::printf("pin arm64 natives: %u functions, %llu bytes, hash %016llx\n", functions,
+      static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
+  EXPECT_EQ(functions, 4u * 8u * 2u * 4u * 2u);
+  EXPECT_TRUE(refused) << "Win64 refuses every one of them before a byte";
+  EXPECT_EQ(pin.bytes % 4, 0u);
+  EXPECT_EQ(pin.hash, 0xfc567e8f41a66ba7ull) << pin.bytes << " bytes";
+  EXPECT_EQ(pin.bytes, 332284u);
 }
 
 TEST(Pin, TheWin64CodeOfTheGeneratedFunctionsIsByteForByteWhatWasRecorded) {

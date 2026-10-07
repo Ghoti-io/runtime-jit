@@ -60,7 +60,7 @@ typedef struct GRJIT_Emitted {
   size_t size;
   GRJIT_MetaStorage meta;
   GRJIT_Prologue prologue; ///< x86-64 only: where the prologue's instructions end.
-  uint32_t internal_offset; ///< A callable function's internal entry (x86-64).
+  uint32_t internal_offset; ///< A callable function's internal entry (x86-64 and arm64).
   uint32_t regs_used;      ///< x86-64 only: bit r set if register r was encoded.
 } GRJIT_Emitted;
 

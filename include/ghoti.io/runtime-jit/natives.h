@@ -34,11 +34,14 @@
  * 64-bit integer-class word. The context is the pointer the code was called
  * with and is the **implicit first argument**: natives allocate, poll and
  * re-enter through it, so it is not an operand of the IR. On x86-64 SysV the
- * pair comes back in `rax:rdx` with no hidden pointer. (Win64 returns a 16-byte
- * struct through a hidden pointer and arm64 in `x0:x1`; their emission, which
- * story 7 of the calls spec adds, adapts to that and the descriptor does not
- * change.) A native with a floating-point or variadic signature cannot be
- * described, because the types a descriptor can name are the three words.
+ * pair comes back in `rax:rdx` with no hidden pointer, and on arm64 (AAPCS64) in
+ * `x0:x1`. (Win64 returns a 16-byte struct through a hidden pointer; its emission,
+ * which story 7b of the calls spec adds, adapts to that and the descriptor does not
+ * change.) The context and the first words travel in registers, six on x86-64 and
+ * eight on arm64, and the rest on the stack, in an area made by the call and popped
+ * by the caller, so the stack pointer is 16-aligned at the call. A native with a
+ * floating-point or variadic signature cannot be described, because the types a
+ * descriptor can name are the three words.
  *
  * **What a native may do.** Every native call is a GC point: the walk finds the
  * calling compiled frame, and the compiled frames below it, precisely, from the
@@ -65,10 +68,10 @@
  * and a rebuild of the survivors of an unwind, and **never interprets a status
  * beyond "non-zero"**: any other value is the engine's. **A status is a 32-bit
  * value**, ::GRJIT_NativeResult says so with a `uint32_t` and the call tests exactly
- * those 32 bits (`edx`): under SysV the upper half of `rdx` is padding that a native
- * returning a 32-bit status is free to leave as it likes, so it is never read, and a
- * status can neither be mistaken for zero nor alias another by a wide value. The cause
- * is `::GRJIT_CAUSE_NATIVE | status`, with nothing lost.
+ * those 32 bits (`edx`, or `w1` on arm64): the upper half of the register is padding that
+ * a native returning a 32-bit status is free to leave as it likes, so it is never read,
+ * and a status can neither be mistaken for zero nor alias another by a wide value. The
+ * cause is `::GRJIT_CAUSE_NATIVE | status`, with nothing lost.
  */
 
 #ifndef GHOTI_IO_GRJIT_NATIVES_H
@@ -91,8 +94,8 @@ extern "C" {
 
 /** @brief The result of a native with ::GRJIT_NATIVE_STATUS: the value, and the
  *  status (zero is ::GRJIT_NATIVE_OK). Two integer-class words, so on SysV they
- *  come back in `rax` and `rdx`; the second holds the 32-bit status in its low half
- *  and padding above it, which the call ignores. */
+ *  come back in `rax` and `rdx` and on arm64 in `x0` and `x1`; the second holds the
+ *  32-bit status in its low half and padding above it, which the call ignores. */
 typedef struct GRJIT_NativeResult {
   uint64_t value;    ///< The result; ignored for a native with no result.
   uint32_t status;   ///< Zero, or the reason compiled code leaves.
@@ -148,6 +151,15 @@ typedef struct GRJIT_NativeDesc {
                                ///< the stack arguments, lie above the stack limit.
                                ///< A re-entry checks for itself. At most
                                ///< `GRJIT_Limits::max_native_stack_bytes`.
+                               ///< **The one formula, on every target:** the call is
+                               ///< an exit before it unless `sp_before_call - S -
+                               ///< stack_bytes` is not below the limit, `S` being the
+                               ///< stack-argument area. On x86-64 the pushed return
+                               ///< address is inside `stack_bytes`; on arm64 it is in
+                               ///< `x30` and not on the stack, so a native there has
+                               ///< eight bytes more than it declared. That is
+                               ///< deliberate (the check is one `sub` and one compare
+                               ///< on both), and the byte-exact tests name it.
 } GRJIT_NativeDesc;
 
 /** @brief The natives an engine has registered. Opaque. */

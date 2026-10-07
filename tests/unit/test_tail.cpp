@@ -1,7 +1,7 @@
 /**
  * @file
  *
- * Tail calls between compiled functions (AD-28, CAP-8) on x86-64 SysV: the
+ * Tail calls between compiled functions (AD-28, CAP-8) on x86-64 SysV and arm64: the
  * frame replacement for every pair of stack-argument counts, constant native
  * and guest stack in a million-deep recursion, the `tail` hook's refusals, the
  * deoptimization of a function a tail call entered, collections in the hook,
@@ -23,12 +23,11 @@
 
 using namespace fx;
 
-/* Tail calls are emitted for x86-64 SysV only (arm64 and Win64 are story 7's).
- * Where they are not, a test does not skip, which would count as a test that
- * proved nothing: it shows the refusal instead, which is what those targets
- * promise. */
-#if defined(__x86_64__) && defined(__linux__)
-#define TAIL_ONLY_ON_X86_64_SYSV() (void)0
+/* Tail calls are emitted for x86-64 SysV and arm64 (Win64 is story 7b's). Where they are
+ * not, a test does not skip, which would count as a test that proved nothing: it shows the
+ * refusal instead, which is what that target promises. */
+#if FX_HAVE_CALLS_ASM
+#define TAIL_ONLY_WHERE_EMITTED() (void)0
 #else
 namespace {
 void expect_tail_refused_here() {
@@ -49,7 +48,7 @@ void expect_tail_refused_here() {
   EXPECT_FALSE(c);
 }
 } // namespace
-#define TAIL_ONLY_ON_X86_64_SYSV() \
+#define TAIL_ONLY_WHERE_EMITTED() \
   do { \
     expect_tail_refused_here(); \
     return; \
@@ -168,7 +167,7 @@ int add_outer(Engine & e, int params, int caller, int callee, int t_args) {
 } // namespace
 
 TEST(Tail, EveryPairOfCallerParametersAndCalleeArgumentsFromZeroToSixteenArrivesIntactInConstantStack) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   long pairs = 0;
   for (int through_pointer = 0; through_pointer < 2; through_pointer++) {
     for (int params = 0; params <= 16; params++) {
@@ -231,7 +230,7 @@ TEST(Tail, EveryPairOfCallerParametersAndCalleeArgumentsFromZeroToSixteenArrives
 }
 
 TEST(Tail, ASelfRecursionAMillionDeepRunsInConstantNativeStackAndGuestDepth) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   Engine e(GRCORE_UNLIMITED, /*native_bytes=*/64 * 1024, /*conv=*/true); // converting: the reservation is real
   int loop = add_countdown(e, kMillion);
   Outcome i = e.run_interpreted(loop, {static_cast<u64>(kMillion), 0});
@@ -344,7 +343,7 @@ void expect_constant(const Engine & e, size_t probes) {
 } // namespace
 
 TEST(Tail, MutualRecursionAMillionDeepThroughSlotsAndThroughPointersRunsInConstantStack) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   for (int through_pointer = 0; through_pointer < 2; through_pointer++) {
     for (int64_t n : {kMillion, kMillion + 1}) {
       SCOPED_TRACE(testing::Message() << (through_pointer ? "pointer " : "slot ") << n);
@@ -430,7 +429,7 @@ void add_narrow_wide(Engine & e, int64_t first, int * narrow_out, int * wide_out
 } // namespace
 
 TEST(Tail, APingPongBetweenANarrowAndAWideFunctionAMillionDeepLeavesTheStackWhereItWas) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   Engine e(GRCORE_UNLIMITED, 64 * 1024, /*conv=*/true); // converting: the reservation is real
   int narrow, wide;
   add_narrow_wide(e, kMillion, &narrow, &wide);
@@ -471,7 +470,7 @@ int add_tail_to(Engine & e, int target) {
 } // namespace
 
 TEST(Tail, AnEmptySlotIsCompiledAtTheTailCallAndEnteredDirectlyAfterwards) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   Engine e;
   int target = add_inc2(e);
   int top = add_tail_to(e, target);
@@ -492,7 +491,7 @@ TEST(Tail, AnEmptySlotIsCompiledAtTheTailCallAndEnteredDirectlyAfterwards) {
 }
 
 TEST(Tail, ASlotThatCannotBeFilledIsAnExitRememberedAndTheInterpreterMakesTheTailCall) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   Engine e;
   int target = add_inc2(e);
   int top = add_tail_to(e, target);
@@ -514,7 +513,7 @@ TEST(Tail, ASlotThatCannotBeFilledIsAnExitRememberedAndTheInterpreterMakesTheTai
 }
 
 TEST(Tail, AHookThatSaysItInstalledButLeftTheSlotEmptyIsAnExitNotAnEntry) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   Engine e;
   int target = add_inc2(e);
   int top = add_tail_to(e, target);
@@ -527,7 +526,7 @@ TEST(Tail, AHookThatSaysItInstalledButLeftTheSlotEmptyIsAnExitNotAnEntry) {
 }
 
 TEST(Tail, APointerInARegisterOrAnImmediateIsEnteredAndTheResultIsTheInterpreters) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   Engine e;
   int target = add_inc2(e);
   ASSERT_TRUE(e.compile_fn(target));
@@ -579,7 +578,7 @@ int add_tail_ptr_caller(Engine & e, int target, int token, int n) {
 } // namespace
 
 TEST(Tail, APointerToAnotherFunctionOrOfAnotherArityIsRefusedAtTheTailSiteAndNeverEntered) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   Engine e;
   int c2 = add_callee(e, 2);
   int c8 = add_callee(e, 8);
@@ -645,7 +644,7 @@ TEST(Tail, APointerToAnotherFunctionOrOfAnotherArityIsRefusedAtTheTailSiteAndNev
 }
 
 TEST(Tail, APointerIntoCodeThatWasRetiredIsRefusedAtTheTailSiteEvenWhileItStillMaps) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   Engine e;
   int target = add_inc2(e);
   ASSERT_TRUE(e.compile_fn(target));
@@ -667,7 +666,7 @@ TEST(Tail, APointerIntoCodeThatWasRetiredIsRefusedAtTheTailSiteEvenWhileItStillM
 }
 
 TEST(Tail, ASlotClearedBeforeTheTailCallIsCompiledAgainAtTheCall) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   Engine e;
   int target = add_inc2(e);
   ASSERT_TRUE(e.compile_fn(target));
@@ -741,7 +740,7 @@ uint64_t tsum(int64_t n) { return static_cast<uint64_t>(n) * (n + 1) / 2 + 7; }
 } // namespace
 
 TEST(Tail, AGuardInTheFirstOperationOfAFunctionATailCallEnteredRebuildsTheChainAndTheInterpreterFinishes) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   for (int through_pointer = 0; through_pointer < 2; through_pointer++) {
     SCOPED_TRACE(through_pointer ? "pointer" : "slot");
     Engine e;
@@ -767,7 +766,7 @@ TEST(Tail, AGuardInTheFirstOperationOfAFunctionATailCallEnteredRebuildsTheChainA
 }
 
 TEST(Tail, AGuardAfterAHundredThousandTailCallsFindsExactlyTheCallersAndTheCalleeInTheChain) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   const int64_t n = 100010;
   for (int through_pointer = 0; through_pointer < 2; through_pointer++) {
     SCOPED_TRACE(through_pointer ? "pointer" : "slot");
@@ -793,7 +792,7 @@ TEST(Tail, AGuardAfterAHundredThousandTailCallsFindsExactlyTheCallersAndTheCalle
 }
 
 TEST(Tail, APollThatPausesInAFunctionATailCallEnteredCarriesTheAnswerAndRebuildsTheChain) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   for (int through_pointer = 0; through_pointer < 2; through_pointer++) {
     SCOPED_TRACE(through_pointer ? "pointer" : "slot");
     Engine e;
@@ -819,7 +818,7 @@ TEST(Tail, APollThatPausesInAFunctionATailCallEnteredCarriesTheAnswerAndRebuilds
 }
 
 TEST(Tail, ARebuildTheEngineRefusesAtATailSitesExitIsTheFatalExitWithNothingWritten) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   for (int through_pointer = 0; through_pointer < 2; through_pointer++) {
     for (int refuse : {0, 1}) {
       SCOPED_TRACE(testing::Message() << (through_pointer ? "pointer " : "slot ") << refuse);
@@ -851,7 +850,7 @@ TEST(Tail, ARebuildTheEngineRefusesAtATailSitesExitIsTheFatalExitWithNothingWrit
 }
 
 TEST(Tail, EveryTailCallReplacesTheReservationExtensionSoARebuildNeverFailsAndOneCellShortIsRefused) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   for (long short_by : {0L, 1L}) {
     SCOPED_TRACE(short_by);
     Engine e(GRCORE_UNLIMITED, GRCORE_UNLIMITED, /*conv=*/true);
@@ -881,7 +880,7 @@ TEST(Tail, EveryTailCallReplacesTheReservationExtensionSoARebuildNeverFailsAndOn
 /* ---- The hook refuses ------------------------------------------------------------- */
 
 TEST(Tail, AFrameThatOwnsAScopeRefusesItsTailCallThroughAnExitAndTheInterpreterMakesItAsACall) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   Engine e;
   int tc = add_tchain(e, -1);
   int scoped = e.reserve();
@@ -927,7 +926,7 @@ TEST(Tail, AFrameThatOwnsAScopeRefusesItsTailCallThroughAnExitAndTheInterpreterM
 }
 
 TEST(Tail, TheNthTailCallRefusedIsAnExitThatIsNotCountedAndTheInterpreterReachesTheSameValue) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   for (long nth : {1L, 2L, 5L, 19L}) {
     SCOPED_TRACE(nth);
     Engine e;
@@ -948,7 +947,7 @@ TEST(Tail, TheNthTailCallRefusedIsAnExitThatIsNotCountedAndTheInterpreterReaches
 }
 
 TEST(Tail, AReservationExtensionTheAllocatorRefusesIsAnExitAtTheTailSiteAndNothingIsHalfDone) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   TrackingAllocator tracker;
   Engine e(GRCORE_UNLIMITED, GRCORE_UNLIMITED, /*conv=*/true, tracker.get());
   int tc = add_tchain(e, -1);
@@ -987,7 +986,7 @@ TEST(Tail, AReservationExtensionTheAllocatorRefusesIsAnExitAtTheTailSiteAndNothi
 }
 
 TEST(Tail, ARefusedTailHookCostsTheCallerNothingAgainstItsDiscardLimitButAGuardDoes) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   Engine e;
   e.discard_limit = 3;
   int tc = add_tchain(e, -1);
@@ -1032,7 +1031,7 @@ int add_plain_rec(Engine & e) {
 } // namespace
 
 TEST(Tail, ATailRecursionAMillionDeepFitsADepthLimitOfOneHundredAndANonTailOneHitsItAtTheSameDepthInBothTiers) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   Engine e(/*guest_depth=*/100);
   int loop = add_countdown(e, kMillion);
   Outcome i = e.run_interpreted(loop, {static_cast<u64>(kMillion), 0});
@@ -1076,7 +1075,7 @@ uint64_t exact_budget(const std::function<int(Engine &)> & build, const std::vec
 } // namespace
 
 TEST(Tail, ABudgetThatFitsTheFirstFrameExactlyNeverDeoptimizesAMillionTailCallsAndOneByteLessDoes) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   auto build = [](Engine & e) { return add_countdown(e, kMillion); };
   const uint64_t exact = exact_budget(build, {static_cast<u64>(kMillion), 0});
   {
@@ -1138,7 +1137,7 @@ int add_small_big(Engine & e, int big_locals, int * small_out) {
 } // namespace
 
 TEST(Tail, ACalleeWhoseFrameDoesNotFitDeoptimizesOnceAtItsPrologueAndTheInterpreterFinishes) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   // The budget is exactly small's first frame.
   uint64_t budget = 0;
   {
@@ -1184,7 +1183,7 @@ TEST(Tail, ACalleeWhoseFrameDoesNotFitDeoptimizesOnceAtItsPrologueAndTheInterpre
 /* ---- A frame replaced while its code is retired ----------------------------------------- */
 
 TEST(Tail, AFunctionThatClearsItsOwnSlotAndTailCallsLeavesItsCodeRetiredUntilTheActivationLeaves) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   Engine e;
   int target = add_inc2(e);
   ASSERT_TRUE(e.compile_fn(target));
@@ -1205,7 +1204,7 @@ TEST(Tail, AFunctionThatClearsItsOwnSlotAndTailCallsLeavesItsCodeRetiredUntilThe
 /* ---- Collections in the hook: every kind of argument, every reference updated ----- */
 
 TEST(Tail, ArgumentsOfAllThreeTypesTailCalledAtEveryCountAndCallerWidthArriveIntactUnderCollection) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   // callee(a0 ... a{n-1}) with a_i an I64, a REF or a PTR (a pointer derived from
   // a reference, into the object) in turn, returning the sum of (i + 1) times
   // each one's value. The caller makes them and tail-calls, and the tail hook
@@ -1309,7 +1308,7 @@ TEST(Tail, ArgumentsOfAllThreeTypesTailCalledAtEveryCountAndCallerWidthArriveInt
 }
 
 TEST(Tail, ARefusedTailHookThatCollectedLeavesTheExitStatesReferencesUpdated) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   // The hook collects, moving every object, and then refuses: the exit rebuilds
   // the frame from the slots the collection updated, because the hook's site map
   // names everything the exit's state does.
@@ -1347,7 +1346,7 @@ TEST(Tail, ARefusedTailHookThatCollectedLeavesTheExitStatesReferencesUpdated) {
 /* ---- The fixture's two planted defects, each with a control ------------------------ */
 
 TEST(Tail, AHookThatKeepsTheCallersFrameIsSeenByTheDepthBudgetAndTheControlIsNot) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   for (int planted = 0; planted < 2; planted++) {
     SCOPED_TRACE(planted ? "planted: the frame is kept" : "control");
     Engine e(/*guest_depth=*/100);
@@ -1372,7 +1371,7 @@ TEST(Tail, AHookThatKeepsTheCallersFrameIsSeenByTheDepthBudgetAndTheControlIsNot
 }
 
 TEST(Tail, AHookThatKeepsTheCallersReservationExtensionIsSeenInTheCapacityAndTheControlIsNot) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   for (int planted = 0; planted < 2; planted++) {
     SCOPED_TRACE(planted ? "planted: the extension is kept" : "control");
     Engine e(GRCORE_UNLIMITED, GRCORE_UNLIMITED, /*conv=*/true);
@@ -1393,7 +1392,7 @@ TEST(Tail, AHookThatKeepsTheCallersReservationExtensionIsSeenInTheCapacityAndThe
 }
 
 TEST(Tail, TheCapacityIsConstantInAMillionTailCallsForAnEngineWhoseExtensionsAreNotNothing) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   Engine e(GRCORE_UNLIMITED, 64 * 1024, /*conv=*/true);
   int loop = add_countdown(e, kMillion);
   ASSERT_TRUE(e.compile_fn(loop));
@@ -1537,7 +1536,7 @@ TEST(Tail, ACollectionInAFiftyDeepChainAfterWideningAndNarrowingTailCallsSeesEve
   // Narrowing: a function of twelve parameters tail-calls one of one. Widening: a
   // function of one tail-calls one of twelve. Either way, relocation (a moving
   // collection at every GC point) happens with the replaced frames in the chain.
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   for (int variant = 0; variant < 4; variant++) {
     const bool through_pointer = variant % 2 != 0;
     const bool widen = variant >= 2;
@@ -1743,7 +1742,7 @@ void generate_tail(Engine & e, std::mt19937 & rng, int n, std::vector<int> * fns
 } // namespace
 
 TEST(Tail, GeneratedProgramsOfCallsAndTailCallsAgreeWithTheInterpreterAcrossCollectionsGuardsAndRefusals) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   long deopted = 0, direct = 0, tails = 0, refused = 0, pointer_tails = 0;
   for (unsigned seed = 0; seed < 200; seed++) {
     SCOPED_TRACE(seed);
@@ -1804,8 +1803,8 @@ uint32_t h_noop(void *, uint64_t) { return 0; }
 
 /* The metadata's frame size of a callable function of `params` parameters and no
  * other register whose only operation is a tail call with `t_args` immediate
- * arguments, or, for `t_args < 0`, a return. */
-uint32_t frame_bytes_of(int params, int t_args) {
+ * arguments, or, for `t_args < 0`, a return, emitted for `arch`. */
+uint32_t frame_bytes_of(GRJIT_Arch arch, int params, int t_args) {
   B b("shape", 1);
   GRJIT_CallHooks h{};
   h.push = h_noop_push;
@@ -1827,9 +1826,7 @@ uint32_t frame_bytes_of(int params, int t_args) {
   }
   Fn f(b.finish());
   GRJIT_Emitted e;
-  EXPECT_EQ(grjit_emit_for(GRJIT_ARCH_X86_64, f, grjit_allocator_default(), nullptr, nullptr,
-                0x40, &e),
-      GRJIT_OK);
+  EXPECT_EQ(grjit_emit_for(arch, f, grjit_allocator_default(), nullptr, nullptr, 0x40, &e), GRJIT_OK);
   uint32_t bytes = e.meta.meta.frame_bytes;
   grjit_emitted_free(&e);
   return bytes;
@@ -1841,36 +1838,42 @@ TEST(Tail, TheFramesPaddingIsExactlyWhatTheStagingAreaNeedsAndNoFunctionWithoutA
   // A function with `params` parameters has 3 fixed slots and one per register;
   // its tail call to a callee of `t` arguments stages them in an area of `t`
   // slots and keeps the entry in one more. The area must end at or below where the
-  // return address goes, `8 + in_A - in_T` above the frame base; the padding is the
-  // least that makes it so, which is shown here from the frame sizes alone.
-  for (int params = 0; params <= 16; params++) {
-    for (int t = 0; t <= 16; t++) {
-      SCOPED_TRACE(testing::Message() << "params=" << params << " t=" << t);
-      auto in_bytes = [](int n) { return n > 6 ? (n - 6) * 8 + ((n - 6) % 2) * 8 : 0; };
-      const int in_a = in_bytes(params);
-      const int in_t = in_bytes(t);
-      const int slots_without_pad = params + 3 + t + 1;
-      const int want_pad = std::max(0, (in_t - in_a) / 8 - (params + 4));
-      const uint32_t frame = frame_bytes_of(params, t);
-      EXPECT_EQ(frame, static_cast<uint32_t>((slots_without_pad + want_pad) * 8 + 15) / 16 * 16);
-      // The area's end is `8 * (params + 3 + pad)` below the base; the return
-      // address goes `8 + in_a - in_t` above it. The area ends at or below it...
-      EXPECT_LE(-8 * (params + 3 + want_pad), 8 + in_a - in_t);
-      // ...and with one slot less of padding it would not (when there is any).
-      if (want_pad > 0) {
-        EXPECT_GT(-8 * (params + 3 + want_pad - 1), 8 + in_a - in_t);
+  // return address goes (on x86-64; on arm64 there is none, and the same place is
+  // conservative by one slot), `8 + in_A - in_T` above the frame base; the padding is the
+  // least that makes it so, which is shown here from the frame sizes alone, for each target's
+  // own count of arguments in registers (six, and eight).
+  for (GRJIT_Arch arch : {GRJIT_ARCH_X86_64, GRJIT_ARCH_ARM64}) {
+    const int regs = arch == GRJIT_ARCH_ARM64 ? 8 : 6;
+    SCOPED_TRACE(arch);
+    for (int params = 0; params <= 16; params++) {
+      for (int t = 0; t <= 16; t++) {
+        SCOPED_TRACE(testing::Message() << "params=" << params << " t=" << t);
+        auto in_bytes = [regs](int n) { return n > regs ? (n - regs) * 8 + ((n - regs) % 2) * 8 : 0; };
+        const int in_a = in_bytes(params);
+        const int in_t = in_bytes(t);
+        const int slots_without_pad = params + 3 + t + 1;
+        const int want_pad = std::max(0, (in_t - in_a) / 8 - (params + 4));
+        const uint32_t frame = frame_bytes_of(arch, params, t);
+        EXPECT_EQ(frame, static_cast<uint32_t>((slots_without_pad + want_pad) * 8 + 15) / 16 * 16);
+        // The area's end is `8 * (params + 3 + pad)` below the base; the return
+        // address goes `8 + in_a - in_t` above it. The area ends at or below it...
+        EXPECT_LE(-8 * (params + 3 + want_pad), 8 + in_a - in_t);
+        // ...and with one slot less of padding it would not (when there is any).
+        if (want_pad > 0) {
+          EXPECT_GT(-8 * (params + 3 + want_pad - 1), 8 + in_a - in_t);
+        }
       }
+      // A function with no tail call has no padding at all: the frame of 3 slots, its
+      // registers, and nothing else.
+      EXPECT_EQ(frame_bytes_of(arch, params, -1), static_cast<uint32_t>((params + 3) * 8 + 15) / 16 * 16);
     }
-    // A function with no tail call has no padding at all: the frame of 3 slots, its
-    // registers, and nothing else.
-    EXPECT_EQ(frame_bytes_of(params, -1), static_cast<uint32_t>((params + 3) * 8 + 15) / 16 * 16);
   }
 }
 
 /* ---- The guest stack has no room for the callee's larger frame: a memory refusal ----- */
 
 TEST(Tail, AMemoryBudgetThatCannotGrowTheGuestStackForALargerCalleeRefusesTheHookAndTheInterpreterReachesTheSameVerdict) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   // small(n) tail-calls big(n), whose guest frame (2000 locals) is far larger than
   // small's, so the hook has to make room (grcore_stack_reserve) before it
   // replaces the frame. The memory budget is swept from what the context holds
@@ -1933,7 +1936,7 @@ TEST(Tail, AMemoryBudgetThatCannotGrowTheGuestStackForALargerCalleeRefusesTheHoo
 /* ---- References and derived pointers staged in a padded frame ------------------------ */
 
 TEST(Tail, AReferenceAndADerivedPointerStagedInAFramePaddedForALargerCalleeAreUpdatedByTheHooksCollection) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   // A caller of no parameters whose only locals are an object and a pointer into
   // it, tail-calling a callee of n arguments (the object, the pointer, then
   // immediates): for n of 14 and 16 the callee's stack arguments reach below the
@@ -1944,7 +1947,7 @@ TEST(Tail, AReferenceAndADerivedPointerStagedInAFramePaddedForALargerCalleeAreUp
   Engine e;
   e.torture = true;
   for (int through_pointer = 0; through_pointer < 2; through_pointer++) {
-    for (int n : {8, 12, 13, 14, 16}) {
+    for (int n : {8, 12, 13, 14, 15, 16}) {
       SCOPED_TRACE(testing::Message() << (through_pointer ? "pointer" : "slot") << " n=" << n);
       std::vector<GRJIT_Type> types = {GRJIT_TYPE_REF, GRJIT_TYPE_PTR};
       types.resize(static_cast<size_t>(n), GRJIT_TYPE_I64);
@@ -2046,7 +2049,7 @@ int add_small_big3(Engine & e, bool tail, int * small_out) {
 } // namespace
 
 TEST(Tail, ACalleeThatCannotStartIsFinishedByTheInterpreterFromTheGuestFrameTheHookMadeWithEveryArgument) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   // The budget is exactly small's first frame, so big, whose frame is larger, runs
   // out of native stack in its prologue: its guest frame, made by the hook, is at its
   // entry, and the interpreter runs it from the arguments the hook put there. Three
@@ -2087,7 +2090,7 @@ TEST(Tail, ACalleeThatCannotStartIsFinishedByTheInterpreterFromTheGuestFrameTheH
 /* ---- An address nothing registered is refused whatever tag it carries ---------------- */
 
 TEST(Tail, AnAddressThatIsNotRegisteredCodeOfThisContextIsRefusedEvenWithAValidTag) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   // The tag before an entry (magic and parameter count, then the token) is what
   // a call through a pointer checks beside the registry; forged, on the heap or
   // copied from code of another context, it must still not get the address
@@ -2142,7 +2145,7 @@ TEST(Tail, AnAddressThatIsNotRegisteredCodeOfThisContextIsRefusedEvenWithAValidT
 /* ---- The two sites of a tail call, read from the metadata -------------------------- */
 
 TEST(Tail, TheHooksSiteNamesTheArgumentsAndTheExitsSiteOnlyWhatItsStateNames) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   // The exit before the replacement leaves the frame, so its map is the state's
   // registers alone; the hook's is those, the argument registers, and the arguments
   // area's entry for the argument that is a reference. (An exit built from the
@@ -2191,7 +2194,7 @@ TEST(Tail, TheHooksSiteNamesTheArgumentsAndTheExitsSiteOnlyWhatItsStateNames) {
 #if FX_HAVE_CALLS_ASM
 
 TEST(Tail, AHooksAnswerIsItsLowThirtyTwoBitsWhateverTheRegisterHoldsAbove) {
-  TAIL_ONLY_ON_X86_64_SYSV();
+  TAIL_ONLY_WHERE_EMITTED();
   // The hook returns a uint32_t, so the upper half of rax is the callee's to leave as
   // it likes. Zero with garbage above is success, and one with garbage above is a
   // refusal; testing all of rax would read the first as a refusal on every call.

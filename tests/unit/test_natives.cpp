@@ -36,11 +36,10 @@ static_assert(kInternalRegArgs == GRJIT_ARM64_INTERNAL_REG_ARGS, "the test's cou
 static_assert(kInternalRegArgs == GRJIT_SYSV_INTERNAL_REG_ARGS, "the test's count is the library's");
 #endif
 
-/* Native calls are emitted for x86-64 SysV only (arm64 and Win64 are story 7's).
- * Where they are not, the suite does not skip, which would count as tests that
- * proved nothing: it shows the refusal instead, which is what those targets
- * promise. */
-#if defined(__x86_64__) && defined(__linux__)
+/* Native calls are emitted for x86-64 SysV and arm64 (Win64 is story 7b's). Where they are
+ * not, the suite does not skip, which would count as tests that proved nothing: it shows
+ * the refusal instead, which is what that target promises. */
+#if FX_HAVE_CALLS_ASM
 
 namespace {
 
@@ -2775,20 +2774,23 @@ TEST(Natives, AReferenceAndADerivedPointerLiveAcrossANativeInAFramePaddedForAWid
     e.set(wide, p.done());
   }
   {
-    // narrow has no parameters and few registers: the frame is padded so that the staging area clears
-    // the place the callee's stack arguments go. Its reference and its derived pointer are live across
-    // collecting natives, and read afterwards to make the callee's arguments.
+    // narrow has no parameters and three registers (the least that holds its reference, its derived
+    // pointer and a value, so that the frame is padded on every target: arm64 passes eight arguments
+    // in registers, so its callee's stack arguments reach less far): the frame is padded so that the
+    // staging area clears the place the callee's stack arguments go. The reference and the derived
+    // pointer are live across collecting natives, and both are read afterwards (a stale one is
+    // poison); the value they leave is every argument.
     P p("narrow", {});
-    int obj = p.local(GRJIT_TYPE_REF), dp = p.local(GRJIT_TYPE_PTR), a = p.local(), b = p.local(), z = p.local();
+    int obj = p.local(GRJIT_TYPE_REF), dp = p.local(GRJIT_TYPE_PTR), a = p.local();
     p.nw(obj, 6);
     p.derive(dp, obj, 8);
-    p.native(z, n.collect, {});
-    p.native(z, n.collect, {});
+    p.native(a, n.collect, {});
+    p.native(a, n.collect, {});
     p.get(a, obj);
-    p.load(b, dp);
+    p.load(a, dp);
     std::vector<int> args;
     for (int i = 0; i < 16; i++) {
-      args.push_back(i % 2 == 0 ? a : b);
+      args.push_back(a);
     }
     p.tailcall(wide, args);
     e.set(narrow, p.done());
@@ -2821,7 +2823,7 @@ TEST(Natives, AReferenceAndADerivedPointerLiveAcrossANativeInAFramePaddedForAWid
 
 /* ---- The other backends ---------------------------------------------------------------- */
 
-TEST(Natives, OnlyTheX86_64SysVBackendEmitsANativeCallAndTheOthersRefuseBeforeAByte) {
+TEST(Natives, Win64RefusesANativeCallBeforeAByteAndTheOtherTwoEmitItOnAnyHost) {
   NativeTab t;
   uint32_t id = t.add(reinterpret_cast<const void *>(sums()[1]), {GRJIT_TYPE_I64}, GRJIT_TYPE_I64);
   B b("native", 1);
@@ -2833,14 +2835,16 @@ TEST(Natives, OnlyTheX86_64SysVBackendEmitsANativeCallAndTheOthersRefuseBeforeAB
   b.ret(V(x));
   Fn f(b.finish());
   GRJIT_Emitted e;
-  EXPECT_EQ(grjit_emit_for(GRJIT_ARCH_X86_64, f, grjit_allocator_default(), nullptr, nullptr, 0x40, &e), GRJIT_OK);
-  EXPECT_GT(e.size, 0u);
-  grjit_emitted_free(&e);
-  for (GRJIT_Arch arch : {GRJIT_ARCH_ARM64, GRJIT_ARCH_X86_64_WIN64}) {
-    EXPECT_EQ(grjit_emit_for(arch, f, grjit_allocator_default(), nullptr, nullptr, 0x40, &e), GRJIT_ERR_UNSUPPORTED);
-    EXPECT_EQ(e.size, 0u);
-    EXPECT_EQ(e.bytes, nullptr);
+  for (GRJIT_Arch arch : {GRJIT_ARCH_X86_64, GRJIT_ARCH_ARM64}) {
+    EXPECT_EQ(grjit_emit_for(arch, f, grjit_allocator_default(), nullptr, nullptr, 0x40, &e), GRJIT_OK) << arch;
+    EXPECT_GT(e.size, 0u);
+    grjit_emitted_free(&e);
   }
+  TrackingAllocator alloc;
+  EXPECT_EQ(grjit_emit_for(GRJIT_ARCH_X86_64_WIN64, f, alloc.get(), nullptr, nullptr, 0x40, &e), GRJIT_ERR_UNSUPPORTED);
+  EXPECT_EQ(e.size, 0u);
+  EXPECT_EQ(e.bytes, nullptr);
+  EXPECT_EQ(alloc.calls, 0) << "and nothing was even asked for";
   EXPECT_TRUE(grjit_backend_calls_available());
 }
 
