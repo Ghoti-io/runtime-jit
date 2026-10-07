@@ -1655,8 +1655,16 @@ inline Outcome Engine::run_compiled_core(int fn, const std::vector<u64> & args, 
   }
   last_native_limit = grcore_context_native_limit(ctx);
   GRCORE_ActivationRef rec;
-  EXPECT_EQ(grcore_activation_enter(stack, GRCORE_ACTIVATION_JIT, engine, false, nullptr, &rec),
-      GRCORE_OK);
+  if (grcore_activation_enter(stack, GRCORE_ACTIVATION_JIT, engine, false, nullptr, &rec) != GRCORE_OK) {
+    // The native-depth budget is full: the JIT record is refused (it enters that budget like any
+    // other), so the compiled code never runs. What was pushed for it is given back, and the run
+    // ends as an unwind, which a nested run's native reports by its status.
+    reset_reservation();
+    pop_frame();
+    out.unwound = true;
+    out.frames_left = grcore_stack_frame_count(stack) - base_frames;
+    return out;
+  }
   const GRJIT_Code * code = C(fn).code;
   std::vector<u64> in(std::max<size_t>(args.size(), grjit_code_param_count(code)), 0);
   for (size_t i = 0; i < args.size(); i++) {

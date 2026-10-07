@@ -1817,57 +1817,65 @@ TEST(Natives, ABudgetOneByteEitherSideOfTheCallsNeedMakesTheCallOrAnExitBeforeIt
 
 /* ---- The native-depth budget ------------------------------------------------------------------ */
 
+namespace {
+
+/* R(x) logs x and, above zero, re-enters R(x - 1) through a native that opens a REENTRY record (and, for
+ * `nest_compiled`, enters compiled code, whose JIT record is a second unit): both enter the native-depth
+ * budget. T catches the unwind a refusal ends in. The number of times R ran, which is what the trace holds. */
+size_t levels_entered(bool compiled_outer, bool nest_compiled, uint64_t depth_budget, u64 * value, bool * finished) {
+  Engine e(GRCORE_UNLIMITED, GRCORE_UNLIMITED, false, nullptr, GRCORE_UNLIMITED, depth_budget);
+  Nat n = register_natives(e);
+  int r = e.reserve(), t = e.reserve();
+  {
+    P p("R", {GRJIT_TYPE_I64});
+    int l = p.local(), z = p.local(), c = p.local(), rid = p.local(), x1 = p.local(), one = p.local(), res = p.local();
+    p.native(l, n.log, {0});
+    p.cnst(z, 0);
+    p.bin(K::EQ, c, 0, z);
+    int more = p.brz(c);
+    p.ret(z);
+    p.patch(more, p.here());
+    p.cnst(one, 1);
+    p.bin(K::SUB, x1, 0, one);
+    p.cnst(rid, r);
+    p.native(res, nest_compiled ? n.reenter_c : n.reenter_i, {rid, x1});
+    p.ret(res);
+    e.set(r, p.done());
+  }
+  {
+    P p("T", {GRJIT_TYPE_I64});
+    int v = p.local(), h = p.local(), s = p.local();
+    p.call(v, r, {0});
+    p.cnst(h, 7);
+    p.bin(K::ADD, s, v, h);
+    p.ret(s);
+    Func f = p.done();
+    f.catches = true;
+    e.set(t, f);
+  }
+  e.trace.clear();
+  Outcome o = compiled_outer ? e.run_compiled(t, {20}) : e.run_interpreted(t, {20});
+  *value = o.value;
+  *finished = o.finished;
+  EXPECT_EQ(grcore_activation_count(e.stack), 0u) << "every record is left, refused or not";
+  EXPECT_EQ(e.st.pushes, e.st.pops);
+  EXPECT_EQ(o.frames_left, 0u);
+  return e.trace.size();
+}
+
+} // namespace
+
 TEST(Natives, ARefusedRecordMakesTheNativeReturnUnwindAndTheVerdictIsTheInterpretedRunsAtTheSameNesting) {
-  // R(x) logs x and, below zero, re-enters R(x - 1) through a native that opens a REENTRY record, which
-  // enters the native-depth budget; T catches the unwind a refusal ends in. A compiled outer run has one
-  // more record open (its own JIT record) than an interpreted one, so the same nesting is reached with
-  // a budget one larger, and with the same budget one level sooner.
-  auto levels_entered = [](bool compiled_outer, uint64_t depth_budget, u64 * value, bool * finished) {
-    Engine e(GRCORE_UNLIMITED, GRCORE_UNLIMITED, false, nullptr, GRCORE_UNLIMITED, depth_budget);
-    Nat n = register_natives(e);
-    int r = e.reserve(), t = e.reserve();
-    {
-      P p("R", {GRJIT_TYPE_I64});
-      int l = p.local(), z = p.local(), c = p.local(), rid = p.local(), x1 = p.local(), one = p.local(), res = p.local();
-      p.native(l, n.log, {0});
-      p.cnst(z, 0);
-      p.bin(K::EQ, c, 0, z);
-      int more = p.brz(c);
-      p.ret(z);
-      p.patch(more, p.here());
-      p.cnst(one, 1);
-      p.bin(K::SUB, x1, 0, one);
-      p.cnst(rid, r);
-      p.native(res, n.reenter_i, {rid, x1});
-      p.ret(res);
-      e.set(r, p.done());
-    }
-    {
-      P p("T", {GRJIT_TYPE_I64});
-      int v = p.local(), h = p.local(), s = p.local();
-      p.call(v, r, {0});
-      p.cnst(h, 7);
-      p.bin(K::ADD, s, v, h);
-      p.ret(s);
-      Func f = p.done();
-      f.catches = true;
-      e.set(t, f);
-    }
-    e.trace.clear();
-    Outcome o = compiled_outer ? e.run_compiled(t, {20}) : e.run_interpreted(t, {20});
-    *value = o.value;
-    *finished = o.finished;
-    EXPECT_EQ(grcore_activation_count(e.stack), 0u);
-    EXPECT_EQ(e.st.pushes, e.st.pops);
-    return e.trace.size();
-  };
+  // Interpreted nesting costs one unit a level (the REENTRY record). A compiled outer run has one more record
+  // open than an interpreted one (its own JIT record), so the same nesting is reached with a budget one larger,
+  // and with the same budget one level sooner.
   for (uint64_t budget : {uint64_t{2}, uint64_t{5}, uint64_t{9}}) {
     SCOPED_TRACE(budget);
     u64 vi, vc, vc_same;
     bool fi, fc, fc_same;
-    const size_t interpreted = levels_entered(false, budget, &vi, &fi);
-    const size_t compiled_plus_one = levels_entered(true, budget + 1, &vc, &fc);
-    const size_t compiled_same = levels_entered(true, budget, &vc_same, &fc_same);
+    const size_t interpreted = levels_entered(false, false, budget, &vi, &fi);
+    const size_t compiled_plus_one = levels_entered(true, false, budget + 1, &vc, &fc);
+    const size_t compiled_same = levels_entered(true, false, budget, &vc_same, &fc_same);
     EXPECT_EQ(interpreted, budget + 1) << "the budget is the number of records the nesting may open, and R(20)'s first call is level zero";
     EXPECT_EQ(compiled_plus_one, interpreted) << "the same nesting, which is the interpreted run's verdict";
     EXPECT_EQ(vc, vi);
@@ -1876,6 +1884,31 @@ TEST(Natives, ARefusedRecordMakesTheNativeReturnUnwindAndTheVerdictIsTheInterpre
     EXPECT_EQ(compiled_same, interpreted - 1) << "a compiled outer run's JIT record is one the interpreted run does not have";
     EXPECT_EQ(vc_same, vi);
   }
+}
+
+TEST(Natives, ARefusedJitRecordInACompiledNestingUnwindsWithoutRunningTheCodeAndCompiledNestingCostsTwoUnitsALevel) {
+  // Every compiled nesting level costs a REENTRY and a JIT record. With a budget of 4 the interpreted outer run
+  // nests two levels (R(19), R(18)) and refuses the third REENTRY; the compiled outer run, whose own JIT record is
+  // the first unit, opens a REENTRY and a JIT for R(19) and a REENTRY for the next, and the JIT record of that one is
+  // refused: the code does not run, the frame and the reservation pushed for it are given back, the native returns
+  // UNWIND, and T's scope catches it. Never a fault.
+  u64 vi, vc;
+  bool fi, fc;
+  const size_t interpreted = levels_entered(false, true, 4, &vi, &fi);
+  const size_t compiled = levels_entered(true, true, 4, &vc, &fc);
+  EXPECT_EQ(interpreted, 3u) << "R(20) interpreted, then R(19) and R(18) compiled: four units";
+  EXPECT_EQ(compiled, 2u) << "R(20) and R(19): the JIT record of R(18) is the fifth unit and is refused before its code runs";
+  EXPECT_TRUE(fi);
+  EXPECT_TRUE(fc);
+  EXPECT_EQ(vi, kUnwound + 7u);
+  EXPECT_EQ(vc, kUnwound + 7u);
+  // A budget that fits every level: no refusal, the same value in both.
+  u64 wi, wc;
+  bool gi, gc;
+  levels_entered(false, true, 100, &wi, &gi);
+  levels_entered(true, true, 100, &wc, &gc);
+  EXPECT_EQ(wi, wc);
+  EXPECT_EQ(wi, 7u) << "R(20) bottoms out and T adds its 7";
 }
 
 /* ---- Generated programs: guest calls, tail calls and natives, under torture ------------------- */

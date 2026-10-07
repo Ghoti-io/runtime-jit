@@ -1083,8 +1083,15 @@ nested guest code that clears the entry slot of the outer function whose compile
 under the native retires the code, which is released when the last JIT record leaves, not before
 (the early-free mutations of `runtime-core` are re-run against `testNatives` alone and are caught
 by it). The native-depth budget: a refused `grcore_activation_enter` makes the native return
-`UNWIND`, and a compiled outer run has one JIT record an interpreted one does not (AD-21), so the
-same nesting is reached with a budget one larger.
+`UNWIND`, for the REENTRY record and, in the fixture, for the JIT record of a compiled nested run (which
+never runs the code it was refused: it gives back the frame and the reservation it had pushed and unwinds).
+Records enter the budget in AD-21's accounting, so the tiers' depths differ and the first version of this
+section understated it: an interpreted nesting costs one unit a level (REENTRY); **a compiled nesting costs
+two** (REENTRY and JIT), so with `reenter_c` at every level and a budget of 4 the interpreted outer run
+reaches three runs of the function and the compiled one two, about half the depth, and a compiled *outer* run
+costs one unit more than an interpreted one for the same interpreted nesting (the same nesting is reached with
+a budget one larger). Both are tested, with the verdict (T's scope catches the unwind), every record left and no
+fault.
 
 **The pause**, as the fixture plays it: a native leaves a pause pending and returns `DEOPT`, the
 chain is rebuilt, the interpreter pauses at its next poll, and the run is resumed on another thread
