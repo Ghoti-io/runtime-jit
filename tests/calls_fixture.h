@@ -218,6 +218,9 @@ struct Stats {
   GRCORE_Result extend_result = GRCORE_OK;
   uint64_t last_cause = 0;
   long refused_pushes = 0;
+  int last_innermost_fn = -1;      // the function the deopt started in
+  bool last_was_call_exit = false; // and whether it was an exit at a call site
+  std::map<int, int> counted;      // deopts counted against each function
   std::vector<u64> probed;       // values PROBE saw
   std::vector<uintptr_t> sps;    // the native stack pointer at each compiled PROBE
   std::vector<uintptr_t> bases;  // the compiled frame base at each compiled PROBE
@@ -248,6 +251,7 @@ class Engine {
   CompiledFn & C(int fn) { return cur[static_cast<size_t>(fn)] != nullptr ? *cur[static_cast<size_t>(fn)] : none; }
   const CompiledFn & C(int fn) const { return cur[static_cast<size_t>(fn)] != nullptr ? *cur[static_cast<size_t>(fn)] : none; }
   std::set<int> uncompilable;
+  std::set<int> never_compile; // discarded for deoptimizing too often
   Heap heap;
   Stats st;
   std::shared_ptr<int> released = std::make_shared<int>(0);
@@ -263,6 +267,7 @@ class Engine {
   size_t base_frames = 0;         // guest frames below the current entry
   uintptr_t last_native_limit = 0;   // the limit word the last compiled run set
   bool interpreter_cannot_recover = false; // a refused rebuild: do not try to finish
+  int discard_limit = 8;           // deopts after which a function's code is discarded
   bool lie_about_installing = false; // the compile hook says it installed and does not
   long refuse_push_at = 0;        // the Nth push is refused (an exit at the call site)
   long push_calls = 0;
@@ -745,6 +750,26 @@ inline void Engine::h_deopt(void *, uint64_t cause) {
   Engine & e = *g_engine;
   e.st.deopts++;
   e.st.last_cause = cause;
+  // Where it started: the innermost compiled frame's site. A site at a call
+  // instruction is an exit at a call site (a callee that cannot be compiled, a
+  // refused push, a bad code pointer), which is not the caller's fault and is
+  // not counted against it; a guard's or a poll's is.
+  e.st.last_innermost_fn = -1;
+  e.st.last_was_call_exit = false;
+  {
+    GRCORE_CompiledWalk w;
+    GRCORE_CompiledFrame f;
+    if (grcore_compiled_walk_begin(e.ctx, &w) == GRCORE_OK &&
+        grcore_compiled_walk_next(&w, &f) == GRCORE_CWALK_FRAME) {
+      int fn = static_cast<int>(f.identity.function);
+      size_t pc = static_cast<size_t>(f.identity.offset);
+      e.st.last_innermost_fn = fn;
+      if (pc < e.funcs[fn].code.size()) {
+        K k = e.funcs[fn].code[pc].k;
+        e.st.last_was_call_exit = k == K::CALL || k == K::CALLP;
+      }
+    }
+  }
   size_t n = 0;
   GRCORE_Result r = grcore_compiled_rebuild(e.ctx, e.reservation, SIZE_MAX, &n);
   e.st.rebuild = r;
@@ -981,6 +1006,14 @@ inline Outcome Engine::run_compiled(int fn, const std::vector<u64> & args) {
   }
   EXPECT_EQ(exit, GRJIT_EXIT_DEOPT);
   reset_reservation();
+  if (st.last_innermost_fn >= 0 && !st.last_was_call_exit &&
+      ++st.counted[st.last_innermost_fn] >= discard_limit) {
+    // Deoptimized too often to be worth having: the code is let go (the frames
+    // that were in it have returned) and the function is not compiled again by
+    // this fixture's policy.
+    discard(st.last_innermost_fn);
+    never_compile.insert(st.last_innermost_fn);
+  }
   out.interpreted_rest = true;
   if (interpreter_cannot_recover) {
     // The rebuild was refused, so the frames are as the compiled calls left them:

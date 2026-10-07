@@ -1452,4 +1452,45 @@ TEST(Calls, ArgumentsOfAllThreeTypesMixedAtEveryCountFromOneToSixteenArriveIntac
   EXPECT_EQ(e.st.deopts, 0);
 }
 
+TEST(Calls, AnExitAtAnUncompilableCalleeIsNotCountedAgainstTheCallersDiscardLimitButAGuardIs) {
+  CALLS_ONLY_ON_X86_64_SYSV();
+  {
+    Engine e;
+    int inc = add_inc(e);
+    int top = add_via_slot(e, inc);
+    e.uncompilable.insert(inc);
+    for (int i = 0; i < 20; i++) {
+      Outcome o = e.run_compiled(top, {static_cast<u64>(i)});
+      ASSERT_TRUE(o.finished);
+      EXPECT_EQ(o.value, static_cast<u64>(i + 2) * 2);
+      EXPECT_EQ(o.exit, uint32_t{GRJIT_EXIT_DEOPT});
+      EXPECT_TRUE(e.st.last_was_call_exit) << "the exit started at the call instruction";
+    }
+    EXPECT_EQ(e.st.deopts, 20);
+    EXPECT_EQ(e.st.counted[top], 0) << "twenty exits at the call, none counted against the caller";
+    EXPECT_NE(e.cur[static_cast<size_t>(top)], nullptr) << "so its code is still the caller's";
+  }
+  {
+    // The control: a guard that fails each time is the caller's, and is counted
+    // until the limit, when the code is discarded.
+    Engine e;
+    int g = add_gchain(e, /*fail_at=*/0);
+    for (int i = 0; i < 12; i++) {
+      if (e.cur[static_cast<size_t>(g)] == nullptr && e.never_compile.count(g) == 0) {
+        ASSERT_TRUE(e.compile_fn(g));
+      }
+      if (e.never_compile.count(g) != 0) {
+        break;
+      }
+      Outcome o = e.run_compiled(g, {3});
+      ASSERT_TRUE(o.finished);
+      EXPECT_EQ(o.value, 6u);
+      EXPECT_FALSE(e.st.last_was_call_exit);
+    }
+    EXPECT_EQ(e.st.counted[g], 8);
+    EXPECT_EQ(e.cur[static_cast<size_t>(g)], nullptr) << "discarded at the limit";
+    EXPECT_EQ(e.st.deopts, 8);
+  }
+}
+
 GRJIT_TEST_MAIN()
