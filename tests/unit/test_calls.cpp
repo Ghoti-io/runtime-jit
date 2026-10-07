@@ -787,10 +787,12 @@ TEST(Calls, ATinyNativeStackDeoptimizesTheChainAtTheCallSiteAndTheInterpreterFin
 
 TEST(Calls, TheStackLimitIsMeasuredInBytesAndTheFirstFrameThatDoesNotFitIsTheOneRefused) {
   CALLS_ONLY_WHERE_EMITTED();
-  // The budget swept across a frame's width, so the boundary falls at every
-  // alignment: every frame admitted lies wholly above the limit, and the next one
-  // would not have.
-  for (uint64_t bytes = 5000; bytes < 5000 + 24 * 8; bytes += 8) {
+  // The budget swept across a frame's width a byte at a time, so the boundary falls at every
+  // alignment, the one where an admitted frame ends exactly at the limit among them (counted, so
+  // that a sweep that never meets it cannot pass): every frame admitted lies wholly above the
+  // limit, and the next one would not have.
+  size_t exact = 0;
+  for (uint64_t bytes = 5000; bytes < 5000 + 24 * 8; bytes += 1) {
     SCOPED_TRACE(bytes);
     Engine e(GRCORE_UNLIMITED, bytes);
     int rec = add_rec(e);
@@ -814,7 +816,9 @@ TEST(Calls, TheStackLimitIsMeasuredInBytesAndTheFirstFrameThatDoesNotFitIsTheOne
     EXPECT_GE(lowest_bottom, e.last_native_limit) << "an admitted frame lies above the limit";
     EXPECT_LT(lowest_bottom - 16 - frame, e.last_native_limit)
         << "the next frame would have crossed it, so it was the one refused";
+    exact += lowest_bottom == e.last_native_limit ? 1 : 0;
   }
+  EXPECT_GT(exact, 0u) << "a frame that ends exactly at the limit was admitted: the boundary itself was met";
 }
 
 TEST(Calls, NoNativeStackBudgetMeansNoLimitAndADeepChainRunsToTheEndCompiled) {
@@ -1240,6 +1244,61 @@ TEST(Calls, AnEntryHooksRefusalLeavesEveryCalleeSavedRegisterAsItWas) {
     EXPECT_EQ(regs[i], fx::sentinel_value(i)) << fx::sentinel_name(i) << " after an entry hook's refusal";
   }
 #endif
+}
+
+namespace {
+uint64_t gc_noop_helper() { return 0; }
+} // namespace
+
+TEST(Calls, TheEntryAdapterClearsTheWalkStartCellWhetherTheCallReturnsOrDeoptimizes) {
+  CALLS_ONLY_WHERE_EMITTED();
+  // A walk after a run must read no dead frame, so the adapter zeroes the cell on its way out whatever
+  // the function did with it (a call that can reach a GC point stores it first). Called without an
+  // activation record, so nothing but the adapter can clear it: the cell is set to a value that is
+  // not zero before, and read after a return, a deoptimization (a guard that fails: the deopt hook
+  // answers zero, so every frame returns DEOPTED) and the entry hook's refusal (which never stored it:
+  // the value planted stays, since nothing ran).
+  JitWorld w;
+  uintptr_t * cell = reinterpret_cast<uintptr_t *>(
+      reinterpret_cast<unsigned char *>(w.ctx) + grcore_jit_layout()->walk_cell_offset);
+  for (int how = 0; how < 3; how++) {
+    SCOPED_TRACE(how);
+    B b("cell", 1);
+    GRJIT_CallHooks h{};
+    h.deopt = h_unused_deopt;
+    h.pop = h_unused_pop;
+    b.callable(h);
+    GRJIT_VReg x = b.param(GRJIT_TYPE_I64);
+    b.at(b.block());
+    b.call_gc(GRJIT_NO_VREG, reinterpret_cast<const void *>(gc_noop_helper), {}, GRCORE_PollIdentity{1, 0},
+        {grjit_frame_slot_vreg(x)});
+    if (how == 1) {
+      b.guard(I(0), GRCORE_PollIdentity{1, 1}, {grjit_frame_slot_vreg(x)});
+    }
+    b.ret(V(x));
+    Fn f(b.finish());
+    Compiled c(f, w.pages(), how == 2 ? refuse_with_seven : nullptr);
+    ASSERT_TRUE(c);
+    cell[0] = 0xAAAA0000AAAA0000ull;
+    cell[1] = 0xBBBB0000BBBB0000ull;
+    uint64_t in[1] = {9};
+    std::vector<uint64_t> out(grjit_code_out_words(c.code), 0);
+    const uint32_t exit = grjit_code_call(c.code, w.ctx, in, out.data());
+    if (how == 0) {
+      EXPECT_EQ(exit, uint32_t{GRJIT_EXIT_RETURNED});
+    } else if (how == 1) {
+      EXPECT_EQ(exit, uint32_t{GRJIT_EXIT_DEOPT});
+    } else {
+      EXPECT_EQ(exit, uint32_t{GRJIT_EXIT_REFUSED});
+    }
+    if (how == 2) {
+      EXPECT_EQ(cell[0], 0xAAAA0000AAAA0000ull) << "the hook refused before anything ran: the cell is as it was";
+      EXPECT_EQ(cell[1], 0xBBBB0000BBBB0000ull);
+    } else {
+      EXPECT_EQ(cell[0], 0u) << "the adapter cleared the frame base on its way out";
+      EXPECT_EQ(cell[1], 0u) << "and the return address";
+    }
+  }
 }
 
 TEST(Calls, TheEntryHookRunsInTheAdapterBeforeAnythingAndItsRefusalIsReportedAsRefused) {
