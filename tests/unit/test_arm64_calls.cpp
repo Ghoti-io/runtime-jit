@@ -278,7 +278,7 @@ TEST(Arm64Calls, EveryWordOfEveryCallableFunctionDecodesAndNoCalleeSavedRegister
 TEST(Arm64Calls, TheStackPointerIsMovedOnlyByThePrologueTheEpilogueAndTheArgumentAreasAndAlwaysBySixteens) {
   size_t movers = 0;
   for_every_callable_function([&](const GRJIT_Emitted & e, const GRJIT_Function * f, unsigned id, const char * family) {
-    size_t pushes = 0, pops = 0, frame_alloc = 0, restores = 0;
+    size_t pushes = 0, pops = 0, adapter_pops = 0, frame_alloc = 0, restores = 0;
     for (size_t off = 0; off < e.size; off += 4) {
       if (in_data(e, off)) {
         continue;
@@ -294,6 +294,9 @@ TEST(Arm64Calls, TheStackPointerIsMovedOnlyByThePrologueTheEpilogueAndTheArgumen
           break;
         case C::LDP_POST:
           pops++;
+          if (off < e.internal_offset) {
+            adapter_pops++; // the adapter gives its frame record (and so the caller's x29) back
+          }
           break;
         case C::ADDSUB_IMM:
           EXPECT_EQ(i.imm % 16, 0) << family << " " << id << " at +" << off << ": sp moves by " << i.imm;
@@ -313,6 +316,8 @@ TEST(Arm64Calls, TheStackPointerIsMovedOnlyByThePrologueTheEpilogueAndTheArgumen
     // and failure path and none for a tail call).
     EXPECT_EQ(pushes, 2u) << family << " " << id;
     EXPECT_GE(pops, 2u) << family << " " << id;
+    EXPECT_EQ(adapter_pops, 2u) << family << " " << id
+        << ": the adapter restores x29 from its own frame record on both its exits (the normal one and the refusal)";
     EXPECT_GE(frame_alloc, 2u) << family << " " << id << ": the adapter's frame and the function's";
     EXPECT_GE(restores, 1u) << family << " " << id << ": at least one epilogue";
     (void)f;
