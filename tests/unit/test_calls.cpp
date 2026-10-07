@@ -16,6 +16,7 @@
 #include "../../src/code/code_internal.h"
 
 #include <csignal>
+#include <random>
 #ifndef _WIN32
 #include <sys/wait.h>
 #include <unistd.h>
@@ -1536,6 +1537,109 @@ TEST(Calls, AReservationExtensionTheAllocatorRefusesIsAnExitAtTheCallSiteAndNoth
   EXPECT_EQ(e.st.rebuild, GRCORE_OK) << "the rebuild never allocates, and it did not fail";
   EXPECT_EQ(e.st.deopt_frames, 4) << "the entry and three callees; the fourth was never pushed";
   EXPECT_EQ(o.frames_left, 0u);
+}
+
+/* ---- Generated programs: compiled, interpreted, with and without collections ---- */
+
+namespace {
+
+/* A random program of `n` functions, f_i calling only f_j with j < i, so it
+ * terminates. Each takes two integers, allocates an object, does some
+ * arithmetic, may call lower functions on either side of a branch, may collect,
+ * may hit a guard that fails for some inputs, reads its object back after its
+ * calls, and returns a mix of everything. */
+void generate(Engine & e, std::mt19937 & rng, int n, std::vector<int> * fns) {
+  auto pick = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
+  for (int i = 0; i < n; i++) {
+    fns->push_back(e.reserve());
+  }
+  for (int i = 0; i < n; i++) {
+    P p("gen", {GRJIT_TYPE_I64, GRJIT_TYPE_I64});
+    int x = 0, y = 1, a = p.local(), b = p.local(), c = p.local(), t = p.local(),
+        zero = p.local(), obj = p.local(GRJIT_TYPE_REF), v = p.local(), g = p.local(),
+        r1 = p.local(), r2 = p.local(), sum = p.local();
+    p.cnst(zero, 0);
+    p.nw(obj, pick(1, 50));
+    p.cnst(c, pick(1, 9));
+    p.bin(K::ADD, a, x, c);
+    p.bin(K::MUL, b, y, c);
+    if (pick(0, 3) == 0) {
+      p.collect();
+    }
+    if (i > 0 && pick(0, 2) != 0) {
+      p.call(r1, (*fns)[pick(0, i - 1)], {a, b});
+    } else {
+      p.bin(K::ADD, r1, a, b);
+    }
+    if (pick(0, 2) == 0) {
+      // A guard that fails for some inputs: compiled code deoptimizes here, and
+      // the interpreter, for which a guard is nothing, carries on.
+      int k = p.local();
+      p.cnst(k, pick(0, 30));
+      p.bin(K::LT, t, x, k);
+      p.guard(t);
+    }
+    if (pick(0, 3) == 0) {
+      p.poll();
+    }
+    if (i > 0) {
+      // A branch with a call on one side.
+      int k = p.local();
+      p.cnst(k, pick(0, 12));
+      p.bin(K::LT, t, x, k);
+      int br = p.brz(t);
+      p.call(r2, (*fns)[pick(0, i - 1)], {b, a});
+      int over = p.br();
+      p.patch(br, p.here());
+      p.bin(K::SUB, r2, a, r1);
+      p.patch(over, p.here());
+    } else {
+      p.mov(r2, a);
+    }
+    if (pick(0, 3) == 0) {
+      p.collect();
+    }
+    p.get(v, obj);
+    p.bin(K::ADD, sum, r1, r2);
+    p.bin(K::ADD, sum, sum, v);
+    p.bin(K::MUL, g, sum, c);
+    p.ret(g);
+    e.set((*fns)[i], p.done());
+  }
+}
+
+} // namespace
+
+TEST(Calls, GeneratedCallGraphsGiveTheSameResultsCompiledAndInterpretedWithAndWithoutCollections) {
+  CALLS_ONLY_ON_X86_64_SYSV();
+  long deopted = 0, direct = 0;
+  for (unsigned seed = 0; seed < 150; seed++) {
+    SCOPED_TRACE(seed);
+    std::mt19937 rng(seed);
+    Engine e;
+    e.torture = seed % 2 == 0;
+    std::vector<int> fns;
+    int n = 2 + static_cast<int>(seed % 5);
+    generate(e, rng, n, &fns);
+    for (int top : {n - 1, n / 2}) {
+      for (u64 x : {u64{0}, u64{3}, u64{15}, u64{40}}) {
+        Outcome i = e.run_interpreted(fns[top], {x, x + 1});
+        ASSERT_TRUE(i.finished);
+        Outcome c = e.run_compiled(fns[top], {x, x + 1});
+        ASSERT_TRUE(c.finished) << "failed=" << c.failed;
+        EXPECT_EQ(c.value, i.value);
+        EXPECT_EQ(c.frames_left, 0u);
+        EXPECT_EQ(e.st.rebuild, GRCORE_OK);
+        (c.exit == GRJIT_EXIT_DEOPT ? deopted : direct)++;
+        e.st.rebuild = GRCORE_OK;
+      }
+    }
+    EXPECT_EQ(e.heap.poisoned_reads, 0);
+    EXPECT_EQ(e.st.pushes, e.st.pops);
+  }
+  // Both kinds of run happened, in numbers: the generator reaches the paths.
+  EXPECT_GT(deopted, 100);
+  EXPECT_GT(direct, 100);
 }
 
 GRJIT_TEST_MAIN()
