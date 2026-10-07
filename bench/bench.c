@@ -345,6 +345,88 @@ static uint64_t loop_compiled_call_run(uint64_t iterations) {
   return out[0];
 }
 
+/* ---- tail calls (AD-28) --------------------------------------------------- */
+
+static uint32_t call_tail(void * context, uint64_t callee, const uint64_t * args, uint64_t n) {
+  (void)context;
+  (void)callee;
+  (void)args;
+  (void)n;
+  return 0;
+}
+
+typedef struct {
+  GRJIT_Code * code;
+  GRCORE_Code * handle;
+  GRCORE_EntrySlot * slot;
+} TailLoop;
+static TailLoop g_tail_loop;
+
+/* tail_loop(n, sum): n == 0 ? sum : tail_loop(n - 1, sum + 1), the tail call
+ * through the function's own entry slot with the engine's hook doing nothing, so
+ * the figure is the dispatch, the staging, the hook's C call and the frame
+ * replacement, and not an engine's guest stack. */
+static GRJIT_Function * build_tail_loop(const GRCORE_EntrySlot * slot) {
+  GRJIT_Builder * b;
+  GRJIT_CallHooks hooks = {call_push, call_pop, call_compile, call_deopt, call_tail};
+  check(grjit_builder_create("tail_loop", 2, NULL, NULL, &b), "builder");
+  GRJIT_VReg n, sum, t, n1, s1;
+  GRJIT_BlockId entry, body, done;
+  check(grjit_builder_param(b, GRJIT_TYPE_I64, &n), "param");
+  check(grjit_builder_param(b, GRJIT_TYPE_I64, &sum), "param");
+  check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &t), "vreg");
+  check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &n1), "vreg");
+  check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &s1), "vreg");
+  check(grjit_builder_set_callable(b, &hooks), "callable");
+  check(grjit_builder_block(b, &entry), "block");
+  check(grjit_builder_block(b, &body), "block");
+  check(grjit_builder_block(b, &done), "block");
+  check(grjit_builder_set_block(b, entry), "at");
+  check(grjit_builder_cmp(b, GRJIT_CMP_EQ, t, grjit_operand_vreg(n), grjit_operand_imm(0)), "op");
+  check(grjit_builder_br_if(b, grjit_operand_vreg(t), done, body), "op");
+  check(grjit_builder_set_block(b, body), "at");
+  check(grjit_builder_binary(b, GRJIT_OP_SUB, n1, grjit_operand_vreg(n), grjit_operand_imm(1)), "op");
+  check(grjit_builder_binary(b, GRJIT_OP_ADD, s1, grjit_operand_vreg(sum), grjit_operand_imm(1)), "op");
+  GRCORE_PollIdentity id = {1, 1};
+  GRJIT_FrameSlot st[2] = {grjit_frame_slot_vreg(n), grjit_frame_slot_vreg(sum)};
+  GRJIT_Operand args[2] = {grjit_operand_vreg(n1), grjit_operand_vreg(s1)};
+  check(grjit_builder_tail_call_slot(
+            b, (uint64_t)(uintptr_t)&slot->entry, 0, args, 2, id, st, 2),
+      "tail call");
+  check(grjit_builder_set_block(b, done), "at");
+  check(grjit_builder_ret(b, grjit_operand_vreg(sum)), "op");
+  GRJIT_Function * f;
+  check(grjit_builder_finish(b, &f), "finish");
+  return f;
+}
+
+static uint64_t loop_tail_call_run(uint64_t iterations) {
+  world_open();
+  if (g_tail_loop.code == NULL) {
+    static const GRCORE_EngineDescriptor descriptor = GRCORE_ENGINE_DESCRIPTOR_INIT(
+        "bench-tail", NULL, NULL, NULL, {NULL, NULL, NULL}, {0, 0, 0}, NULL, NULL, NULL, NULL);
+    GRCORE_EngineId engine;
+    if (grcore_engine_register(g_context, &descriptor, &engine) != GRCORE_OK ||
+        grcore_entry_slot_create(g_context, &g_tail_loop.slot) != GRCORE_OK ||
+        grcore_code_create(NULL, NULL, call_release, &g_tail_loop.handle) != GRCORE_OK) {
+      setup_failed("an engine and a slot");
+    }
+    GRJIT_Function * loop = build_tail_loop(g_tail_loop.slot);
+    g_tail_loop.code = compile(loop);
+    grjit_function_destroy(loop);
+    if (grcore_entry_slot_set(g_context, g_tail_loop.slot, g_tail_loop.handle,
+            grjit_code_internal_entry(g_tail_loop.code)) != GRCORE_OK) {
+      setup_failed("the slot");
+    }
+  }
+  uint64_t args[2] = {iterations, 0};
+  uint64_t out[3] = {0, 0, 0};
+  if (grjit_code_call(g_tail_loop.code, g_context, args, out) != GRJIT_EXIT_RETURNED) {
+    setup_failed("the tail loop did not return");
+  }
+  return out[0];
+}
+
 /* A function of 100 operations: alternating arithmetic on a few registers. */
 static GRJIT_Function * build_hundred(void) {
   GRJIT_Builder * b;
@@ -448,6 +530,7 @@ static const Case cases[] = {
     {"loop-poll", loop_poll_run, 10000000, 1000, 0},
     {"loop-call", loop_call_run, 10000000, 1000, 0},
     {"loop-compiled-call", loop_compiled_call_run, 10000000, 1000, 1},
+    {"loop-tail-call", loop_tail_call_run, 10000000, 1000, 1},
 };
 
 int main(int argc, char ** argv) {
@@ -507,6 +590,11 @@ int main(int argc, char ** argv) {
     grcore_code_release(g_call_loop.handle);
     grjit_code_destroy(g_call_loop.caller);
     grjit_code_destroy(g_call_loop.callee);
+  }
+  if (g_tail_loop.code != NULL) {
+    grcore_entry_slot_clear(g_context, g_tail_loop.slot);
+    grcore_code_release(g_tail_loop.handle);
+    grjit_code_destroy(g_tail_loop.code);
   }
   if (g_context != NULL) {
     grcore_context_destroy(g_context);
