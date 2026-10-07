@@ -76,6 +76,30 @@ const std::array<const void *, 17> & sums() {
   return table;
 }
 
+/* The same with a status: what the test chose through `g_next_status` (zero continues). */
+uint32_t g_next_status = 0;
+template <size_t... Is>
+GRJIT_NativeResult sum_status_n(void * ctx, W<Is>... a) {
+  GRJIT_NativeResult r;
+  r.value = sum_n<Is...>(ctx, a...);
+  r.status = g_next_status;
+  r.reserved = 0;
+  return r;
+}
+template <size_t... Is>
+const void * sum_status_ptr(std::index_sequence<Is...>) {
+  GRJIT_NativeResult (*f)(void *, W<Is>...) = &sum_status_n<Is...>;
+  return reinterpret_cast<const void *>(f);
+}
+template <size_t... Ns>
+std::array<const void *, sizeof...(Ns)> make_status_sums(std::index_sequence<Ns...>) {
+  return {sum_status_ptr(std::make_index_sequence<Ns>{})...};
+}
+const std::array<const void *, 17> & status_sums() {
+  static const auto table = make_status_sums(std::make_index_sequence<17>{});
+  return table;
+}
+
 /* Calls a native of `n` arguments from C, the context first. */
 template <size_t... Is>
 uint64_t call_c_n(const void * fn, void * ctx, const uint64_t * a, std::index_sequence<Is...>) {
@@ -104,7 +128,12 @@ void h_unused_pop(void *) {}
 uint32_t h_unused_compile(void *, uint64_t) { return 1; }
 long g_deopts = 0;
 uint64_t g_last_cause = 0;
-uint32_t h_deopt(void *, uint64_t cause) {
+void * g_hook_ctx = nullptr; // the context the test's code was called with: every hook must be handed it
+bool g_bad_hook_ctx = false;
+uint32_t h_deopt(void * ctx, uint64_t cause) {
+  if (ctx != g_hook_ctx) {
+    g_bad_hook_ctx = true;
+  }
   g_deopts++;
   g_last_cause = cause;
   return 0; // no guest frames: nothing to rebuild
@@ -241,13 +270,72 @@ TEST(Natives, ArgumentsOfEveryTypeAndImmediatesArriveIntactForEveryCountAndResul
   }
 }
 
+TEST(Natives, StatusNativesOfEveryArityArriveIntactAndAStatusLeavesWithTheNativeBitInTheEntrysOutWord) {
+  JitWorld w;
+  g_hook_ctx = w.ctx;
+  g_bad_hook_ctx = false;
+  NativeTab t;
+  // Counts on both sides of the register/stack boundary, with a result and with none, and a status that continues
+  // and one that leaves.
+  for (size_t n : {size_t{0}, size_t{1}, size_t{4}, size_t{5}, size_t{6}, size_t{7}, size_t{9}, size_t{16}}) {
+    for (int with_result = 0; with_result < 2; with_result++) {
+      SCOPED_TRACE(n);
+      std::vector<GRJIT_Type> types(n, TI);
+      uint32_t id = t.add(status_sums()[n], types, with_result != 0 ? TI : kNoResult, GRJIT_NATIVE_STATUS);
+      Bare bare(t, id, types, with_result != 0 ? TI : kNoResult, true);
+      Compiled c(bare.f, w.pages());
+      ASSERT_TRUE(c);
+      uint64_t a[16];
+      for (size_t i = 0; i < 16; i++) {
+        a[i] = 0x1000000000000001ull * (i + 3) + 7 * i;
+      }
+      std::vector<uint64_t> args(a, a + n);
+      // Continue: the value is the C reference's, whatever the stack arguments.
+      g_next_status = 0;
+      g_calls = 0;
+      g_deopts = 0;
+      auto run = c.run(w.ctx, args);
+      const long calls = g_calls;
+      EXPECT_EQ(run.exit, uint32_t{GRJIT_EXIT_RETURNED});
+      if (with_result != 0) {
+        EXPECT_EQ(run.out[0], call_c(n, sums()[n], w.ctx, a)) << "a status native's stack arguments are intact";
+      }
+      EXPECT_EQ(calls, 1);
+      EXPECT_EQ(g_deopts, 0);
+      // Leave: the entry returns DEOPT with the cause in out[0], the native having run once.
+      for (uint32_t status : {1u, 2u, 77u, 0x10000u, 0x80000000u}) {
+        g_next_status = status;
+        g_calls = 0;
+        g_deopts = 0;
+        auto left = c.run(w.ctx, args);
+        EXPECT_EQ(left.exit, uint32_t{GRJIT_EXIT_DEOPT}) << status;
+        EXPECT_EQ(left.out[0], GRJIT_CAUSE_NATIVE | status) << "the cause at the entry is the native bit and the status";
+        EXPECT_EQ(g_last_cause, GRJIT_CAUSE_NATIVE | status);
+        EXPECT_EQ(g_calls, 1) << "the native ran exactly once";
+        EXPECT_EQ(g_deopts, 1);
+      }
+      g_next_status = 0;
+    }
+  }
+  EXPECT_FALSE(g_bad_hook_ctx) << "the deopt hook is handed the context the code was called with";
+}
+
 /* ---- Alignment, the stack pointer, clobbered registers ---------------------------------- */
 
 extern "C" {
 uint64_t grjit_test_entry_rsp[256];
 uint64_t grjit_test_entry_count = 0;
 uint64_t grjit_test_align_stub(void *, ...);
+GRJIT_NativeResult grjit_test_align_status_stub(void *, ...);
 }
+namespace {
+/* The recording native, with or without a status (and then with no result: a native may have a status and
+ * nothing else). */
+const void * align_stub(bool status) {
+  return status ? reinterpret_cast<const void *>(grjit_test_align_status_stub)
+                : reinterpret_cast<const void *>(grjit_test_align_stub);
+}
+} // namespace
 /* Records the stack pointer at its entry (after the return address is pushed), and
  * touches only rax and rcx. */
 asm(R"(
@@ -263,14 +351,28 @@ grjit_test_align_stub:
   xorl %eax, %eax
   ret
 .size grjit_test_align_stub, .-grjit_test_align_stub
+.globl grjit_test_align_status_stub
+.type grjit_test_align_status_stub, @function
+grjit_test_align_status_stub:
+  movq grjit_test_entry_count(%rip), %rax
+  leaq grjit_test_entry_rsp(%rip), %rcx
+  movq %rsp, (%rcx,%rax,8)
+  incq %rax
+  movq %rax, grjit_test_entry_count(%rip)
+  xorl %eax, %eax
+  xorl %edx, %edx
+  ret
+.size grjit_test_align_status_stub, .-grjit_test_align_status_stub
 )");
 
 TEST(Natives, TheStackIsSixteenAlignedAtTheNativesEntryAndTheSameAfterEveryCallForOddAndEvenStackArguments) {
   JitWorld w;
   NativeTab t;
+  for (int with_status = 0; with_status < 2; with_status++)
   for (size_t n = 0; n <= 16; n++) {
+    SCOPED_TRACE(with_status);
     std::vector<GRJIT_Type> types(n, TI);
-    uint32_t id = t.add(reinterpret_cast<const void *>(grjit_test_align_stub), types, kNoResult);
+    uint32_t id = t.add(align_stub(with_status != 0), types, kNoResult, with_status != 0 ? GRJIT_NATIVE_STATUS : 0);
     // Ten calls in a row, with a probe of the native stack pointer before and between.
     B b("align", 1);
     GRJIT_VReg x = b.param(TI);
@@ -279,7 +381,11 @@ TEST(Natives, TheStackIsSixteenAlignedAtTheNativesEntryAndTheSameAfterEveryCallF
     b.at(b.block());
     std::vector<GRJIT_Operand> args(n, V(x));
     for (int k = 0; k < 10; k++) {
-      b.call_native(GRJIT_NO_VREG, id, args, kId, {grjit_frame_slot_vreg(x)});
+      if (with_status != 0) {
+        b.call_native(GRJIT_NO_VREG, id, args, kId, {grjit_frame_slot_vreg(x)}, kId, {grjit_frame_slot_vreg(x)});
+      } else {
+        b.call_native(GRJIT_NO_VREG, id, args, kId, {grjit_frame_slot_vreg(x)});
+      }
     }
     b.ret(V(x));
     Fn f(b.finish());
@@ -296,12 +402,12 @@ TEST(Natives, TheStackIsSixteenAlignedAtTheNativesEntryAndTheSameAfterEveryCallF
     }
     // The area is what the ABI says: the words past the sixth, in whole sixteens, so the
     // entry stack pointer is the same function of the count.
-    static uint64_t first_entry = 0;
+    static uint64_t first_entry[2] = {0, 0};
     if (n == 0) {
-      first_entry = grjit_test_entry_rsp[0];
+      first_entry[with_status] = grjit_test_entry_rsp[0];
     }
     size_t stack_words = n + 1 > 6 ? n + 1 - 6 : 0;
-    EXPECT_EQ(first_entry - grjit_test_entry_rsp[0], (stack_words * 8 + 15) / 16 * 16)
+    EXPECT_EQ(first_entry[with_status] - grjit_test_entry_rsp[0], (stack_words * 8 + 15) / 16 * 16)
         << n << " arguments leave exactly the rounded area below the frame";
   }
 }
@@ -390,36 +496,80 @@ __attribute__((noinline)) uint64_t n_read_cell(void * ctx, uint64_t) {
 
 } // namespace
 
+namespace {
+template <size_t... Is>
+uint64_t read_cell_n(void * ctx, W<Is>...) { return n_read_cell(ctx, 0); }
+template <size_t... Is>
+GRJIT_NativeResult read_cell_status_n(void * ctx, W<Is>...) {
+  GRJIT_NativeResult r{n_read_cell(ctx, 0), 0, 0};
+  return r;
+}
+template <size_t N>
+const void * read_cell_fn(bool status) {
+  return []<size_t... Is>(std::index_sequence<Is...>, bool st) -> const void * {
+    if (st) {
+      GRJIT_NativeResult (*f)(void *, W<Is>...) = &read_cell_status_n<Is...>;
+      return reinterpret_cast<const void *>(f);
+    }
+    uint64_t (*f)(void *, W<Is>...) = &read_cell_n<Is...>;
+    return reinterpret_cast<const void *>(f);
+  }(std::make_index_sequence<N>{}, status);
+}
+const void * read_cell_for(size_t n, bool status) {
+  switch (n) {
+    case 0: return read_cell_fn<0>(status);
+    case 1: return read_cell_fn<1>(status);
+    case 5: return read_cell_fn<5>(status);
+    case 6: return read_cell_fn<6>(status);
+    case 7: return read_cell_fn<7>(status);
+    default: return read_cell_fn<16>(status);
+  }
+}
+} // namespace
+
 TEST(Natives, TheCallStoresItsFrameBaseAndReturnAddressBeforeTheNativeRunsOverAStaleCell) {
+  // For every shape of call: with and without a status, with and without a result, few and many arguments, the
+  // cell is the call's own (a defect that stores it only for some shape leaves the stale value for that shape).
   JitWorld w;
-  NativeTab t;
-  uint32_t id = t.add(reinterpret_cast<const void *>(n_read_cell), {TI}, TI);
-  Bare bare(t, id, {TI}, TI);
-  Compiled c(bare.f, w.pages());
-  ASSERT_TRUE(c);
-  uintptr_t * cell = reinterpret_cast<uintptr_t *>(
-      reinterpret_cast<char *>(w.ctx) + grcore_jit_layout()->walk_cell_offset);
-  cell[0] = 0xDEAD0000DEAD0008ull; // another chain's value, from the previous call
-  cell[1] = 0xBEEF0000BEEF0000ull;
-  g_cell_base = g_cell_ret = 0;
-  auto run = c.run(w.ctx, {1});
-  ASSERT_EQ(run.exit, uint32_t{GRJIT_EXIT_RETURNED});
-  EXPECT_NE(g_cell_base, uintptr_t{0xDEAD0000DEAD0008ull}) << "the native finds this call's start, not the stale one";
-  EXPECT_NE(g_cell_ret, uintptr_t{0xBEEF0000BEEF0000ull});
-  // The return address is inside this code, and the frame base is a word-aligned address
-  // above the native's own frame (the native is called from that frame).
-  const uintptr_t start = reinterpret_cast<uintptr_t>(grjit_code_address(c.code));
-  EXPECT_GE(g_cell_ret, start);
-  EXPECT_LT(g_cell_ret, start + grjit_code_size(c.code));
-  EXPECT_EQ(g_cell_base % 8, 0u);
-  EXPECT_GT(g_cell_base, g_sp_in_native);
-  // And it is the call's site: the stack map at that offset is the call's, which the
-  // metadata names with the poll identity the call was given.
-  const GRCORE_CodeSite * site = grcore_codemeta_find(grjit_code_meta(c.code), g_cell_ret - start);
-  ASSERT_NE(site, nullptr) << "the return address is a site";
-  EXPECT_EQ(site->kind, GRCORE_SITE_GC_POINT_CALL);
-  EXPECT_EQ(site->identity.function, kId.function);
-  EXPECT_EQ(site->identity.offset, kId.offset);
+  for (size_t n : {size_t{0}, size_t{1}, size_t{5}, size_t{6}, size_t{7}, size_t{16}}) {
+    for (int status = 0; status < 2; status++) {
+      for (int with_result = 0; with_result < 2; with_result++) {
+        SCOPED_TRACE(n);
+        SCOPED_TRACE(status);
+        SCOPED_TRACE(with_result);
+        NativeTab t;
+        std::vector<GRJIT_Type> types(n, TI);
+        uint32_t id = t.add(read_cell_for(n, status != 0), types, with_result != 0 ? TI : kNoResult,
+            status != 0 ? GRJIT_NATIVE_STATUS : 0);
+        Bare bare(t, id, types, with_result != 0 ? TI : kNoResult, status != 0);
+        Compiled c(bare.f, w.pages());
+        ASSERT_TRUE(c);
+        uintptr_t * cell = reinterpret_cast<uintptr_t *>(
+            reinterpret_cast<char *>(w.ctx) + grcore_jit_layout()->walk_cell_offset);
+        cell[0] = 0xDEAD0000DEAD0008ull; // another chain's value, from the previous call
+        cell[1] = 0xBEEF0000BEEF0000ull;
+        g_cell_base = g_cell_ret = 0;
+        auto run = c.run(w.ctx, std::vector<uint64_t>(n, 1));
+        ASSERT_EQ(run.exit, uint32_t{GRJIT_EXIT_RETURNED});
+        EXPECT_NE(g_cell_base, uintptr_t{0xDEAD0000DEAD0008ull}) << "the native finds this call's start, not the stale one";
+        EXPECT_NE(g_cell_ret, uintptr_t{0xBEEF0000BEEF0000ull});
+        // The return address is inside this code, and the frame base is a word-aligned address
+        // above the native's own frame (the native is called from that frame).
+        const uintptr_t start = reinterpret_cast<uintptr_t>(grjit_code_address(c.code));
+        EXPECT_GE(g_cell_ret, start);
+        EXPECT_LT(g_cell_ret, start + grjit_code_size(c.code));
+        EXPECT_EQ(g_cell_base % 8, 0u);
+        EXPECT_GT(g_cell_base, g_sp_in_native);
+        // And it is the call's site: the stack map at that offset is the call's, which the
+        // metadata names with the poll identity the call was given.
+        const GRCORE_CodeSite * site = grcore_codemeta_find(grjit_code_meta(c.code), g_cell_ret - start);
+        ASSERT_NE(site, nullptr) << "the return address is a site";
+        EXPECT_EQ(site->kind, GRCORE_SITE_GC_POINT_CALL);
+        EXPECT_EQ(site->identity.function, kId.function);
+        EXPECT_EQ(site->identity.offset, kId.offset);
+      }
+    }
+  }
 }
 
 /* ---- The sites ------------------------------------------------------------------------ */
@@ -475,16 +625,94 @@ TEST(Natives, ANativeCallIsASiteWhoseMapNamesWhatIsLiveAfterItButNotItsResultOrI
 
 /* ---- The native stack ----------------------------------------------------------------- */
 
+TEST(Natives, ANativeWithAStatusMakesThreeSitesEachWithItsKindItsIdentityItsStateAndItsMap) {
+  JitWorld w;
+  NativeTab t;
+  uint32_t id = t.add(reinterpret_cast<const void *>(n_read_cell), {TR}, TR, GRJIT_NATIVE_STATUS);
+  B b("sites3", 3);
+  GRJIT_VReg arg = b.param(TR);
+  GRJIT_VReg live_after = b.param(TR);
+  GRJIT_VReg in_before = b.param(TR);
+  GRJIT_VReg in_after = b.param(TR);
+  GRJIT_VReg res = b.reg(TR);
+  b.callable(hooks());
+  b.natives(t);
+  b.at(b.block());
+  b.cnst(res, 0);
+  const GRCORE_PollIdentity before{3, 11}, after{3, 12};
+  // The state before the call does not name the result; the state after names it and in_after only.
+  b.call_native(res, id, {V(arg)}, before,
+      {grjit_frame_slot_constant(11), grjit_frame_slot_vreg(in_before), grjit_frame_slot_dead()}, after,
+      {grjit_frame_slot_constant(12), grjit_frame_slot_vreg(in_after), grjit_frame_slot_vreg(res)});
+  GRJIT_VReg flag = b.reg(TI);
+  b.cmp(GRJIT_CMP_EQ, flag, V(live_after), V(live_after));
+  b.ret(V(flag));
+  Fn f(b.finish());
+  Compiled c(f, w.pages());
+  ASSERT_TRUE(c);
+  const GRCORE_CodeMeta * meta = grjit_code_meta(c.code);
+  ASSERT_EQ(meta->site_count, 3u) << "the call, the exit before it, the exit after it";
+  auto slots_of = [](const GRCORE_CodeSite * s) {
+    std::set<int64_t> out;
+    for (size_t i = 0; i < s->live_count; i++) {
+      EXPECT_EQ(s->live[i].slot_kind, GRCORE_SLOT_VALUE);
+      out.insert(s->live[i].value);
+    }
+    return out;
+  };
+  const GRCORE_CodeSite *call = nullptr, *exit_before = nullptr, *exit_after = nullptr;
+  for (size_t i = 0; i < meta->site_count; i++) {
+    const GRCORE_CodeSite * s = &meta->sites[i];
+    if (s->kind == GRCORE_SITE_GC_POINT_CALL) {
+      call = s;
+    } else if (s->kind == GRCORE_SITE_GUARD && s->identity.offset == before.offset) {
+      exit_before = s;
+    } else if (s->kind == GRCORE_SITE_GUARD && s->identity.offset == after.offset) {
+      exit_after = s;
+    }
+  }
+  ASSERT_NE(call, nullptr);
+  ASSERT_NE(exit_before, nullptr) << "the exit before the call is a guard site in the state before the call";
+  ASSERT_NE(exit_after, nullptr) << "the exit after it is a guard site in the state after the call";
+  // The call: this frame with the callee running, in the state before (the interpreter's call still to be made).
+  EXPECT_EQ(call->identity.function, before.function);
+  EXPECT_EQ(call->identity.offset, before.offset);
+  ASSERT_EQ(call->frame_state_count, 3u);
+  EXPECT_EQ(call->frame_state[0].kind, GRCORE_LOC_CONSTANT);
+  EXPECT_EQ(call->frame_state[0].value, 11);
+  EXPECT_EQ(slots_of(call), (std::set<int64_t>{grjit_emit_slot(live_after), grjit_emit_slot(in_before), grjit_emit_slot(in_after)}))
+      << "live after it, plus what either state names, and neither the result (named only by the state after it) nor the argument";
+  // The exit before the call: the state before, only what it names.
+  EXPECT_EQ(exit_before->identity.function, before.function);
+  ASSERT_EQ(exit_before->frame_state_count, 3u);
+  EXPECT_EQ(exit_before->frame_state[0].value, 11);
+  EXPECT_EQ(slots_of(exit_before), (std::set<int64_t>{grjit_emit_slot(in_before)}));
+  // The exit after it: the state after the call, the result included.
+  EXPECT_EQ(exit_after->identity.function, after.function);
+  ASSERT_EQ(exit_after->frame_state_count, 3u);
+  EXPECT_EQ(exit_after->frame_state[0].value, 12);
+  EXPECT_EQ(slots_of(exit_after), (std::set<int64_t>{grjit_emit_slot(in_after), grjit_emit_slot(res)}));
+  // The three are distinct places: the return addresses of the call and of the two hook calls.
+  EXPECT_NE(call->code_offset, exit_before->code_offset);
+  EXPECT_NE(exit_before->code_offset, exit_after->code_offset);
+}
+
 TEST(Natives, TheNativeStackIsCheckedAtTheCallSiteForTheStackArgumentsAndTheNativesOwnUseToTheByte) {
   JitWorld w;
+  g_hook_ctx = w.ctx;
+  g_bad_hook_ctx = false;
   NativeTab t;
   uintptr_t * limit = reinterpret_cast<uintptr_t *>(
       reinterpret_cast<char *>(w.ctx) + grcore_jit_layout()->native_limit_offset);
-  for (size_t n : {size_t{0}, size_t{4}, size_t{5}, size_t{6}, size_t{9}, size_t{16}}) {
+  // Every count of arguments from zero to sixteen, with and without a status, and three declared uses.
+  for (int with_status = 0; with_status < 2; with_status++)
+  for (size_t n = 0; n <= 16; n++) {
     for (uint32_t declared : {0u, 100u, 4096u}) {
+      SCOPED_TRACE(with_status);
       std::vector<GRJIT_Type> types(n, TI);
-      uint32_t id = t.add(reinterpret_cast<const void *>(grjit_test_align_stub), types, kNoResult, 0, declared);
-      Bare bare(t, id, types, kNoResult);
+      uint32_t id = t.add(align_stub(with_status != 0), types, kNoResult, with_status != 0 ? GRJIT_NATIVE_STATUS : 0,
+          declared);
+      Bare bare(t, id, types, kNoResult, with_status != 0);
       Compiled c(bare.f, w.pages());
       ASSERT_TRUE(c);
       std::vector<uint64_t> args(n, 1);
@@ -513,11 +741,13 @@ TEST(Natives, TheNativeStackIsCheckedAtTheCallSiteForTheStackArgumentsAndTheNati
           EXPECT_EQ(grjit_test_entry_count, 0u) << "the native is not called";
           EXPECT_EQ(g_deopts, 1);
           EXPECT_EQ(g_last_cause, 0u) << "an exit before the call is not a native's status";
+          EXPECT_EQ(run.out[0], 0u) << "and the entry reports cause zero";
         }
       }
       *limit = 0;
     }
   }
+  EXPECT_FALSE(g_bad_hook_ctx) << "the deopt hook is handed the context the code was called with";
 }
 
 /* ===== The engine's side, played by the fixture ===================================== */
@@ -683,6 +913,49 @@ GRJIT_NativeResult reenter(void * ctx, uint64_t fn, uint64_t arg, bool compiled)
   }
   return {o.value, GRJIT_NATIVE_OK, 0};
 }
+/* Re-enters compiled code and, once it returned, walks and collects: the nested run's adapter zeroed the cell
+ * on its way out, so the outer compiled frames are described by the record this native opened, and by nothing
+ * else. */
+GRJIT_NativeResult nat_reenter_then_collect(void * ctx, uint64_t fn, uint64_t arg) {
+  check_ctx(ctx);
+  Engine & e = E();
+  FX_NATIVE_SCOPE(scope, e, GRCORE_ACTIVATION_REENTRY);
+  if (!scope.ok()) {
+    return {0, GRJIT_NATIVE_UNWIND, 0};
+  }
+  Outcome o = e.run_nested(static_cast<int>(fn), {arg}, true);
+  if (!o.finished) {
+    return {0, GRJIT_NATIVE_UNWIND, 0};
+  }
+  walk_now();
+  e.collect();
+  return {o.value, GRJIT_NATIVE_OK, 0};
+}
+/* Re-entry with a reference argument: the target's first parameter is a reference, the rest integers (zero). */
+GRJIT_NativeResult reenter_ref(void * ctx, uint64_t fn, uint64_t ref, bool compiled) {
+  return reenter(ctx, fn, ref, compiled);
+}
+GRJIT_NativeResult nat_reenter_ref_interp(void * ctx, uint64_t fn, uint64_t ref) { return reenter_ref(ctx, fn, ref, false); }
+GRJIT_NativeResult nat_reenter_ref_compiled(void * ctx, uint64_t fn, uint64_t ref) { return reenter_ref(ctx, fn, ref, true); }
+
+/* A status native of any arity whose status comes from its arguments (so both tiers agree): one when the first
+ * argument is a multiple of five. */
+template <size_t... Is>
+GRJIT_NativeResult sumx_status_n(void * ctx, W<Is>... a) {
+  GRJIT_NativeResult r = sum_status_n<Is...>(ctx, a...);
+  const uint64_t v[] = {a..., 0};
+  r.status = (sizeof...(Is) > 0 && v[0] % 5 == 0) ? 1u : 0u;
+  return r;
+}
+template <size_t... Is>
+const void * sumx_status_ptr(std::index_sequence<Is...>) {
+  GRJIT_NativeResult (*f)(void *, W<Is>...) = &sumx_status_n<Is...>;
+  return reinterpret_cast<const void *>(f);
+}
+template <size_t... Ns>
+std::array<const void *, sizeof...(Ns)> make_sumx(std::index_sequence<Ns...>) {
+  return {sumx_status_ptr(std::make_index_sequence<Ns>{})...};
+}
 GRJIT_NativeResult nat_reenter_interp(void * ctx, uint64_t fn, uint64_t arg) {
   return reenter(ctx, fn, arg, false);
 }
@@ -693,7 +966,8 @@ GRJIT_NativeResult nat_reenter_compiled(void * ctx, uint64_t fn, uint64_t arg) {
 /* The ids a test uses. */
 struct Nat {
   int log, add, newobj, collect, walk, walk_collect, keep, nokeep, status, unwind, pause,
-      status_collect, reenter_i, reenter_c;
+      status_collect, reenter_i, reenter_c, reenter_collect, reenter_ref_i, reenter_ref_c;
+  int sum[17], sumx[17];
 };
 
 Nat register_natives(Engine & e) {
@@ -715,6 +989,15 @@ Nat register_natives(Engine & e) {
   n.pause = e.add_native(reinterpret_cast<const void *>(nat_pause), {I}, I, ST, 64, "pause");
   n.status_collect = e.add_native(reinterpret_cast<const void *>(nat_status_collect), {I, I}, I, ST, 4096, "status_collect");
   n.reenter_i = e.add_native(reinterpret_cast<const void *>(nat_reenter_interp), {I, I}, I, RE, 1024, "reenter_i");
+  n.reenter_collect = e.add_native(reinterpret_cast<const void *>(nat_reenter_then_collect), {I, I}, I, RE, 4096, "reenter_collect");
+  n.reenter_ref_i = e.add_native(reinterpret_cast<const void *>(nat_reenter_ref_interp), {I, R}, I, RE, 1024, "reenter_ref_i");
+  n.reenter_ref_c = e.add_native(reinterpret_cast<const void *>(nat_reenter_ref_compiled), {I, R}, I, RE, 1024, "reenter_ref_c");
+  static const auto sumx = make_sumx(std::make_index_sequence<17>{});
+  for (size_t k = 0; k <= 16; k++) {
+    std::vector<GRJIT_Type> types(k, I);
+    n.sum[k] = e.add_native(sums()[k], types, I, 0, 256, "sum");
+    n.sumx[k] = e.add_native(sumx[k], types, I, ST, 256, "sumx");
+  }
   n.reenter_c = e.add_native(reinterpret_cast<const void *>(nat_reenter_compiled), {I, I}, I, RE, 1024, "reenter_c");
   return n;
 }
@@ -1739,14 +2022,16 @@ TEST(Natives, NestedGuestCodeThatClearsTheEntrySlotOfTheOuterFunctionLeavesItsCo
 /* ---- The native stack ------------------------------------------------------------------------ */
 
 TEST(Natives, ABudgetOneByteEitherSideOfTheCallsNeedMakesTheCallOrAnExitBeforeItAndNeverAFault) {
-  for (size_t nargs : {size_t{0}, size_t{4}, size_t{5}, size_t{9}, size_t{16}}) {
+  for (int with_status = 0; with_status < 2; with_status++)
+  for (size_t nargs : {size_t{0}, size_t{4}, size_t{5}, size_t{6}, size_t{9}, size_t{16}}) {
     for (uint32_t declared : {uint32_t{4000}, uint32_t{9000}}) {
+      SCOPED_TRACE(with_status);
       SCOPED_TRACE(nargs);
       SCOPED_TRACE(declared);
       std::vector<GRJIT_Type> types(nargs, GRJIT_TYPE_I64);
       auto build = [&](Engine & e, int * top) {
-        int id = e.add_native(reinterpret_cast<const void *>(grjit_test_align_stub), types, GRJIT_NATIVE_NO_RESULT, 0,
-            declared, "stub");
+        int id = e.add_native(align_stub(with_status != 0), types, GRJIT_NATIVE_NO_RESULT,
+            with_status != 0 ? GRJIT_NATIVE_STATUS : 0, declared, "stub");
         int mid = e.reserve();
         {
           P p("mid", {GRJIT_TYPE_I64});
@@ -1811,6 +2096,52 @@ TEST(Natives, ABudgetOneByteEitherSideOfTheCallsNeedMakesTheCallOrAnExitBeforeIt
         }
         EXPECT_EQ(o.frames_left, 0u);
       }
+    }
+  }
+}
+
+TEST(Natives, AStatusNativeWithNoResultLeavesOnAStatusAndNeverWritesADestination) {
+  Engine e;
+  Nat n = register_natives(e);
+  int nores = e.add_native(reinterpret_cast<const void *>(+[](void * ctx, uint64_t v, uint64_t s) -> GRJIT_NativeResult {
+                             check_ctx(ctx);
+                             E().trace.push_back(static_cast<int64_t>(v));
+                             return {0, static_cast<uint32_t>(s), 0};
+                           }),
+      {GRJIT_TYPE_I64, GRJIT_TYPE_I64}, GRJIT_NATIVE_NO_RESULT, GRJIT_NATIVE_STATUS, 64, "nores_status");
+  int g = e.reserve(), f = e.reserve();
+  {
+    P p("g", {GRJIT_TYPE_I64, GRJIT_TYPE_I64});
+    int w = p.local(), one = p.local(), r = p.local();
+    p.native(-1, nores, {0, 1});
+    p.native(w, n.log, {0});
+    p.cnst(one, 1);
+    p.bin(K::ADD, r, w, one);
+    p.ret(r);
+    e.set(g, p.done());
+  }
+  {
+    P p("f", {GRJIT_TYPE_I64, GRJIT_TYPE_I64});
+    int r = p.local();
+    p.call(r, g, {0, 1});
+    p.ret(r);
+    e.set(f, p.done());
+  }
+  for (u64 status : {u64{0}, u64{1}, u64{9}}) {
+    SCOPED_TRACE(status);
+    const long exits0 = e.st.status_exits, deopts0 = e.st.deopts;
+    Pair p = run_both(e, f, {5, status});
+    ASSERT_TRUE(p.i.finished);
+    ASSERT_TRUE(p.c.finished);
+    EXPECT_EQ(p.c.value, p.i.value);
+    EXPECT_EQ(p.c.value, 1006u);
+    EXPECT_EQ(p.tc, p.ti) << "the native ran once, then the log";
+    EXPECT_EQ(p.tc, (std::vector<int64_t>{5, 5}));
+    EXPECT_EQ(e.st.status_exits - exits0, status == 0 ? 0 : 1) << "a non-zero status leaves even with nowhere to put a result";
+    EXPECT_EQ(e.st.deopts - deopts0, status == 0 ? 0 : 1);
+    if (status != 0) {
+      EXPECT_EQ(p.c.exit, uint32_t{GRJIT_EXIT_DEOPT});
+      EXPECT_EQ(e.st.last_cause, GRJIT_CAUSE_NATIVE | status);
     }
   }
 }
@@ -1997,9 +2328,54 @@ void generate_natives(Engine & e, const Nat & nat, std::mt19937 & rng, int n, st
       }
       return args;
     };
-    int steps = pick(1, 5);
+    int steps = pick(1, 6);
+    // Arguments of integer type for a native of `k` arguments, from what this function holds.
+    auto int_args = [&](int k) {
+      std::vector<int> args;
+      for (int q = 0; q < k; q++) {
+        int w = pick(0, 3);
+        if (w == 0) {
+          args.push_back(p.imm(pick(-20, 20)));
+        } else {
+          args.push_back(s);
+        }
+      }
+      return args;
+    };
     for (int stp = 0; stp < steps; stp++) {
-      switch (pick(0, 12)) {
+      switch (pick(0, 15)) {
+        case 13: {
+          int k = pick(0, 16);
+          p.native(r, nat.sum[k], int_args(k));
+          p.bin(K::ADD, s, s, r);
+          break;
+        }
+        case 14: {
+          int k = pick(0, 16);
+          p.native(r, nat.sumx[k], int_args(k));
+          p.bin(K::ADD, s, s, r);
+          break;
+        }
+        case 15: {
+          std::vector<int> targets;
+          for (int j = 0; j < i; j++) {
+            const auto & ty = (*sigs)[static_cast<size_t>(j)].types;
+            bool ok = !ty.empty() && ty[0] == GRJIT_TYPE_REF;
+            for (size_t q = 1; q < ty.size(); q++) {
+              ok = ok && ty[q] == GRJIT_TYPE_I64;
+            }
+            if (ok) {
+              targets.push_back(j);
+            }
+          }
+          if (!targets.empty()) {
+            int j = targets[static_cast<size_t>(pick(0, static_cast<int>(targets.size()) - 1))];
+            p.cnst(fid, (*fns)[static_cast<size_t>(j)]);
+            p.native(r, pick(0, 1) == 0 ? nat.reenter_ref_i : nat.reenter_ref_c, {fid, obj});
+            p.bin(K::ADD, s, s, r);
+          }
+          break;
+        }
         case 0: p.native(r, nat.log, {s}); p.bin(K::ADD, s, s, r); break;
         case 1: p.native(r, nat.add, {s, s}); p.bin(K::ADD, s, s, r); break;
         case 2:
@@ -2093,6 +2469,7 @@ void generate_natives(Engine & e, const Nat & nat, std::mt19937 & rng, int n, st
 
 TEST(Natives, GeneratedProgramsOfGuestCallsTailCallsNativesAndReentryAgreeWithTheInterpreterFrameForFrameAtEveryPoll) {
   long finished = 0, unwound = 0, deopted = 0, direct = 0, status_exits = 0, polls_compared = 0, unwinds = 0;
+  long wide_natives = 0, status_sums = 0, ref_reentries = 0;
   for (unsigned seed = 0; seed < 150; seed++) {
     SCOPED_TRACE(seed);
     if (std::getenv("FX_TRACE_SEEDS") != nullptr) {
@@ -2100,7 +2477,7 @@ TEST(Natives, GeneratedProgramsOfGuestCallsTailCallsNativesAndReentryAgreeWithTh
     }
     std::mt19937 rng(seed * 7919u + 13u);
     Engine e;
-    e.torture = seed % 2 == 0;
+    e.torture = true; // every seed, every GC point
     e.interpreter_never_moves = true; // the interpreter has no derived pointers: nothing moves while it runs
     e.record_polls = true;
     Nat nat = register_natives(e);
@@ -2110,6 +2487,20 @@ TEST(Natives, GeneratedProgramsOfGuestCallsTailCallsNativesAndReentryAgreeWithTh
     generate_natives(e, nat, rng, n, &fns, &sigs);
     for (int fn : fns) {
       ASSERT_TRUE(e.compile_fn(fn)); // so every ENTRYOF has an entry to take
+      for (const Ins & in : e.funcs[static_cast<size_t>(fn)].code) {
+        if (in.k != K::NATIVE) {
+          continue;
+        }
+        if (in.args.size() >= 6 && (in.native == nat.sum[in.args.size()] || in.native == nat.sumx[in.args.size()])) {
+          wide_natives++;
+        }
+        if (in.args.size() >= 1 && in.native == nat.sumx[in.args.size()]) {
+          status_sums++;
+        }
+        if (in.native == nat.reenter_ref_i || in.native == nat.reenter_ref_c) {
+          ref_reentries++;
+        }
+      }
     }
     // Every compiled poll takes its slow path (a snapshot) and the interpreter's snapshots are the same.
     *reinterpret_cast<uint64_t *>(reinterpret_cast<unsigned char *>(e.ctx) + grcore_jit_layout()->request_word_offset) = 1;
@@ -2158,8 +2549,9 @@ TEST(Natives, GeneratedProgramsOfGuestCallsTailCallsNativesAndReentryAgreeWithTh
     EXPECT_FALSE(e.bad_native_ctx);
   }
   std::printf("natives: 150 generated programs, %ld runs finished and %ld unwound, %ld left compiled code and %ld did "
-              "not, %ld exits through a native's status, %ld unwinds, %ld polls compared frame for frame\n",
-      finished, unwound, deopted, direct, status_exits, unwinds, polls_compared);
+              "not, %ld exits through a native's status, %ld unwinds, %ld polls compared frame for frame; natives of six or more arguments %ld, status sums %ld, "
+              "re-entries with a reference %ld\n",
+      finished, unwound, deopted, direct, status_exits, unwinds, polls_compared, wide_natives, status_sums, ref_reentries);
   // Every kind of run happened, in numbers: the generator reaches the paths it exists to reach.
   EXPECT_GT(finished, 300);
   EXPECT_GT(unwound, 5);
@@ -2168,6 +2560,9 @@ TEST(Natives, GeneratedProgramsOfGuestCallsTailCallsNativesAndReentryAgreeWithTh
   EXPECT_GT(status_exits, 50);
   EXPECT_GT(polls_compared, 200);
   EXPECT_GT(unwinds, 20);
+  EXPECT_GT(wide_natives, 100);
+  EXPECT_GT(status_sums, 100);
+  EXPECT_GT(ref_reentries, 10);
 }
 
 
@@ -2225,6 +2620,99 @@ TEST(Natives, ANativeOfEveryArityCalledFromTheBottomOfACompiledChainGivesTheCRef
 }
 
 /* ---- What a native call is not: no reservation, no depth, no guest frame ----------------------- */
+
+TEST(Natives, ANativeThatReentersCompiledCodeAndThenCollectsStillHasTheOuterChainWalkedPreciselyAndUpdated) {
+  Engine e;
+  e.torture = true;
+  Nat n = register_natives(e);
+  int g = e.reserve(), outer = e.reserve(), top = e.reserve();
+  {
+    P p("G", {GRJIT_TYPE_I64});
+    int r = p.local(), one = p.local();
+    p.cnst(one, 1);
+    p.bin(K::ADD, r, 0, one);
+    p.ret(r);
+    e.set(g, p.done());
+  }
+  {
+    P p("outer", {GRJIT_TYPE_I64});
+    int obj = p.local(GRJIT_TYPE_REF), dp = p.local(GRJIT_TYPE_PTR), gid = p.local(), r = p.local(), v = p.local(),
+        t = p.local(), sum = p.local();
+    p.nw(obj, 40);
+    p.derive(dp, obj, 8);
+    p.cnst(gid, g);
+    p.native(r, n.reenter_collect, {gid, 0});
+    p.get(v, obj);
+    p.load(t, dp);
+    p.bin(K::ADD, sum, r, v);
+    p.bin(K::ADD, sum, sum, t);
+    p.ret(sum);
+    e.set(outer, p.done());
+  }
+  {
+    P p("top", {GRJIT_TYPE_I64});
+    int obj = p.local(GRJIT_TYPE_REF), r = p.local(), v = p.local(), sum = p.local();
+    p.nw(obj, 5);
+    p.call(r, outer, {0});
+    p.get(v, obj);
+    p.bin(K::ADD, sum, r, v);
+    p.ret(sum);
+    e.set(top, p.done());
+  }
+  g_walks.clear();
+  Pair p = run_both(e, top, {3});
+  ASSERT_TRUE(p.i.finished);
+  ASSERT_TRUE(p.c.finished);
+  EXPECT_EQ(p.c.value, p.i.value);
+  EXPECT_EQ(p.c.value, 4u + 40u + 40u + 5u);
+  ASSERT_FALSE(g_walks.empty());
+  const WalkSeen & w = g_walks.back();
+  EXPECT_FALSE(w.broken);
+  EXPECT_EQ(w.fns, (std::vector<u64>{static_cast<u64>(outer), static_cast<u64>(top)}))
+      << "after the nested run returned (and its adapter zeroed the cell) the outer frames are still walked, precisely";
+  EXPECT_EQ(w.roots, 2u) << "one reference in each of the two frames";
+  EXPECT_EQ(w.duplicate_roots, 0u);
+  EXPECT_EQ(e.heap.poisoned_reads, 0) << "and updated by the collection the native made after the re-entry";
+  EXPECT_GT(e.heap.moved, 0);
+  EXPECT_EQ(e.st.deopts, 0);
+}
+
+TEST(Natives, ATableFreedAfterTheCompileIsNotNeededByTheCodeAndTheNativeIsStillCalled) {
+  JitWorld w;
+  uint32_t id;
+  GRJIT_Code * code = nullptr;
+  {
+    NativeTab t;
+    id = t.add(sums()[3], {TI, TI, TI}, TI);
+    B b("freed", 1);
+    GRJIT_VReg x = b.param(TI);
+    GRJIT_VReg r = b.reg(TI);
+    b.callable(hooks());
+    b.natives(t);
+    b.at(b.block());
+    b.call_native(r, id, {V(x), I(2), V(x)}, kId, {grjit_frame_slot_vreg(x)});
+    b.ret(V(r));
+    GRJIT_Function * fn = b.finish();
+    GRJIT_CompileOptions o{};
+    o.pages = w.pages();
+    ASSERT_EQ(grjit_compile(&o, fn, &code), GRJIT_OK);
+    grjit_function_destroy(fn);
+  } // the table, its descriptors and its parameter arrays are freed here
+  // Scribble on freed memory the allocator may hand back, so a read of the table would show.
+  std::vector<std::unique_ptr<char[]>> junk;
+  for (int i = 0; i < 64; i++) {
+    junk.emplace_back(new char[256]);
+    std::memset(junk.back().get(), 0xAB, 256);
+  }
+  std::vector<uint64_t> args = {9};
+  std::vector<uint64_t> out(grjit_code_out_words(code), 0);
+  g_calls = 0;
+  ASSERT_EQ(grjit_code_call(code, w.ctx, args.data(), out.data()), uint32_t{GRJIT_EXIT_RETURNED});
+  const uint64_t a[3] = {9, 2, 9};
+  EXPECT_EQ(out[0], call_c(3, sums()[3], w.ctx, a));
+  EXPECT_EQ(g_calls, 2) << "the native ran, and so did the reference";
+  grjit_code_destroy(code);
+}
 
 TEST(Natives, ANativeCallPushesNoGuestFrameCountsNoDepthAndExtendsNoReservation) {
   // A converting engine, so that the reservation has a capacity to compare, and probes before and
