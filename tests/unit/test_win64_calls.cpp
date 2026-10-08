@@ -23,11 +23,13 @@
 #include "../calls_fixture.h"
 
 #include "../../src/backend/backend_internal.h"
+#include "../../src/x86_64/emit_internal.h"
 #include "../../src/code/code_internal.h"
 #include "../../src/ir/ir_internal.h"
 #include "../../src/x86_64/asm_internal.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <set>
 #include <string>
@@ -37,6 +39,9 @@
 #endif
 
 using namespace fx;
+
+/* The tests' outgoing-area figure is the library's. */
+static_assert(kWin64OutgoingBytes == GRJIT_WIN64_OUTGOING, "the tests' 48 bytes are the library's outgoing area");
 
 namespace {
 
@@ -169,6 +174,113 @@ TEST(Win64Calls, NoCalleeSavedRegisterIsEncodedInAnyGeneratedCallableFunction) {
   EXPECT_EQ(seen & kScratch, kScratch) << "the scan is not vacuous: every scratch register is used by some";
 }
 
+#ifndef _WIN32
+#include <unistd.h>
+#endif
+
+TEST(Win64Calls, TheDisassemblerAgreesThatNoCalleeSavedRegisterAppearsInAnyGeneratedCallableFunction) {
+#ifdef _WIN32
+  GTEST_SKIP() << "needs POSIX mkstemp/popen and a host objdump";
+#else
+  /* Independent of the assembler's own record, which is a mask of the general registers and cannot see
+   * xmm6-xmm15: the code of every generated callable function (the adapter's and the body's, and not the tag
+   * between them, which is data), read back by objdump, and every register it names. */
+  {
+    char probe[] = "/tmp/grjit-w64c-probe-XXXXXX";
+    int fd = mkstemp(probe);
+    ASSERT_GE(fd, 0);
+    const unsigned char nop = 0x90;
+    ASSERT_EQ(write(fd, &nop, 1), 1);
+    close(fd);
+    std::string cmd = std::string("objdump -D -b binary -mi386:x86-64 -M intel ") + probe + " 2>&1";
+    std::string text;
+    FILE * p = popen(cmd.c_str(), "r");
+    int status = -1;
+    if (p != nullptr) {
+      char buf[256];
+      while (fgets(buf, sizeof buf, p) != nullptr) {
+        text += buf;
+      }
+      status = pclose(p);
+    }
+    unlink(probe);
+    if (status != 0 || text.find("nop") == std::string::npos) {
+      GTEST_SKIP() << "no objdump that reads x86-64 here (exit status " << status << ")";
+    }
+  }
+  Bytes blob;
+  unsigned functions = 0;
+  auto visit = [&](const GRJIT_Function * f, unsigned) {
+    Emit em(f);
+    EXPECT_TRUE(em.ok());
+    blob.insert(blob.end(), em.e.bytes, em.e.bytes + em.e.prologue.adapter_end);
+    blob.insert(blob.end(), em.e.bytes + em.e.internal_offset, em.e.bytes + em.e.size);
+    functions++;
+    return true;
+  };
+  cg::each_call_function(visit);
+  cg::each_tail_function(visit);
+  cg::each_native_function(visit);
+  ASSERT_EQ(functions, 1016u);
+  char path[] = "/tmp/grjit-w64c-XXXXXX";
+  int fd = mkstemp(path);
+  ASSERT_GE(fd, 0);
+  ASSERT_EQ(write(fd, blob.data(), blob.size()), static_cast<ssize_t>(blob.size()));
+  close(fd);
+  std::string cmd = std::string("objdump -D -b binary -mi386:x86-64 -M intel ") + path + " 2>&1";
+  FILE * p = popen(cmd.c_str(), "r");
+  ASSERT_NE(p, nullptr);
+  std::string text;
+  char buf[512];
+  while (fgets(buf, sizeof buf, p) != nullptr) {
+    text += buf;
+  }
+  int status = pclose(p);
+  unlink(path);
+  ASSERT_EQ(status, 0) << "objdump failed on the generated code";
+  std::set<std::string> forbidden = {"rbx", "ebx", "bx", "bl", "rsi", "esi", "si", "sil", "rdi", "edi", "di", "dil",
+      "r12", "r12d", "r12w", "r12b", "r13", "r13d", "r13w", "r13b", "r14", "r14d", "r14w", "r14b", "r15", "r15d",
+      "r15w", "r15b"};
+  for (int i = 6; i <= 15; i++) {
+    forbidden.insert("xmm" + std::to_string(i));
+    forbidden.insert("ymm" + std::to_string(i));
+  }
+  size_t instructions = 0, named_scratch = 0;
+  size_t at_ = 0;
+  while (at_ < text.size()) {
+    size_t nl = text.find('\n', at_);
+    std::string line = text.substr(at_, nl == std::string::npos ? std::string::npos : nl - at_);
+    at_ = nl == std::string::npos ? text.size() : nl + 1;
+    size_t colon = line.find(":\t");
+    if (colon == std::string::npos) {
+      continue;
+    }
+    size_t second = line.find('\t', colon + 2);
+    if (second == std::string::npos) {
+      continue;
+    }
+    std::string insn = line.substr(second + 1);
+    instructions++;
+    for (size_t k = 0; k < insn.size();) {
+      if (!std::isalnum(static_cast<unsigned char>(insn[k]))) {
+        k++;
+        continue;
+      }
+      size_t e = k;
+      while (e < insn.size() && std::isalnum(static_cast<unsigned char>(insn[e]))) {
+        e++;
+      }
+      const std::string word = insn.substr(k, e - k);
+      EXPECT_EQ(forbidden.count(word), 0u) << insn;
+      named_scratch += (word == "rcx" || word == "r10" || word == "r11") ? 1 : 0;
+      k = e;
+    }
+  }
+  EXPECT_GT(instructions, 20000u) << "the scan must have read the code";
+  EXPECT_GT(named_scratch, 1000u) << "and the scratch registers it is meant to find";
+#endif
+}
+
 TEST(Win64Calls, TheSysVCodeOfTheSameFunctionsDoesNameCalleeSavedRegistersSoTheScanCanFail) {
   uint32_t seen = 0;
   cg::each_call_function([&](const GRJIT_Function * f, unsigned) {
@@ -203,9 +315,8 @@ TEST(Win64Calls, ACalleeWithMoreThanFourParametersPopsTheRestWithRetAndAnImmedia
     const size_t returns = em.count(want, from, to);
     EXPECT_EQ(returns, em.count(tail, from, to)) << "every epilogue of the body pops exactly " << in_a;
     EXPECT_GE(returns, 3u) << "the return, the deopt and the failure";
-    /* The parameters: the first four are stored from rcx, rdx, r8, r9 and the rest loaded from
-     * [rbp + 16 + 8 i]. */
-    /* The first four parameters are stored from rcx, rdx, r8 and r9, each to its own slot. */
+    /* The parameters: the first four are stored from rcx, rdx, r8 and r9, each to its own slot, and the rest
+     * loaded from [rbp + 16 + 8 i]. */
     const uint8_t stores[4][3] = {{0x48, 0x89, 0x4D}, {0x48, 0x89, 0x55}, {0x4C, 0x89, 0x45}, {0x4C, 0x89, 0x4D}};
     for (unsigned i = 0; i < 4; i++) {
       const Bytes store = {stores[i][0], stores[i][1], stores[i][2], static_cast<uint8_t>(-8 * (static_cast<int>(i) + 4))};
@@ -316,52 +427,205 @@ TEST(Win64Calls, ATailCallMovesTheReturnAddressByTheDifferenceOfTheTwoStackAreas
   }
 }
 
-TEST(Win64Calls, ANativeCallMakesTheShadowSpaceTheStackWordsAndTheBufferInOneRoundedArea) {
-  /* The area is `round16(32 + 8 k + 16 for a status)` with `k` the C words past the fourth
-   * (the context first, and for a status the hidden pointer before it). Read from the `sub rsp` in front of
-   * the call for every arity from 0 to 16, with and without a status. */
-  unsigned seen = 0;
+namespace {
+
+/* `[rsp + d]` as a ModRM, SIB and displacement for a register field `reg` (0 to 7). */
+Bytes rsp_operand(unsigned reg, uint32_t d) {
+  Bytes out;
+  if (d <= 127) {
+    out = {static_cast<uint8_t>(0x44 | (reg << 3)), 0x24, static_cast<uint8_t>(d)};
+  } else {
+    out = {static_cast<uint8_t>(0x84 | (reg << 3)), 0x24, static_cast<uint8_t>(d), static_cast<uint8_t>(d >> 8),
+        static_cast<uint8_t>(d >> 16), static_cast<uint8_t>(d >> 24)};
+  }
+  return out;
+}
+
+Bytes cat2(const Bytes & a, const Bytes & b) {
+  Bytes out = a;
+  out.insert(out.end(), b.begin(), b.end());
+  return out;
+}
+
+/* `add rsp, area` or `sub rsp, area` (`op` 0xC4 or 0xEC) as the assembler writes it. */
+Bytes rsp_adjust(uint8_t op, uint32_t area) {
+  if (area <= 127) {
+    return {0x48, 0x83, op, static_cast<uint8_t>(area)};
+  }
+  return {0x48, 0x81, op, static_cast<uint8_t>(area), static_cast<uint8_t>(area >> 8),
+      static_cast<uint8_t>(area >> 16), static_cast<uint8_t>(area >> 24)};
+}
+
+bool at(const Emit & em, size_t pos, const Bytes & want) {
+  return pos + want.size() <= em.e.size && std::memcmp(em.e.bytes + pos, want.data(), want.size()) == 0;
+}
+
+} // namespace
+
+TEST(Win64Calls, EachNativeCallSiteMakesItsShadowSpaceStackWordsAndBufferInOneRoundedAreaAndReadsThePairFromIt) {
+  /* Read per call site, from the code. A native's call is `mov rax, <its address>; call rax`, and:
+   *  - the nearest `sub rsp, area` before the `mov` is the area, `round16(32 + 8 k + 16 for a status)` with
+   *    `k` the C words past the fourth (the context first, and for a status the hidden pointer before it),
+   *    and the `add rsp, area` that frees it follows the call (and, with a status, the reads of the pair);
+   *  - with a status the first C argument is `lea rcx, [rsp + buffer]`, the buffer after the 32 bytes of
+   *    shadow space and the `k` stack words, the context goes to `rdx`, and straight after the call come
+   *    `mov rax, [rsp + buffer]` and a 32-bit `mov edx, [rsp + buffer + 8]` (no `mov edx, edx`, which
+   *    would be needed only for a register); the 32-bit half is the status and `reserved` is never read;
+   *  - without one the context goes to `rcx` and the call is followed by the `add rsp` at once. */
+  unsigned sites = 0, status_sites = 0, plain_sites = 0;
   cg::each_native_function([&](const GRJIT_Function * f, unsigned id) {
     Emit em(f);
     EXPECT_TRUE(em.ok());
-    /* The natives of the family: each function calls one with `arity` parameters. Find the
-     * area from the sequence: sub rsp (imm8 or imm32) and read it back against the descriptor. */
-    size_t arity = 0;
-    bool status = false;
-    for (size_t b = 0; b < f->block_count && arity == 0 && !status; b++) {
+    for (size_t b = 0; b < f->block_count; b++) {
       for (size_t i = 0; i < f->blocks[b].count; i++) {
         const GRJIT_Op & op = f->blocks[b].ops[i];
-        if (op.kind == GRJIT_OP_CALL_NATIVE) {
-          const GRJIT_NativeDesc * d = grjit_native_table_get(f->natives, op.native);
-          arity = op.arg_count;
-          status = (d->flags & GRJIT_NATIVE_STATUS) != 0;
-          break;
+        if (op.kind != GRJIT_OP_CALL_NATIVE) {
+          continue;
         }
+        const GRJIT_NativeDesc * d = grjit_native_table_get(f->natives, op.native);
+        const bool status = (d->flags & GRJIT_NATIVE_STATUS) != 0;
+        const size_t arity = op.arg_count;
+        const size_t words = arity + 1 + (status ? 1 : 0);
+        const size_t stack_words = words > 4 ? words - 4 : 0;
+        const uint32_t area = round16(32 + 8 * stack_words + (status ? 16 : 0));
+        const uint32_t buffer = static_cast<uint32_t>(32 + 8 * stack_words);
+        // `mov rax, <address>` in whichever of its three encodings the assembler chose for this address,
+        // then `call rax`.
+        auto imm = [&](size_t n) {
+          Bytes out;
+          for (size_t k = 0; k < n; k++) {
+            out.push_back(static_cast<uint8_t>(d->address >> (8 * k)));
+          }
+          return out;
+        };
+        const Bytes forms[3] = {cat2({0x48, 0xB8}, imm(8)), cat2({0x48, 0xC7, 0xC0}, imm(4)), cat2({0xB8}, imm(4))};
+        size_t found = 0;
+        for (size_t call_at = em.e.internal_offset; call_at + 2 <= em.e.size; call_at++) {
+          if (!at(em, call_at, {0xFF, 0xD0})) {
+            continue;
+          }
+          const Bytes * mov_form = nullptr;
+          for (const Bytes & form : forms) {
+            if (call_at >= form.size() && at(em, call_at - form.size(), form)) {
+              mov_form = &form;
+              break;
+            }
+          }
+          if (mov_form == nullptr) {
+            continue;
+          }
+          const Bytes mov = *mov_form;
+          const size_t pos = call_at - mov.size();
+          found++;
+          sites++;
+          SCOPED_TRACE(testing::Message() << "function " << id << ": " << arity << " arguments"
+                                          << (status ? ", with a status" : "") << ", area " << area);
+          // The area: the nearest sub rsp before the call.
+          const Bytes sub8 = rsp_adjust(0xEC, area);
+          size_t sub_at = 0;
+          for (size_t q = pos; q-- > em.e.internal_offset && pos - q < 400;) {
+            if (at(em, q, {0x48, 0x83, 0xEC}) || at(em, q, {0x48, 0x81, 0xEC})) {
+              sub_at = q;
+              break;
+            }
+          }
+          if (sub_at == 0) {
+            ADD_FAILURE() << "no sub rsp before the call";
+            continue;
+          }
+          EXPECT_TRUE(at(em, sub_at, sub8)) << "the area made before the call is " << area;
+          const size_t after = pos + mov.size() + 2;
+          const Bytes add = rsp_adjust(0xC4, area);
+          const Bytes ctx_rdx = {0x48, 0x8B, 0x55, 0xF8}; // mov rdx, [rbp - 8]
+          const Bytes ctx_rcx = {0x48, 0x8B, 0x4D, 0xF8}; // mov rcx, [rbp - 8]
+          const Bytes lea = cat2({0x48, 0x8D}, rsp_operand(1, buffer)); // lea rcx, [rsp + buffer]
+          // Between the area and the call: the arguments, and the context in its register.
+          size_t between_lea = 0, between_ctx_rdx = 0, between_ctx_rcx = 0;
+          for (size_t q = sub_at; q < pos; q++) {
+            between_lea += at(em, q, lea) ? 1 : 0;
+            between_ctx_rdx += at(em, q, ctx_rdx) ? 1 : 0;
+            between_ctx_rcx += at(em, q, ctx_rcx) ? 1 : 0;
+          }
+          if (status) {
+            status_sites++;
+            EXPECT_EQ(between_lea, 1u) << "the hidden pointer: lea rcx, [rsp + " << buffer << "]";
+            EXPECT_GE(between_ctx_rdx, 1u) << "the context is the second C word, in rdx";
+            const Bytes rax_buf = cat2({0x48, 0x8B}, rsp_operand(0, buffer));      // mov rax, [rsp + buffer]
+            const Bytes edx_buf = cat2({0x8B}, rsp_operand(2, buffer + 8));       // mov edx, [rsp + buffer + 8]
+            EXPECT_TRUE(at(em, after, rax_buf)) << "the value is read from the buffer first";
+            EXPECT_TRUE(at(em, after + rax_buf.size(), edx_buf)) << "then the 32 bits of the status, and not the half above";
+            EXPECT_TRUE(at(em, after + rax_buf.size() + edx_buf.size(), add))
+                << "the area is freed after the pair is read, and no mov edx, edx stands between (a 64-bit read would need it)";
+          } else {
+            plain_sites++;
+            EXPECT_EQ(between_lea, 0u) << "no buffer for a native without a status";
+            EXPECT_EQ(between_ctx_rdx, 0u);
+            EXPECT_GE(between_ctx_rcx, 1u) << "the context is the first C word, in rcx";
+            EXPECT_TRUE(at(em, after, add)) << "the result is in rax and the area is freed at once";
+          }
+        }
+        EXPECT_GE(found, 1u) << "the call of function " << id << " was found";
       }
     }
-    const size_t words = arity + 1 + (status ? 1 : 0);
-    const size_t stack_words = words > 4 ? words - 4 : 0;
-    const uint32_t area = round16(32 + 8 * stack_words + (status ? 16 : 0));
-    size_t matches = 0;
-    for (size_t i = em.e.internal_offset; i + 7 <= em.e.size; i++) {
-      if (em.e.bytes[i] == 0x48 && em.e.bytes[i + 1] == 0x83 && em.e.bytes[i + 2] == 0xEC &&
-          em.e.bytes[i + 3] == area && area <= 127) {
-        matches++;
-      }
-      if (em.e.bytes[i] == 0x48 && em.e.bytes[i + 1] == 0x81 && em.e.bytes[i + 2] == 0xEC) {
-        uint32_t v;
-        std::memcpy(&v, em.e.bytes + i + 3, 4);
-        if (v == area) {
-          matches++;
-        }
-      }
-    }
-    EXPECT_GE(matches, 1u) << "function " << id << ": " << arity << " arguments"
-                           << (status ? ", with a status" : "") << ": the area is " << area;
-    seen++;
     return true;
   });
-  EXPECT_EQ(seen, 512u);
+  EXPECT_EQ(sites >= 512u, true) << sites;
+  EXPECT_GT(status_sites, 0u);
+  EXPECT_GT(plain_sites, 0u);
+}
+
+TEST(Win64Calls, AFrameOfAPageOrMoreIsProbedAPageAtATimeDownToTheNewRspAndASmallOneIsNot) {
+  /* The prologue of a body, read from its bytes: `lea rax, [rsp - N]` (the lowest address), `lea r11, [rsp + 8]`,
+   * a loop that steps `r11` down by a page (`lea r11, [r11 - 0x1000]`), compares it with `rax`, touches it
+   * (`test [r11], al`) and ends with a touch at `rax` itself (`test [rax], al`), the new `rsp`. Wine does not
+   * need the probes (it commits the stack on any touch), so this is where their presence is held. */
+  const Bytes lea_low = {0x48, 0x8D, 0x84, 0x24}; // lea rax, [rsp - N] (32-bit displacement)
+  const Bytes lea_cursor = {0x4C, 0x8D, 0x5C, 0x24, 0x08};
+  const Bytes step_page = {0x4D, 0x8D, 0x9B, 0x00, 0xF0, 0xFF, 0xFF};
+  const Bytes touch_cursor = {0x41, 0x84, 0x03};
+  const Bytes touch_low = {0x84, 0x00};
+  for (int regs : {40, 400, 505, 506, 600, 1500}) {
+    SCOPED_TRACE(regs);
+    B b("frame", 1);
+    GRJIT_CallHooks h{};
+    h.deopt = reinterpret_cast<decltype(h.deopt)>(0x30300);
+    b.callable(h);
+    GRJIT_VReg first = b.param(GRJIT_TYPE_I64);
+    GRJIT_VReg last = first;
+    for (int i = 1; i < regs; i++) {
+      last = b.reg();
+    }
+    b.at(b.block());
+    b.bin(GRJIT_OP_ADD, last, V(first), I(5));
+    b.ret(V(last));
+    Fn f(b.finish());
+    Emit em(f);
+    ASSERT_TRUE(em.ok());
+    const uint32_t alloc = em.e.prologue.alloc_bytes;
+    const bool probed = uint64_t{alloc} + 8 > 4096;
+    const size_t from = em.e.internal_offset, to = em.e.prologue.alloc_end;
+    EXPECT_EQ(em.count(step_page, from, to), probed ? 1u : 0u) << "a frame of " << alloc << " bytes";
+    EXPECT_EQ(em.count(lea_cursor, from, to), probed ? 1u : 0u);
+    EXPECT_EQ(em.count(touch_cursor, from, to), probed ? 1u : 0u);
+    EXPECT_EQ(em.count(touch_low, from, to), probed ? 1u : 0u) << "the last touch is at the new rsp";
+    if (probed) {
+      // In order, and before the allocation: cursor, step, touch, loop, final touch, then sub rsp.
+      size_t at_ = from;
+      for (const Bytes * part : {&lea_cursor, &step_page, &touch_cursor, &touch_low}) {
+        bool ok = false;
+        for (; at_ + part->size() <= to; at_++) {
+          if (std::memcmp(em.e.bytes + at_, part->data(), part->size()) == 0) {
+            ok = true;
+            at_ += part->size();
+            break;
+          }
+        }
+        EXPECT_TRUE(ok) << "the probe sequence is in order";
+      }
+      EXPECT_LE(at_, to);
+    }
+    (void)lea_low;
+  }
 }
 
 /* ---- The unwind table, on any host ---------------------------------------------------------------- */
@@ -821,7 +1085,12 @@ TEST(Win64CallsUnwind, RtlVirtualUnwindFromInsideANativeGoesUpThroughThreeFrames
     EXPECT_EQ(s.begin, internal) << "the entry is the body's: it begins at the internal entry";
     EXPECT_EQ(s.end, image + size);
     EXPECT_EQ(s.rbp, g_bases[k]) << "the unwound frame register is this frame's own base";
-    EXPECT_EQ(s.rip, k == 0 ? s.rip : g_returns[k - 1]) << "the return address of the frame below";
+    if (k > 0) {
+      EXPECT_EQ(s.rip, g_returns[k - 1]) << "the return address of the frame below";
+    } else {
+      EXPECT_GE(s.rip, internal) << "the innermost frame is unwound to inside the body, where the native was called";
+      EXPECT_LT(s.rip, image + size);
+    }
   }
   /* After the outermost body: the adapter, with the marker in rbp. */
   const Step & adapter = g_steps[4];
@@ -909,8 +1178,9 @@ TEST(Win64CallsUnwind, TheUnwinderRecoversTheCallerFromEveryInstructionOfBothPro
   /* Wine's unwinder reads `ret imm16` as the end of an epilogue and applies the immediate, which
    * the unwind codes do not (they say the caller's `rsp` is the address of the stack arguments).
    * The two agree when there are none, so the body's three epilogue instructions are checked for a
-   * function with no stack arguments against the codes' answer, and for one with them against
-   * wine's, said so in the failure. */
+   * function with no stack arguments against the codes' answer, and for one with them (`n` of 6) against
+   * WINE'S value, not the unwind codes' and not anything the format specifies: those rows say what wine's
+   * unwinder does and nothing about a Windows kernel's. */
   for (unsigned n : {0u, 6u}) {
     SCOPED_TRACE(n);
     JitWorld w;

@@ -1378,6 +1378,11 @@ one place where an asynchronous unwind is not supported, and every other instruc
 epilogues is tested (`Win64CallsUnwind`, with the answer at those three instructions asserted as wine's, in
 the test's own words). The answer is wine's and says nothing about a real Windows kernel.
 
+That a body frame is right for the unwinder whatever its callee pops holds for every instruction but its own last three: they
+are the epilogue rows, and their answer depends on the unwinder reading `ret imm16` as the end of an epilogue, as wine's does
+(a function with no stack arguments ends in a plain `ret` and does not depend on it). It was shown **only under wine**; whether
+a real Windows unwinder reads `ret imm16` that way, and what `rsp` it then reports, is not shown.
+
 **One emitted function, read.** A callable function of six parameters whose only operation is a tail call, through a slot,
 to a callee of seven arguments (`grjit_emit_for` for `GRJIT_ARCH_X86_64_WIN64`, bytes through the host's `objdump -D -b
 binary -mi386:x86-64 -M intel`; 758 bytes, the internal entry at 208, the adapter `[0, 178)`). So `in_A` is 16 (the fifth and

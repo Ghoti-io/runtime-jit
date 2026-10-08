@@ -735,28 +735,27 @@ M_WIN64 = [
      '    if (true) {\n      /* Plain `ret` is the form every unwinder knows as an epilogue\'s end. */', ['testCalls']),
     ('a native\'s area has no shadow space', 'jit', 'src/x86_64/emit.c',
      '  const uint32_t shadow = e->abi->shadow_bytes;\n#endif\n  /* The IR argument that is the first C stack word',
-     '  const uint32_t shadow = 0;\n#endif\n  /* The IR argument that is the first C stack word', ['testNatives']),
+     '  const uint32_t shadow = 0;\n#endif\n  /* The IR argument that is the first C stack word', ['testNatives', 'testWin64_calls']),
     ('a native\'s status is read from the reserved half of the buffer', 'jit', 'src/x86_64/emit.c',
      '    grjit_asm_load32u(a, GRJIT_RDX, GRJIT_RSP, (int32_t)buffer_at + 8);',
-     '    grjit_asm_load32u(a, GRJIT_RDX, GRJIT_RSP, (int32_t)buffer_at + 12);', ['testNatives']),
+     '    grjit_asm_load32u(a, GRJIT_RDX, GRJIT_RSP, (int32_t)buffer_at + 12);', ['testNatives', 'testWin64_calls']),
     ('a native\'s status is read as 64 bits of the buffer', 'jit', 'src/x86_64/emit.c',
      '    grjit_asm_load32u(a, GRJIT_RDX, GRJIT_RSP, (int32_t)buffer_at + 8);',
-     '    grjit_asm_load64(a, GRJIT_RDX, GRJIT_RSP, (int32_t)buffer_at + 8);', ['testNatives']),
+     '    grjit_asm_load64(a, GRJIT_RDX, GRJIT_RSP, (int32_t)buffer_at + 8);', ['testNatives', 'testWin64_calls']),
     ('the hidden pointer of a native with a status points past its buffer', 'jit', 'src/x86_64/emit.c',
      '    grjit_asm_lea(a, C_ARG(e, 0), GRJIT_RSP, (int32_t)buffer_at);',
-     '    grjit_asm_lea(a, C_ARG(e, 0), GRJIT_RSP, (int32_t)buffer_at + 16);', ['testNatives']),
+     '    grjit_asm_lea(a, C_ARG(e, 0), GRJIT_RSP, (int32_t)buffer_at + 16);', ['testNatives', 'testWin64_calls']),
+    ('the context of a native with a status goes in rcx beside its hidden pointer', 'jit', 'src/x86_64/emit.c',
+     '  const unsigned ctx_arg = hidden ? 1u : 0u;', '  const unsigned ctx_arg = 0u;', ['testNatives', 'testWin64_calls']),
     ('a Win64 tail call copies its stack arguments through rdi', 'jit', 'src/x86_64/emit.c',
      '    .tail_copy = GRJIT_RCX,', '    .tail_copy = GRJIT_RDI,', ['testTail']),
     ('the Win64 overflow stub makes no room for the hook\'s shadow space', 'jit', 'src/x86_64/exit.c',
      '    grjit_asm_sub_rsp(a, e->abi->shadow_bytes);\n  }\n  grjit_asm_load64(a, GRJIT_RCX, GRJIT_RBP, 0);',
      '  }\n  grjit_asm_load64(a, GRJIT_RCX, GRJIT_RBP, 0);', ['testWin64_calls']),
-    # Documented equivalent under wine (the sixth element says why): wine commits a thread's stack on a touch
-    # anywhere in its reserved range, so a frame of a mebibyte entered without the probes runs, and the test that
-    # enters one (`ACallableFunctionWhoseFrameIsAMebibyteIsProbed...`) passes. On Windows the same frame without
-    # probes touches memory below the guard page and is a stack overflow; that is not shown here.
+    # Invisible to anything that runs under wine (it commits the stack on any touch in its reserved range), so it
+    # is held by a test of the emitted bytes (`AFrameOfAPageOrMore...`), which runs on every host.
     ('a Win64 callable frame of several pages is not probed', 'jit', 'src/x86_64/emit.c',
-     '    emit_stack_probe(e, alloc, GRJIT_RAX, GRJIT_R11);', '    (void)emit_stack_probe;', ['testWin64_calls'],
-     'wine commits the stack on any touch within its reserved range: the guard-page discipline the probes serve is not wine\'s'),
+     '    emit_stack_probe(e, alloc, GRJIT_RAX, GRJIT_R11);', '    (void)emit_stack_probe;', ['testWin64_calls']),
     ('the adapter\'s RUNTIME_FUNCTION ends one byte early', 'jit', 'src/code/memory.c',
      '      put32(rf + 4, prologue->adapter_end);', '      put32(rf + 4, prologue->adapter_end - 1);', ['testWin64_calls']),
     ('the body\'s RUNTIME_FUNCTION begins sixteen bytes after the internal entry', 'jit', 'src/code/memory.c',
@@ -766,8 +765,10 @@ M_WIN64 = [
 ]
 # The register-count edit is also a host mutation: what reads the convention out of the emitted code
 # runs on every host, so the native run shows it too.
-for _e in M_WIN64[:3]:
-    M.append((_e[0] + ' (read from the emitted code on this host)',) + tuple(_e[1:]))
+_HOST_READABLE = ('register-argument count', 'status is read', 'hidden pointer', 'beside its hidden pointer', 'not probed', 'no shadow space')
+for _e in M_WIN64:
+    if any(_k in _e[0] for _k in _HOST_READABLE):
+        M.append((_e[0] + ' (read from the emitted code on this host)',) + tuple(_e[1:]))
 
 # What each library's tests are.
 CORE_TESTS = ['testRebuild', 'testRegistry', 'testCompiled']
