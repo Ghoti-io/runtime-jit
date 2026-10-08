@@ -65,14 +65,16 @@ typedef struct GRJIT_X86Internal {
 
 /** One x86-64 calling convention's registers: the C ABI's, which a helper, a
  *  hook or a native is called by, and the internal convention's, which a
- *  callable function is written against. Win64 has the C column and no internal
- *  one (`internal` is NULL) until story 7b; a callable function is refused for
- *  it before the emitter runs. */
+ *  callable function is written against. */
 typedef struct GRJIT_X86Abi {
   const GRJIT_Reg * c_args;        ///< The C ABI's integer argument registers.
   unsigned c_reg_args;             ///< How many.
   uint32_t shadow_bytes;           ///< The callee's shadow space, which is where the first
                                    ///< C stack argument is at `rsp`: 32 on Win64, else 0.
+  bool hidden_pair;                ///< A 16-byte struct result (a native's value and status)
+                                   ///< comes back through a hidden pointer in the first C
+                                   ///< argument register, with the context second (Win64),
+                                   ///< and not in `rax:rdx` (SysV).
   const GRJIT_X86Internal * internal;
 } GRJIT_X86Abi;
 
@@ -95,7 +97,8 @@ typedef struct GRJIT_Emit {
   GRJIT_Label * blocks;
   GRJIT_Label refuse;
   bool win64;              ///< The Microsoft x64 flavour (see ::GRJIT_WIN64_OUTGOING).
-  GRJIT_Prologue prologue; ///< Where the prologue's instructions end.
+  GRJIT_Prologue prologue; ///< Where the prologue's instructions end (and, for a callable
+                           ///< function, the adapter's and the body's records).
   /* A callable function (AD-28; backend_internal.h for the convention). */
   GRJIT_Label internal;     ///< The internal entry.
   GRJIT_Label ret_deopted;  ///< Returns DEOPTED with `rax` untouched.

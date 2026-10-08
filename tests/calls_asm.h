@@ -2,13 +2,16 @@
  * @file
  *
  * The assembly stubs the call, tail-call and native-call tests need, in the one
- * place that knows the target: Linux x86-64 (SysV) and Linux arm64 (AAPCS64).
+ * place that knows the target: Linux x86-64 (SysV), Linux arm64 (AAPCS64) and Windows
+ * x86-64 (Microsoft x64).
  * Each is a thing C++ cannot say, so it is written for the instruction set:
  *
  *  - `fx_call_with_sentinels` calls a compiled entry with the callee-saved
  *    registers set to known values and reads them back, so a register that
  *    compiled code used and did not restore shows in its own sentinel. On
- *    x86-64 those are `rbx`, `r12`-`r15`; on arm64 `x19`-`x28`, `x29` and the
+ *    x86-64 SysV those are `rbx`, `r12`-`r15`; on Win64 `rbx`, `rbp`, `rdi`, `rsi`,
+ *    `r12`-`r15` and `xmm6`-`xmm15` (`rbp` is the one the entry adapter sets to the
+ *    chain-end marker and must give back); on arm64 `x19`-`x28`, `x29` and the
  *    low halves of `d8`-`d15`, the registers AAPCS64 makes the callee's to keep
  *    (and `x29`, which the entry adapter sets to the chain-end marker and must
  *    give back);
@@ -48,14 +51,22 @@
 
 #if defined(__x86_64__) && defined(__linux__)
 #define FX_ASM_X86_64 1
+#define FX_ASM_WIN64 0
+#define FX_ASM_AARCH64 0
+#define FX_HAVE_CALLS_ASM 1
+#elif defined(_WIN64) && defined(__x86_64__)
+#define FX_ASM_X86_64 0
+#define FX_ASM_WIN64 1
 #define FX_ASM_AARCH64 0
 #define FX_HAVE_CALLS_ASM 1
 #elif defined(__aarch64__) && defined(__linux__)
 #define FX_ASM_X86_64 0
+#define FX_ASM_WIN64 0
 #define FX_ASM_AARCH64 1
 #define FX_HAVE_CALLS_ASM 1
 #else
 #define FX_ASM_X86_64 0
+#define FX_ASM_WIN64 0
 #define FX_ASM_AARCH64 0
 #define FX_HAVE_CALLS_ASM 0
 #endif
@@ -69,10 +80,19 @@ namespace fx {
  *  `sp_before_call - S - declared`: the lowest address a native may reach is its
  *  entry stack pointer plus this, less what it declared, so on arm64 a native has
  *  the eight bytes a return address takes on x86-64 more than it declared. */
-#if FX_ASM_X86_64
+#if FX_ASM_X86_64 || FX_ASM_WIN64
 constexpr uint64_t kNativeEntrySpBias = 8;
 #else
 constexpr uint64_t kNativeEntrySpBias = 0;
+#endif
+
+/** The bytes a frame has below the metadata's frame size: Win64's outgoing area, 32 bytes of shadow space
+ *  for a C callee and two words for its fifth and sixth arguments, which belongs to the frame the stack
+ *  limit is checked against and is not in the metadata. */
+#if FX_ASM_WIN64
+constexpr uintptr_t kOutgoingBytes = 48;
+#else
+constexpr uintptr_t kOutgoingBytes = 0;
 #endif
 
 /** The register arguments of the internal convention between compiled functions
@@ -80,6 +100,8 @@ constexpr uint64_t kNativeEntrySpBias = 0;
  *  `backend_internal.h` assert they agree). */
 #if FX_ASM_AARCH64
 constexpr unsigned kInternalRegArgs = 8;
+#elif FX_ASM_WIN64
+constexpr unsigned kInternalRegArgs = 4;
 #else
 constexpr unsigned kInternalRegArgs = 6;
 #endif
@@ -89,16 +111,28 @@ constexpr unsigned kInternalRegArgs = 6;
  *  arm64. */
 #if FX_ASM_X86_64
 constexpr size_t kCRegisterWords = 6;
+#elif FX_ASM_WIN64
+constexpr size_t kCRegisterWords = 4;
 #else
 constexpr size_t kCRegisterWords = 8;
 #endif
 
-/** The stack-argument area of a native with `n` IR arguments, in bytes: the words
- *  past the register words, with the context counted first, in whole sixteens. */
-constexpr uint64_t native_stack_area(size_t n) {
+/** The area a native call makes below the frame, in bytes. SysV and arm64: the words past
+ *  the register words, with the context counted first, in whole sixteens. Win64: 32 bytes of
+ *  shadow space the callee may use as the home of its register arguments, then the stack
+ *  words (a native with a status takes its 16-byte pair through a hidden pointer, which is a
+ *  C word before the context and a 16-byte buffer after the stack words), in whole sixteens. */
+constexpr uint64_t native_stack_area(size_t n, bool status = false) {
+#if FX_ASM_WIN64
+  const size_t words = n + 1 + (status ? 1 : 0);
+  const size_t stack_words = words > kCRegisterWords ? words - kCRegisterWords : 0;
+  return (32 + stack_words * 8 + (status ? 16 : 0) + 15) / 16 * 16;
+#else
+  (void)status;
   const size_t words = n + 1;
   const size_t stack_words = words > kCRegisterWords ? words - kCRegisterWords : 0;
   return (stack_words * 8 + 15) / 16 * 16;
+#endif
 }
 
 } // namespace fx
@@ -113,6 +147,13 @@ namespace fx {
 constexpr size_t kSentinelCount = 5;
 inline const char * sentinel_name(size_t i) {
   static const char * const names[kSentinelCount] = {"rbx", "r12", "r13", "r14", "r15"};
+  return names[i];
+}
+#elif FX_ASM_WIN64
+constexpr size_t kSentinelCount = 18;
+inline const char * sentinel_name(size_t i) {
+  static const char * const names[kSentinelCount] = {"rbx", "rbp", "rdi", "rsi", "r12", "r13", "r14", "r15",
+      "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15"};
   return names[i];
 }
 #else
@@ -212,6 +253,100 @@ fx_call_with_sentinels:
   pop %rbp
   ret
   .size fx_call_with_sentinels, .-fx_call_with_sentinels
+)");
+#elif FX_ASM_WIN64
+/* rcx entry, rdx context, r8 args, r9 out, [rsp + 40] regs: rbx, rbp, rdi, rsi, r12-r15 at words 0 to 7 and
+ * the low halves of xmm6-xmm15 at 8 to 17. Everything after the call is addressed from `rsp`, which the
+ * callee gives back, because `rbp` is a sentinel by then. The trampoline saves and restores every
+ * callee-saved register itself, so that what the callee did not restore is the test's finding and not
+ * this function's damage. */
+asm(R"(
+  .text
+  .globl fx_call_with_sentinels
+fx_call_with_sentinels:
+  pushq %rbp
+  pushq %rbx
+  pushq %rdi
+  pushq %rsi
+  pushq %r12
+  pushq %r13
+  pushq %r14
+  pushq %r15
+  subq $200, %rsp
+  movq 304(%rsp), %rax
+  movq %rax, 32(%rsp)
+  movups %xmm6, 40(%rsp)
+  movups %xmm7, 56(%rsp)
+  movups %xmm8, 72(%rsp)
+  movups %xmm9, 88(%rsp)
+  movups %xmm10, 104(%rsp)
+  movups %xmm11, 120(%rsp)
+  movups %xmm12, 136(%rsp)
+  movups %xmm13, 152(%rsp)
+  movups %xmm14, 168(%rsp)
+  movups %xmm15, 184(%rsp)
+  movq %rcx, %r10
+  movq %rdx, %rcx
+  movq %r8, %rdx
+  movq %r9, %r8
+  movq 0(%rax), %rbx
+  movq 8(%rax), %rbp
+  movq 16(%rax), %rdi
+  movq 24(%rax), %rsi
+  movq 32(%rax), %r12
+  movq 40(%rax), %r13
+  movq 48(%rax), %r14
+  movq 56(%rax), %r15
+  movq 64(%rax), %xmm6
+  movq 72(%rax), %xmm7
+  movq 80(%rax), %xmm8
+  movq 88(%rax), %xmm9
+  movq 96(%rax), %xmm10
+  movq 104(%rax), %xmm11
+  movq 112(%rax), %xmm12
+  movq 120(%rax), %xmm13
+  movq 128(%rax), %xmm14
+  movq 136(%rax), %xmm15
+  call *%r10
+  movq 32(%rsp), %r10
+  movq %rbx, 0(%r10)
+  movq %rbp, 8(%r10)
+  movq %rdi, 16(%r10)
+  movq %rsi, 24(%r10)
+  movq %r12, 32(%r10)
+  movq %r13, 40(%r10)
+  movq %r14, 48(%r10)
+  movq %r15, 56(%r10)
+  movq %xmm6, 64(%r10)
+  movq %xmm7, 72(%r10)
+  movq %xmm8, 80(%r10)
+  movq %xmm9, 88(%r10)
+  movq %xmm10, 96(%r10)
+  movq %xmm11, 104(%r10)
+  movq %xmm12, 112(%r10)
+  movq %xmm13, 120(%r10)
+  movq %xmm14, 128(%r10)
+  movq %xmm15, 136(%r10)
+  movups 40(%rsp), %xmm6
+  movups 56(%rsp), %xmm7
+  movups 72(%rsp), %xmm8
+  movups 88(%rsp), %xmm9
+  movups 104(%rsp), %xmm10
+  movups 120(%rsp), %xmm11
+  movups 136(%rsp), %xmm12
+  movups 152(%rsp), %xmm13
+  movups 168(%rsp), %xmm14
+  movups 184(%rsp), %xmm15
+  addq $200, %rsp
+  popq %r15
+  popq %r14
+  popq %r13
+  popq %r12
+  popq %rsi
+  popq %rdi
+  popq %rbx
+  popq %rbp
+  ret
 )");
 #else
 /* x0 entry, x1 context, x2 args, x3 out, x4 regs: x19-x28 at words 0 to 9, x29 at 10,
@@ -334,6 +469,34 @@ grjit_test_align_status_stub:
   ret
 .size grjit_test_align_status_stub, .-grjit_test_align_status_stub
 )");
+#elif FX_ASM_WIN64
+/* Records `rsp` at its entry (after the return address is pushed), touching only rax, rcx and r10. The
+ * status one takes its pair through the hidden pointer in rcx (the context is rdx): it writes a value of
+ * zero and a status of zero there, and returns the pointer. */
+asm(R"(
+.text
+.globl grjit_test_align_stub
+grjit_test_align_stub:
+  movq grjit_test_entry_count(%rip), %rax
+  leaq grjit_test_entry_rsp(%rip), %rcx
+  movq %rsp, (%rcx,%rax,8)
+  incq %rax
+  movq %rax, grjit_test_entry_count(%rip)
+  xorl %eax, %eax
+  ret
+.globl grjit_test_align_status_stub
+grjit_test_align_status_stub:
+  movq %rcx, %r10
+  movq grjit_test_entry_count(%rip), %rax
+  leaq grjit_test_entry_rsp(%rip), %rcx
+  movq %rsp, (%rcx,%rax,8)
+  incq %rax
+  movq %rax, grjit_test_entry_count(%rip)
+  movq $0, (%r10)
+  movq $0, 8(%r10)
+  movq %r10, %rax
+  ret
+)");
 #else
 /* Records `sp` at its entry, touching only x9-x12 (the status stub also zeroes x1). */
 asm(R"(
@@ -402,6 +565,28 @@ grjit_test_status_garbage_three:
   ret
 .size grjit_test_status_garbage_three, .-grjit_test_status_garbage_three
 )");
+#elif FX_ASM_WIN64
+/* Win64 takes the pair through the hidden pointer in rcx: the value 7 in the first word and, in the second,
+ * the status in its low 32 bits with `0xDEADBEEF` above it (`reserved`, which the call must not read).
+ * `rax` (the ABI says: the pointer) and `rdx` (nothing) are garbage too, so a call that read the pair in
+ * `rax:rdx` as SysV does sees it. */
+asm(R"(
+.text
+.globl grjit_test_status_garbage_zero
+grjit_test_status_garbage_zero:
+  movq $7, (%rcx)
+  movabsq $0xDEADBEEF00000000, %rax
+  movq %rax, 8(%rcx)
+  movabsq $0xDEADBEEFDEADBEEF, %rdx
+  ret
+.globl grjit_test_status_garbage_three
+grjit_test_status_garbage_three:
+  movq $7, (%rcx)
+  movabsq $0xDEADBEEF00000003, %rax
+  movq %rax, 8(%rcx)
+  movabsq $0xDEADBEEFDEADBEEF, %rdx
+  ret
+)");
 #else
 asm(R"(
 .text
@@ -452,6 +637,18 @@ asm(".text\n"
     "  orq %rcx, %rax\n"
     "  ret\n"
     ".size grjit_test_tail_garbage, .-grjit_test_tail_garbage\n");
+#elif FX_ASM_WIN64
+asm(".text\n"
+    ".globl grjit_test_tail_garbage\n"
+    "grjit_test_tail_garbage:\n"
+    "  subq $40, %rsp\n"
+    "  movq grjit_test_real_tail(%rip), %r11\n"
+    "  call *%r11\n"
+    "  addq $40, %rsp\n"
+    "  movl %eax, %eax\n"
+    "  movabsq $0x1357924600000000, %rcx\n"
+    "  orq %rcx, %rax\n"
+    "  ret\n");
 #else
 asm(".text\n"
     ".globl grjit_test_tail_garbage\n"
@@ -510,6 +707,19 @@ uint32_t grjit_test_garbage_entry(void *);
       "  orq %rcx, %rax\n"                                                       \
       "  ret\n"                                                                  \
       ".size grjit_test_garbage_" #hook ", .-grjit_test_garbage_" #hook "\n")
+#elif FX_ASM_WIN64
+#define FX_GARBAGE_STUB(hook)                                                    \
+  asm(".text\n"                                                                  \
+      ".globl grjit_test_garbage_" #hook "\n"                                    \
+      "grjit_test_garbage_" #hook ":\n"                                          \
+      "  subq $40, %rsp\n"                                                       \
+      "  movq grjit_test_real_" #hook "(%rip), %r11\n"                           \
+      "  call *%r11\n"                                                           \
+      "  addq $40, %rsp\n"                                                       \
+      "  movl %eax, %eax\n"                                                      \
+      "  movabsq $0x1357924600000000, %rcx\n"                                    \
+      "  orq %rcx, %rax\n"                                                       \
+      "  ret\n")
 #else
 #define FX_GARBAGE_STUB(hook)                                                    \
   asm(".text\n"                                                                  \
@@ -568,6 +778,22 @@ __attribute__((noinline)) inline uint64_t n_clobber(void *, uint64_t v) {
       :
       : "rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5",
         "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15", "memory");
+#elif FX_ASM_WIN64
+  // The volatile registers of Microsoft x64: rax, rcx, rdx, r8-r11 and xmm0-xmm5. (rsi, rdi and
+  // xmm6-xmm15 are callee-saved here, and trashing them would be the native's own defect.)
+  asm volatile(
+      "movabsq $0x5A5A5A5A5A5A5A5A, %%rax\n"
+      "movabsq $0x5A5A5A5A5A5A5A5B, %%rcx\n"
+      "movabsq $0x5A5A5A5A5A5A5A5C, %%rdx\n"
+      "movabsq $0x5A5A5A5A5A5A5A5F, %%r8\n"
+      "movabsq $0x5A5A5A5A5A5A5A60, %%r9\n"
+      "movabsq $0x5A5A5A5A5A5A5A61, %%r10\n"
+      "movabsq $0x5A5A5A5A5A5A5A62, %%r11\n"
+      "pcmpeqd %%xmm0, %%xmm0\n pcmpeqd %%xmm1, %%xmm1\n pcmpeqd %%xmm2, %%xmm2\n pcmpeqd %%xmm3, %%xmm3\n"
+      "pcmpeqd %%xmm4, %%xmm4\n pcmpeqd %%xmm5, %%xmm5\n"
+      :
+      :
+      : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory");
 #else
   asm volatile(
       "movz x0, #0x5A5A\n movz x1, #0x5A5B\n movz x2, #0x5A5C\n movz x3, #0x5A5D\n"

@@ -404,7 +404,7 @@ TEST(TailIr, ATailCallMakesTwoSitesTheHookWithItsArgumentsAndTheExitWithOnlyItsS
   EXPECT_EQ(s.at(1), (std::vector<GRJIT_VReg>{keep}));
 }
 
-TEST(TailIr, Win64RefusesATailCallBeforeAByteAndTheOtherTwoEmitItOnAnyHost) {
+TEST(TailIr, EveryBackendEmitsATailCallOnAnyHost) {
   B b("caller", 2);
   GRJIT_CallHooks h = all_hooks();
   GRJIT_VReg x = b.param(GRJIT_TYPE_I64);
@@ -413,17 +413,11 @@ TEST(TailIr, Win64RefusesATailCallBeforeAByteAndTheOtherTwoEmitItOnAnyHost) {
   b.tail_call_slot(&g_entry_word, 1, {V(x)}, kId, st2(x));
   Fn f(b.finish());
   GRJIT_Emitted e;
-  for (GRJIT_Arch arch : {GRJIT_ARCH_X86_64, GRJIT_ARCH_ARM64}) {
+  for (GRJIT_Arch arch : {GRJIT_ARCH_X86_64, GRJIT_ARCH_ARM64, GRJIT_ARCH_X86_64_WIN64}) {
     EXPECT_EQ(grjit_emit_for(arch, f, grjit_allocator_default(), nullptr, nullptr, 0x40, &e), GRJIT_OK) << arch;
     EXPECT_GT(e.size, 0u);
     grjit_emitted_free(&e);
   }
-  TrackingAllocator alloc;
-  EXPECT_EQ(grjit_emit_for(GRJIT_ARCH_X86_64_WIN64, f, alloc.get(), nullptr, nullptr, 0x40, &e),
-      GRJIT_ERR_UNSUPPORTED);
-  EXPECT_EQ(e.size, 0u);
-  EXPECT_EQ(e.bytes, nullptr);
-  EXPECT_EQ(alloc.calls, 0) << "and nothing was even asked for";
 }
 
 GRJIT_TEST_MAIN()

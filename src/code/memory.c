@@ -60,56 +60,85 @@ static void put32(uint8_t * at, uint32_t v) {
   }
 }
 
-size_t grjit_unwind_info_build(const GRJIT_Prologue * p, uint8_t * out) {
-  /* UNWIND_INFO: Version 1 and no flags; SizeOfProlog; CountOfCodes;
-   * FrameRegister (rbp, 5) with FrameOffset 0. Then the codes, each a byte of
-   * offset (the end of the instruction in the prologue) and a byte of
-   * operation (low nibble) and information (high nibble). */
+/* One UNWIND_INFO: Version 1 and no flags; SizeOfProlog; CountOfCodes;
+ * FrameRegister (rbp, 5) with FrameOffset 0, or none. Then the codes, each a byte
+ * of offset (the end of the instruction in the prologue, from the function's
+ * first byte) and a byte of operation (low nibble) and information (high nibble),
+ * latest first, and a padding slot if their number is odd. `setfp_end` of zero is
+ * a frame with no frame register (the entry adapter's: it sets `rbp` to a marker
+ * that a frame-register unwinder would take for a base). */
+static size_t info_build(uint32_t push_end, uint32_t setfp_end, uint32_t alloc_end,
+    uint32_t alloc_bytes, uint8_t * out) {
   enum { UWOP_PUSH_NONVOL = 0, UWOP_ALLOC_LARGE = 1, UWOP_ALLOC_SMALL = 2,
          UWOP_SET_FPREG = 3, RBP = 5 };
-  if (p->push_end == 0 || p->setfp_end <= p->push_end ||
-      p->alloc_end < p->setfp_end || p->alloc_end > 255 ||
-      p->alloc_bytes % 8 != 0) {
+  if (push_end == 0 || alloc_end > 255 || alloc_bytes % 8 != 0 ||
+      (setfp_end != 0 ? (setfp_end <= push_end || alloc_end < setfp_end)
+                      : alloc_end < push_end)) {
     return 0;
   }
   uint8_t * codes = out + 4;
   size_t slots = 0;
-  uint32_t n = p->alloc_bytes;
+  uint32_t n = alloc_bytes;
   if (n != 0) {
     if (n <= 128) {
-      codes[2 * slots] = (uint8_t)p->alloc_end;
+      codes[2 * slots] = (uint8_t)alloc_end;
       codes[2 * slots + 1] =
           (uint8_t)(UWOP_ALLOC_SMALL | (((n - 8) / 8) << 4));
       slots += 1;
     } else if (n / 8 <= 0xFFFF) {
-      codes[2 * slots] = (uint8_t)p->alloc_end;
+      codes[2 * slots] = (uint8_t)alloc_end;
       codes[2 * slots + 1] = (uint8_t)(UWOP_ALLOC_LARGE | (0 << 4));
       codes[2 * slots + 2] = (uint8_t)((n / 8) & 0xFF);
       codes[2 * slots + 3] = (uint8_t)((n / 8) >> 8);
       slots += 2;
     } else {
-      codes[2 * slots] = (uint8_t)p->alloc_end;
+      codes[2 * slots] = (uint8_t)alloc_end;
       codes[2 * slots + 1] = (uint8_t)(UWOP_ALLOC_LARGE | (1 << 4));
       put32(codes + 2 * slots + 2, n);
       slots += 3;
     }
   }
-  codes[2 * slots] = (uint8_t)p->setfp_end;
-  codes[2 * slots + 1] = UWOP_SET_FPREG;
-  slots += 1;
-  codes[2 * slots] = (uint8_t)p->push_end;
+  if (setfp_end != 0) {
+    codes[2 * slots] = (uint8_t)setfp_end;
+    codes[2 * slots + 1] = UWOP_SET_FPREG;
+    slots += 1;
+  }
+  codes[2 * slots] = (uint8_t)push_end;
   codes[2 * slots + 1] = (uint8_t)(UWOP_PUSH_NONVOL | (RBP << 4));
   slots += 1;
   out[0] = 1;
-  out[1] = (uint8_t)p->alloc_end;
+  out[1] = (uint8_t)alloc_end;
   out[2] = (uint8_t)slots;
-  out[3] = (uint8_t)(RBP | (0 << 4));
+  out[3] = (uint8_t)(setfp_end != 0 ? RBP : 0);
   if (slots % 2 != 0) {
     codes[2 * slots] = 0;
     codes[2 * slots + 1] = 0;
     slots += 1;
   }
   return 4 + 2 * slots;
+}
+
+size_t grjit_unwind_info_build(const GRJIT_Prologue * p, uint8_t * out) {
+  /* The body's offsets are from the function's own first byte, which is the
+   * internal entry for a callable function and zero for a plain one. */
+  const uint32_t b = p->body_begin;
+  if (p->push_end < b || p->setfp_end < b || p->alloc_end < b) {
+    return 0;
+  }
+  return info_build(p->push_end - b, p->setfp_end == 0 ? 0 : p->setfp_end - b,
+      p->alloc_end - b, p->alloc_bytes, out);
+}
+
+size_t grjit_unwind_info_build_adapter(const GRJIT_Prologue * p, uint8_t * out) {
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 33
+  /* Planted defect 33 (tests only): the adapter's unwind information names rbp as a frame
+   * register, which the adapter has set to the chain-end marker: an unwinder takes the
+   * marker for the base of the frame and finds its caller in garbage. */
+  return info_build(p->adapter_push_end, p->adapter_alloc_end, p->adapter_alloc_end,
+      p->adapter_alloc_bytes, out);
+#else
+  return info_build(p->adapter_push_end, 0, p->adapter_alloc_end, p->adapter_alloc_bytes, out);
+#endif
 }
 
 static const GRJIT_UnwindOps * g_unwind_ops; /* __atomic builtins only */
@@ -142,12 +171,12 @@ static const GRJIT_UnwindOps * unwind_ops(void) {
 #endif
 }
 
-GRJIT_Result grjit_unwind_register(void * base, void * table) {
+GRJIT_Result grjit_unwind_register(void * base, void * table, uint32_t count) {
   const GRJIT_UnwindOps * ops = unwind_ops();
   if (ops == NULL) {
     return GRJIT_ERR_UNSUPPORTED;
   }
-  return ops->add(table, 1, (uintptr_t)base) ? GRJIT_OK : GRJIT_ERR_IO;
+  return ops->add(table, count, (uintptr_t)base) ? GRJIT_OK : GRJIT_ERR_IO;
 }
 
 void grjit_unwind_deregister(void * table) {
@@ -173,9 +202,14 @@ GRJIT_Result grjit_memory_create(const GRCORE_PageProvider * pages,
    * same pages (RVAs are 32 bits from one base, so an allocation elsewhere
    * might be out of reach), each 4-byte aligned. */
   uint8_t info[GRJIT_UNWIND_INFO_MAX];
+  uint8_t adapter_info[GRJIT_UNWIND_INFO_MAX];
   size_t info_size = 0;
+  size_t adapter_info_size = 0;
   size_t table_at = 0;
   size_t used = length;
+  /* A callable function is two functions to the unwinder (the adapter and the
+   * body), registered together, so a walk through the code finds either. */
+  uint32_t entries = 1;
   if (arch == GRJIT_ARCH_X86_64_WIN64) {
     if (prologue == NULL || out_unwind_table == NULL) {
       return GRJIT_ERR_INVALID;
@@ -187,8 +221,16 @@ GRJIT_Result grjit_memory_create(const GRCORE_PageProvider * pages,
     if (info_size == 0) {
       return GRJIT_ERR_INTERNAL;
     }
+    if (prologue->adapter_end != 0) {
+      adapter_info_size = grjit_unwind_info_build_adapter(prologue, adapter_info);
+      if (adapter_info_size == 0 || prologue->adapter_end > prologue->body_begin ||
+          prologue->body_begin >= length) {
+        return GRJIT_ERR_INTERNAL;
+      }
+      entries = 2;
+    }
     table_at = (length + 3) / 4 * 4;
-    used = table_at + GRJIT_RUNTIME_FUNCTION_BYTES + info_size;
+    used = table_at + entries * GRJIT_RUNTIME_FUNCTION_BYTES + info_size + adapter_info_size;
   }
   if (used > SIZE_MAX - page) {
     return GRJIT_ERR_INVALID;
@@ -214,11 +256,23 @@ GRJIT_Result grjit_memory_create(const GRCORE_PageProvider * pages,
     memset((unsigned char *)mapping + length, 0xCC, size - length);
   }
   if (arch == GRJIT_ARCH_X86_64_WIN64) {
+    /* The entries sorted by begin address (the adapter's, at zero, then the
+     * body's), then the unwind information they name. */
     uint8_t * rf = (uint8_t *)mapping + table_at;
-    put32(rf, 0);
-    put32(rf + 4, (uint32_t)length);
-    put32(rf + 8, (uint32_t)(table_at + GRJIT_RUNTIME_FUNCTION_BYTES));
-    memcpy(rf + GRJIT_RUNTIME_FUNCTION_BYTES, info, info_size);
+    const size_t info_at = table_at + entries * GRJIT_RUNTIME_FUNCTION_BYTES;
+    const size_t adapter_info_at = info_at + info_size;
+    uint8_t * body_rf = rf;
+    if (entries == 2) {
+      put32(rf, 0);
+      put32(rf + 4, prologue->adapter_end);
+      put32(rf + 8, (uint32_t)adapter_info_at);
+      body_rf = rf + GRJIT_RUNTIME_FUNCTION_BYTES;
+      memcpy((uint8_t *)mapping + adapter_info_at, adapter_info, adapter_info_size);
+    }
+    put32(body_rf, prologue->body_begin);
+    put32(body_rf + 4, (uint32_t)length);
+    put32(body_rf + 8, (uint32_t)info_at);
+    memcpy((uint8_t *)mapping + info_at, info, info_size);
   }
   GRCORE_Result r =
       grcore_page_protect(pages, mapping, size, GRCORE_PAGE_READ_EXECUTE);
@@ -232,7 +286,13 @@ GRJIT_Result grjit_memory_create(const GRCORE_PageProvider * pages,
     /* Planted defect 7 (tests only): the table is written and never
      * registered, so a native stack walk finds nothing for the code. */
 #else
-    GRJIT_Result reg = grjit_unwind_register(mapping, (uint8_t *)mapping + table_at);
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 35
+    /* Planted defect 35 (tests only): only the adapter's RUNTIME_FUNCTION is registered, so
+     * a walk through a body finds nothing. */
+    GRJIT_Result reg = grjit_unwind_register(mapping, (uint8_t *)mapping + table_at, 1);
+#else
+    GRJIT_Result reg = grjit_unwind_register(mapping, (uint8_t *)mapping + table_at, entries);
+#endif
     if (reg == GRJIT_OK) {
       *out_unwind_table = (uint8_t *)mapping + table_at;
     } else if (reg != GRJIT_ERR_UNSUPPORTED) {

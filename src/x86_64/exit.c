@@ -54,8 +54,30 @@ void grjit_emit_store_walk_cell(GRJIT_Emit * e, GRJIT_Label ret_label) {
 }
 
 void grjit_emit_callable_epilogue(GRJIT_Emit * e) {
-  grjit_asm_leave(&e->as);
-  grjit_asm_ret_imm(&e->as, (uint16_t)e->c.shape.incoming_bytes);
+  GRJIT_Asm * a = &e->as;
+  if (e->win64) {
+    /* The form a Win64 unwinder recognises as an epilogue (see grjit_emit_epilogue),
+     * ending in `ret imm16`. */
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 34
+    /* Planted defect 34 (tests only): the callee returns with `ret` and does not pop its
+     * stack arguments, so the caller's stack drifts by their area. */
+    grjit_asm_lea(a, GRJIT_RSP, GRJIT_RBP, 0);
+    grjit_asm_pop(a, GRJIT_RBP);
+    grjit_asm_ret(a);
+    return;
+#else
+    grjit_asm_lea(a, GRJIT_RSP, GRJIT_RBP, 0);
+    grjit_asm_pop(a, GRJIT_RBP);
+    if (e->c.shape.incoming_bytes == 0) {
+      /* Plain `ret` is the form every unwinder knows as an epilogue's end. */
+      grjit_asm_ret(a);
+      return;
+    }
+#endif
+  } else {
+    grjit_asm_leave(a);
+  }
+  grjit_asm_ret_imm(a, (uint16_t)e->c.shape.incoming_bytes);
 }
 
 void grjit_emit_ret_status(GRJIT_Emit * e) {
@@ -185,6 +207,12 @@ void grjit_emit_overflow_stub(GRJIT_Emit * e) {
    * of the chain with a word that is no frame base. */
   GRJIT_Label none = grjit_asm_label(a);
   GRJIT_Label go = grjit_asm_label(a);
+  if (e->win64) {
+    /* The hook is a C function: room for its shadow space below the stack pointer, which
+     * is the frame base here (the frame has not been allocated). The unwind information's
+     * frame register makes this frame right for an unwinder wherever `rsp` is. */
+    grjit_asm_sub_rsp(a, e->abi->shadow_bytes);
+  }
   grjit_asm_load64(a, GRJIT_RCX, GRJIT_RBP, 0);
   grjit_asm_mov_ri64(a, GRJIT_RAX, (uint64_t)GRCORE_COMPILED_CHAIN_END);
   grjit_asm_alu_rr(a, GRJIT_ALU_CMP, GRJIT_RCX, GRJIT_RAX);

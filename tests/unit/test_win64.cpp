@@ -602,7 +602,7 @@ Unwind decode(const uint8_t * b, size_t size) {
 TEST(Win64Unwind, TheBytesOfAFrameAreExactlyTheVersionOneLayout) {
   uint8_t out[GRJIT_UNWIND_INFO_MAX];
   /* A small allocation (80 bytes, three codes, one slot of padding). */
-  GRJIT_Prologue p{1, 4, 8, 80};
+  GRJIT_Prologue p{1, 4, 8, 80, 0, 0, 0, 0, 0};
   ASSERT_EQ(grjit_unwind_info_build(&p, out), 12u);
   EXPECT_EQ(Bytes(out, out + 12), (Bytes{0x01, 0x08, 0x03, 0x05,
                                       0x08, 0x92,    // ALLOC_SMALL, (80 - 8) / 8 = 9
@@ -610,13 +610,13 @@ TEST(Win64Unwind, TheBytesOfAFrameAreExactlyTheVersionOneLayout) {
                                       0x01, 0x50,    // PUSH_NONVOL rbp
                                       0x00, 0x00})); // padding
   /* The emitter's own: 144 bytes, ALLOC_LARGE with a 16-bit count (144 / 8 = 18). */
-  GRJIT_Prologue q{1, 4, 11, 144};
+  GRJIT_Prologue q{1, 4, 11, 144, 0, 0, 0, 0, 0};
   ASSERT_EQ(grjit_unwind_info_build(&q, out), 12u);
   EXPECT_EQ(Bytes(out, out + 12), (Bytes{0x01, 0x0B, 0x04, 0x05,
                                       0x0B, 0x01, 0x12, 0x00, // ALLOC_LARGE, info 0, 18 units
                                       0x04, 0x03, 0x01, 0x50}));
   /* Past 512 KiB: ALLOC_LARGE with a 32-bit size, five codes and a padded sixth. */
-  GRJIT_Prologue r{1, 4, 11, 1048624};
+  GRJIT_Prologue r{1, 4, 11, 1048624, 0, 0, 0, 0, 0};
   ASSERT_EQ(grjit_unwind_info_build(&r, out), 16u);
   EXPECT_EQ(Bytes(out, out + 16), (Bytes{0x01, 0x0B, 0x05, 0x05,
                                       0x0B, 0x11, 0x30, 0x00, 0x10, 0x00, // ALLOC_LARGE, info 1, 0x100030
@@ -626,7 +626,7 @@ TEST(Win64Unwind, TheBytesOfAFrameAreExactlyTheVersionOneLayout) {
 TEST(Win64Unwind, EveryAllocationFromNothingToTwoMebibytesGetsExactlyOneFormOfTheRightSize) {
   uint8_t out[GRJIT_UNWIND_INFO_MAX];
   for (uint32_t n = 0; n <= (2u << 20); n += 8) {
-    GRJIT_Prologue p{1, 4, 11, n};
+    GRJIT_Prologue p{1, 4, 11, n, 0, 0, 0, 0, 0};
     size_t size = grjit_unwind_info_build(&p, out);
     ASSERT_NE(size, 0u) << n;
     ASSERT_LE(size, static_cast<size_t>(GRJIT_UNWIND_INFO_MAX));
@@ -657,13 +657,13 @@ TEST(Win64Unwind, EveryAllocationFromNothingToTwoMebibytesGetsExactlyOneFormOfTh
 
 TEST(Win64Unwind, APrologueThatCannotBeDescribedIsRefused) {
   uint8_t out[GRJIT_UNWIND_INFO_MAX];
-  GRJIT_Prologue odd{1, 4, 11, 81};
+  GRJIT_Prologue odd{1, 4, 11, 81, 0, 0, 0, 0, 0};
   EXPECT_EQ(grjit_unwind_info_build(&odd, out), 0u) << "not a multiple of 8";
-  GRJIT_Prologue distant{1, 4, 256, 80};
+  GRJIT_Prologue distant{1, 4, 256, 80, 0, 0, 0, 0, 0};
   EXPECT_EQ(grjit_unwind_info_build(&distant, out), 0u) << "SizeOfProlog is a byte";
-  GRJIT_Prologue backwards{4, 1, 11, 80};
+  GRJIT_Prologue backwards{4, 1, 11, 80, 0, 0, 0, 0, 0};
   EXPECT_EQ(grjit_unwind_info_build(&backwards, out), 0u);
-  GRJIT_Prologue none{0, 0, 0, 0};
+  GRJIT_Prologue none{0, 0, 0, 0, 0, 0, 0, 0, 0};
   EXPECT_EQ(grjit_unwind_info_build(&none, out), 0u);
 }
 
@@ -862,7 +862,7 @@ TEST(Win64Memory, WithNothingToRegisterWithTheMappingIsMadeAndTheTableIsNotClaim
    * and a Win64 mapping is still made (it can be inspected, never run). */
   JitWorld w;
   const GRJIT_UnwindOps * previous = grjit_unwind_set_ops(nullptr);
-  EXPECT_EQ(grjit_unwind_register(nullptr, nullptr), GRJIT_ERR_UNSUPPORTED);
+  EXPECT_EQ(grjit_unwind_register(nullptr, nullptr, 1), GRJIT_ERR_UNSUPPORTED);
   Fn f(six_calls_a_poll_and_a_guard());
   Emit em(f);
   ASSERT_TRUE(em.ok());

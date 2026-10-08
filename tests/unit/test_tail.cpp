@@ -1072,7 +1072,7 @@ uint64_t exact_budget(const std::function<int(Engine &)> & build, const std::vec
   EXPECT_TRUE(o.finished);
   EXPECT_FALSE(e.st.bases.empty());
   const uintptr_t sp0 = e.last_native_limit + generous;
-  const uintptr_t frame = grjit_code_meta(e.code_of(fn).code)->frame_bytes;
+  const uintptr_t frame = grjit_code_meta(e.code_of(fn).code)->frame_bytes + kOutgoingBytes;
   return sp0 - (e.st.bases.front() - frame);
 }
 
@@ -1152,7 +1152,7 @@ TEST(Tail, ACalleeWhoseFrameDoesNotFitDeoptimizesOnceAtItsPrologueAndTheInterpre
     ASSERT_TRUE(o.finished);
     ASSERT_FALSE(probe.st.bases.empty());
     const uintptr_t sp0 = probe.last_native_limit + (1 << 20);
-    const uintptr_t frame = grjit_code_meta(probe.code_of(small).code)->frame_bytes;
+    const uintptr_t frame = grjit_code_meta(probe.code_of(small).code)->frame_bytes + kOutgoingBytes;
     budget = sp0 - (probe.st.bases.front() - frame);
   }
   for (int big_locals : {0, 40}) {
@@ -2072,7 +2072,7 @@ TEST(Tail, ACalleeThatCannotStartIsFinishedByTheInterpreterFromTheGuestFrameTheH
       EXPECT_EQ(o.value, 975u);
       ASSERT_FALSE(probe.st.bases.empty());
       const uintptr_t sp0 = probe.last_native_limit + (1 << 20);
-      const uintptr_t frame = grjit_code_meta(probe.code_of(small).code)->frame_bytes;
+      const uintptr_t frame = grjit_code_meta(probe.code_of(small).code)->frame_bytes + kOutgoingBytes;
       budget = sp0 - (probe.st.bases.front() - frame);
     }
     Engine e(GRCORE_UNLIMITED, budget);

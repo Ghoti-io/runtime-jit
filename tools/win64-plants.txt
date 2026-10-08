@@ -1,0 +1,19 @@
+# The defects planted in the Win64 emitter and its unwind table, each caught by one test run alone under wine
+# (suite/tools/xwin/m1-controls.sh, in a copy of the cross-built tree), in a tree of its own, with its control
+# passing first. check-planted.sh lists them by name and does not count them (nothing here can run Win64 code).
+# 5 to 7 are the older Windows ones, caught structurally by check-planted on any host and by running under wine here.
+#
+#   id | GRJIT_TEST_PLANT_BUG | test program | gtest filter (the test that catches it) | what is planted
+#
+# The catch must be an assertion that names what it saw: a crash, a hang or a build failure is not one.
+5|5|testWin64|CalleeSaved.*|rsi used for the parameter loads, so the caller's sentinel changes
+6|6|testWin64|Win64Run.ASixArgumentCall*|no outgoing area, a callee's shadow space on the live slots
+7|7|testWin64|Win64Run.AHelperCalledFromCompiledCode*:Win64Run.DestroyDeletes*|the unwind table never registered, the walk finds no frame
+30|30|testNatives|Natives.TheStatusIsTheThirtyTwoBitsOfEdxAndGarbageAboveItNeitherLeavesNorChangesTheCause|a native's pair read from rax:rdx, not from the hidden buffer
+31|31|testWin64_calls|Win64CallsRun.ANativeThatSpillsItsRegisterArgumentsToItsHomeSpaceLeavesItsStackWordsAndTheCallersSlotsAlone|a native's area without the 32 bytes of shadow space
+32|32|testTail|Tail.NoCalleeSavedRegisterIsChangedAcrossAChainOfTailCallsThatReturnsOrDeoptimizes|the tail call's stack-argument copy through rdi
+33|33|testWin64_calls|Win64CallsUnwind.ACallableFunctionHasTwoSortedEntries*|the adapter's unwind information with rbp as its frame register (the unwinder then also faults reading the marker as a base, under wine: seen, not counted as the catch)
+34|34|testCalls|Calls.TheStackPointerIsTheSameBeforeEveryCallAndAfterEveryReturnForEveryArityAndForm|a callee that returns with ret and not ret imm16
+35|35|testWin64_calls|Win64CallsUnwind.RtlVirtualUnwindFromInsideANative*:Win64CallsUnwind.AfterDestroy*|only the adapter's RUNTIME_FUNCTION registered
+36|36|testNatives|Natives.TheCallStoresItsFrameBaseAndReturnAddressBeforeTheNativeRunsOverAStaleCell|the walk start stored after a native call
+37|37|testWin64_calls|Win64CallsRun.AHookThatScribblesOnItsShadowSpaceFindsTheFramesOutgoingAreaAndNotItsSlots|a callable frame without its outgoing area

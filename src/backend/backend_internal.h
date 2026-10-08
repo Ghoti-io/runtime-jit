@@ -62,12 +62,25 @@ extern "C" {
 
 /** Where the instructions of the x86-64 prologue (`push rbp; mov rbp, rsp;
  *  sub rsp, N`) end, as offsets from the first byte of code, and `N`. The
- *  Windows unwind information names exactly these. */
+ *  Windows unwind information names exactly these.
+ *
+ *  A callable function (AD-28) has two functions in the unwinder's sense: the
+ *  entry adapter, which starts at offset zero, and the body, which starts at the
+ *  internal entry. For it `body_begin` is that entry and the three offsets above
+ *  are the body's (still offsets from the first byte of code); the adapter has its
+ *  own record, below, and `adapter_end` is where its code ends (the tag and the
+ *  padding before the entry are not in either). All of these are zero for a plain
+ *  function, whose one record covers all its code. */
 typedef struct GRJIT_Prologue {
   uint32_t push_end;    ///< After `push rbp`.
   uint32_t setfp_end;   ///< After `mov rbp, rsp`.
   uint32_t alloc_end;   ///< After `sub rsp, N`.
   uint32_t alloc_bytes; ///< `N`: the base frame, and on Win64 the outgoing area.
+  uint32_t body_begin;  ///< Callable: the internal entry; else zero.
+  uint32_t adapter_end;      ///< Callable: the end of the adapter's code; else zero.
+  uint32_t adapter_push_end; ///< The adapter's `push rbp`, as above.
+  uint32_t adapter_alloc_end;   ///< After the adapter's one `sub rsp, N'`.
+  uint32_t adapter_alloc_bytes; ///< `N'`. The adapter has no frame register.
 } GRJIT_Prologue;
 
 /** A label: an index into an assembler's label table. */

@@ -27,8 +27,8 @@
  * every combination of a parameter count, a native's arity, its status and its
  * result type, in two shapes, measured after the emitter landed. It holds the
  * claim that the bytes of a native call, and of everything around one, do not
- * change without a commit that says why. Win64 refuses such a function before
- * a byte, which the same test shows for each.
+ * change without a commit that says why. Win64 (since story 7b) emits such a function: its own pins are below; it used to refuse before
+ * a byte.
  *
  * Three more are arm64's (story 7 of the calls spec), each measured when its part of the
  * emitter landed and held from then on: the same callable functions with calls, one tail
@@ -138,13 +138,24 @@ unsigned mask_target_check(GRJIT_Arch arch, std::vector<uint8_t> * bytes) {
   return found;
 }
 
-/* Win64 refuses a callable function, and every call-machinery operation in one, before a byte: the error is
- * GRJIT_ERR_UNSUPPORTED, nothing is emitted and nothing was even allocated. */
-bool win64_refuses(const GRJIT_Function * f) {
-  TrackingAllocator t;
-  GRJIT_Emitted other;
-  const GRJIT_Result r = grjit_emit_for(GRJIT_ARCH_X86_64_WIN64, f, t.get(), nullptr, nullptr, kRequestOffset, &other);
-  return r == GRJIT_ERR_UNSUPPORTED && other.size == 0 && other.bytes == nullptr && t.calls == 0 && t.live == 0;
+/* Win64 emits every function the call machinery has an operation or a callable shape in, and
+ * emitting it twice gives the same bytes (the address of the library's target check, the one
+ * thing in the bytes that is the process's, is the same within a process). */
+bool win64_emits(const GRJIT_Function * f) {
+  GRJIT_Emitted first, second;
+  if (grjit_emit_for(GRJIT_ARCH_X86_64_WIN64, f, grjit_allocator_default(), nullptr, nullptr, kRequestOffset, &first) !=
+      GRJIT_OK) {
+    return false;
+  }
+  const GRJIT_Result r =
+      grjit_emit_for(GRJIT_ARCH_X86_64_WIN64, f, grjit_allocator_default(), nullptr, nullptr, kRequestOffset, &second);
+  const bool same = r == GRJIT_OK && first.size == second.size && first.size != 0 &&
+      std::memcmp(first.bytes, second.bytes, first.size) == 0 && first.internal_offset == second.internal_offset;
+  if (r == GRJIT_OK) {
+    grjit_emitted_free(&second);
+  }
+  grjit_emitted_free(&first);
+  return same;
 }
 
 Pin callable_pin(GRJIT_Arch arch, unsigned * pointer_calls, unsigned * functions, bool * win64_refused,
@@ -170,7 +181,7 @@ Pin callable_pin(GRJIT_Arch arch, unsigned * pointer_calls, unsigned * functions
     pin.hash = fold(pin.hash, 0xFF);
     pin.bytes += bytes.size();
     grjit_emitted_free(&e);
-    *win64_refused = *win64_refused && win64_refuses(f);
+    *win64_refused = *win64_refused && win64_emits(f);
     *functions += 1;
     return true;
   });
@@ -197,7 +208,7 @@ Pin tail_pin(GRJIT_Arch arch, unsigned * pointer_calls, unsigned * functions, bo
     pin.hash = fold(pin.hash, 0xFF);
     pin.bytes += bytes.size();
     grjit_emitted_free(&e);
-    *win64_refused = *win64_refused && win64_refuses(f);
+    *win64_refused = *win64_refused && win64_emits(f);
     *functions += 1;
     return true;
   });
@@ -221,7 +232,7 @@ Pin native_pin(GRJIT_Arch arch, unsigned * functions, bool * all_refused_elsewhe
     pin.hash = fold(pin.hash, 0xFF);
     pin.bytes += e.size;
     grjit_emitted_free(&e);
-    *all_refused_elsewhere = *all_refused_elsewhere && win64_refuses(f);
+    *all_refused_elsewhere = *all_refused_elsewhere && win64_emits(f);
     *functions = id + 1;
     return true;
   });
@@ -246,7 +257,7 @@ TEST(Pin, TheX86_64CodeOfCallableFunctionsWithCallsAndNoTailCallIsByteForByteWha
   bool refused = false;
   Pin pin = callable_pin(GRJIT_ARCH_X86_64, &pointer_calls, &functions, &refused);
   EXPECT_EQ(functions, 8u * 7u * 3u * 2u);
-  EXPECT_TRUE(refused) << "Win64 refuses every one of them, allocating nothing";
+  EXPECT_TRUE(refused) << "Win64 emits every one of them, the same bytes twice";
   EXPECT_EQ(pointer_calls, 8u * 7u * 2u * 2u) << "a call through a pointer per function of forms 1 and 2";
   std::printf("pin x86-64 callable: %llu bytes, hash %016llx\n",
       static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
@@ -263,7 +274,7 @@ TEST(Pin, TheX86_64CodeOfCallableFunctionsWithCallsToNativesIsByteForByteWhatWas
   std::printf("pin x86-64 natives: %u functions, %llu bytes, hash %016llx\n", functions,
       static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
   EXPECT_EQ(functions, 4u * 8u * 2u * 4u * 2u);
-  EXPECT_TRUE(refused) << "Win64 refuses every one of them before a byte";
+  EXPECT_TRUE(refused) << "Win64 emits every one of them, the same bytes twice";
   EXPECT_EQ(pin.hash, 0xd2d04cb10df6dce8ull) << pin.bytes << " bytes";
   EXPECT_EQ(pin.bytes, 355876u);
 }
@@ -284,7 +295,7 @@ TEST(Pin, TheArm64CodeOfCallableFunctionsWithCallsIsByteForByteWhatWasRecorded) 
   bool refused = false;
   Pin pin = callable_pin(GRJIT_ARCH_ARM64, &pointer_calls, &functions, &refused);
   EXPECT_EQ(functions, 8u * 7u * 3u * 2u);
-  EXPECT_TRUE(refused) << "Win64 refuses every one of them, allocating nothing";
+  EXPECT_TRUE(refused) << "Win64 emits every one of them, the same bytes twice";
   EXPECT_EQ(pointer_calls, 8u * 7u * 2u * 2u) << "a call through a pointer per function of forms 1 and 2";
   std::printf("pin arm64 callable: %u functions, %llu bytes, hash %016llx\n", functions,
       static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
@@ -304,7 +315,7 @@ TEST(Pin, TheX86_64CodeOfCallableFunctionsWithAnEntryHookIsByteForByteWhatWasRec
   bool refused = false;
   Pin pin = callable_pin(GRJIT_ARCH_X86_64, &pointer_calls, &functions, &refused, fake_entry_hook());
   EXPECT_EQ(functions, 8u * 7u * 3u * 2u);
-  EXPECT_TRUE(refused);
+  EXPECT_TRUE(refused) << "Win64 emits every one of them, the same bytes twice";
   std::printf("pin x86-64 callable with an entry hook: %llu bytes, hash %016llx\n",
       static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
   EXPECT_EQ(pin.hash, 0xc5e0be7b7ef3cea1ull) << pin.bytes << " bytes";
@@ -316,7 +327,7 @@ TEST(Pin, TheArm64CodeOfCallableFunctionsWithAnEntryHookIsByteForByteWhatWasReco
   bool refused = false;
   Pin pin = callable_pin(GRJIT_ARCH_ARM64, &pointer_calls, &functions, &refused, fake_entry_hook());
   EXPECT_EQ(functions, 8u * 7u * 3u * 2u);
-  EXPECT_TRUE(refused);
+  EXPECT_TRUE(refused) << "Win64 emits every one of them, the same bytes twice";
   std::printf("pin arm64 callable with an entry hook: %llu bytes, hash %016llx\n",
       static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
   EXPECT_EQ(pin.hash, 0x979ab308f05b25c3ull) << pin.bytes << " bytes";
@@ -329,7 +340,7 @@ TEST(Pin, TheArm64CodeOfCallableFunctionsWithTailCallsIsByteForByteWhatWasRecord
   bool refused = false;
   Pin pin = tail_pin(GRJIT_ARCH_ARM64, &pointer_calls, &functions, &refused);
   EXPECT_EQ(functions, 8u * 7u * 3u);
-  EXPECT_TRUE(refused) << "Win64 refuses every one of them, allocating nothing";
+  EXPECT_TRUE(refused) << "Win64 emits every one of them, the same bytes twice";
   EXPECT_EQ(pointer_calls, 8u * 7u * 2u) << "a target check per tail call through a pointer";
   std::printf("pin arm64 tail calls: %u functions, %llu bytes, hash %016llx\n", functions,
       static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
@@ -345,7 +356,7 @@ TEST(Pin, TheArm64CodeOfCallableFunctionsWithCallsToNativesIsByteForByteWhatWasR
   std::printf("pin arm64 natives: %u functions, %llu bytes, hash %016llx\n", functions,
       static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
   EXPECT_EQ(functions, 4u * 8u * 2u * 4u * 2u);
-  EXPECT_TRUE(refused) << "Win64 refuses every one of them before a byte";
+  EXPECT_TRUE(refused) << "Win64 emits every one of them, the same bytes twice";
   EXPECT_EQ(pin.bytes % 4, 0u);
   EXPECT_EQ(pin.hash, 0xfc567e8f41a66ba7ull) << pin.bytes << " bytes";
   EXPECT_EQ(pin.bytes, 332284u);
@@ -359,6 +370,37 @@ TEST(Pin, TheWin64CodeOfTheGeneratedFunctionsIsByteForByteWhatWasRecorded) {
       static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
   EXPECT_EQ(pin.hash, 0x5ab7246d43cbfd33ull) << pin.bytes << " bytes";
   EXPECT_EQ(pin.bytes, 2120441u);
+}
+
+TEST(Pin, TheWin64CodeOfCallableFunctionsWithCallsIsByteForByteWhatWasRecorded) {
+  /* Measured after the Win64 emitter of calls landed (story 7b of the calls spec), and held from
+   * then on: the same 336 functions as the x86-64 and arm64 pins above, through the Microsoft
+   * x64 flavour. The code depends on the core's layout of the walk-start cell and the
+   * native-stack limit, as theirs does. */
+  unsigned pointer_calls = 0, functions = 0;
+  bool emitted = false;
+  Pin pin = callable_pin(GRJIT_ARCH_X86_64_WIN64, &pointer_calls, &functions, &emitted);
+  EXPECT_EQ(functions, 8u * 7u * 3u * 2u);
+  EXPECT_TRUE(emitted);
+  EXPECT_EQ(pointer_calls, 8u * 7u * 2u * 2u) << "a call through a pointer per function of forms 1 and 2";
+  std::printf("pin win64 callable: %u functions, %llu bytes, hash %016llx\n", functions,
+      static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
+  EXPECT_EQ(pin.hash, 0x629592c8b3b61bbdull) << pin.bytes << " bytes";
+  EXPECT_EQ(pin.bytes, 297276u);
+}
+
+TEST(Pin, TheWin64CodeOfCallableFunctionsWithCallsToNativesIsByteForByteWhatWasRecorded) {
+  /* Measured after the Win64 emitter of calls to natives landed (story 7b), 512 functions, with
+   * the hidden pointer for the status pair and the shadow space in the area. */
+  unsigned functions = 0;
+  bool emitted = false;
+  Pin pin = native_pin(GRJIT_ARCH_X86_64_WIN64, &functions, &emitted);
+  std::printf("pin win64 natives: %u functions, %llu bytes, hash %016llx\n", functions,
+      static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
+  EXPECT_EQ(functions, 4u * 8u * 2u * 4u * 2u);
+  EXPECT_TRUE(emitted);
+  EXPECT_EQ(pin.hash, 0xcd88dbc65a4660d4ull) << pin.bytes << " bytes";
+  EXPECT_EQ(pin.bytes, 377062u);
 }
 
 TEST(Pin, WhatGrjitCompileMapsIsWhatTheEmitterProducedForTheNativeInstructionSet) {

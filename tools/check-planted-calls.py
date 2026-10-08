@@ -26,7 +26,7 @@ runs the unmutated copy: every test must pass there, or the verdicts after it
 mean nothing.
 
 Usage: check-planted-calls.py [--prefix=DIR] [--core=DIR] [--timeout=SECONDS]
-                              [--target=arm64] [--self-test] [name-substring ...]
+                              [--target=arm64|win64] [--self-test] [name-substring ...]
   --prefix  a prefix holding runtime-core's dependencies and runtime-jit's
             (default $GHOTI_PREFIX, then the PREFIX of the make that runs it);
             it is COPIED, so nothing in it is touched
@@ -36,7 +36,12 @@ Usage: check-planted-calls.py [--prefix=DIR] [--core=DIR] [--timeout=SECONDS]
             which has them; the prefix is its AArch64 one, with runtime-core already built
             for it, so no core mutation is made). A mutation caught only by the pin test
             (`testPin`) is PIN-ONLY, which is not a catch: the new tests must see it
-            themselves. Default: the x86-64 mutations, run natively.
+            themselves. `win64`: the mutations of the Windows paths of src/x86_64/*.c and
+            src/code/memory.c, each cross-built with mingw and run under wine (in the container
+            suite/tools/xwin/m1-win.sh starts, whose PATH holds the toolchain; the prefix is its
+            win64 one, with runtime-core already built for it, so no core mutation is made; a
+            test that crashes under wine is a catch, a test that hangs is a TIMEOUT). Default:
+            the x86-64 mutations, run natively.
 
 Nothing in either repository is edited. Exit status 0 only if the control
 passed and every mutation was CAUGHT (or, for --self-test, every verdict is the
@@ -59,19 +64,20 @@ for a in sys.argv[1:]:
         args.append(a)
 
 TARGET = opts.get('target', 'x86-64')
-if TARGET not in ('x86-64', 'arm64'):
-    sys.exit('check-planted-calls: --target is x86-64 or arm64')
+if TARGET not in ('x86-64', 'arm64', 'win64'):
+    sys.exit('check-planted-calls: --target is x86-64, arm64 or win64')
 ARM64 = TARGET == 'arm64'
+WIN64 = TARGET == 'win64'
 prefix = opts.get('prefix') or os.environ.get('GHOTI_PREFIX') or os.environ.get('PREFIX')
 if not prefix or not os.path.isdir(prefix):
     sys.exit('check-planted-calls: give --prefix=DIR (or set PREFIX): a prefix that holds '
              'runtime-core and runtime-jit\'s dependencies')
 prefix = os.path.abspath(prefix)
 CORE_SRC = os.path.abspath(opts.get('core') or os.path.join(JIT_SRC, '..', 'runtime-core'))
-if not ARM64 and not os.path.isdir(os.path.join(CORE_SRC, 'src')):
+if not (ARM64 or WIN64) and not os.path.isdir(os.path.join(CORE_SRC, 'src')):
     sys.exit('check-planted-calls: runtime-core is not at %s; give --core=DIR' % CORE_SRC)
 # arm64 code runs under qemu-user, which is slower: a longer limit and the tests' own watchdog scaled
-TIMEOUT = int(opts.get('timeout', 900 if ARM64 else 180))
+TIMEOUT = int(opts.get('timeout', 900 if ARM64 else 600 if WIN64 else 180))
 SELF_TEST = 'self-test' in opts
 QEMU_SYSROOT = opts.get('qemu-sysroot', '/usr/aarch64-linux-gnu')
 CROSS_MAKE = 'CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++' if ARM64 else ''
@@ -110,7 +116,7 @@ for f in os.listdir(pc):
     open(path, 'w').write(text)
 CORE_PRISTINE = os.path.join(T, 'core-pristine')
 JIT_PRISTINE = os.path.join(T, 'jit-pristine')
-if not ARM64:
+if not (ARM64 or WIN64):
     copy_tree(CORE_SRC, CORE_PRISTINE)
 copy_tree(JIT_SRC, JIT_PRISTINE)
 
@@ -284,8 +290,8 @@ M = [
      ['testNatives']),
     ("native: the stack-argument area is not rounded to sixteen bytes", "jit",
      'src/x86_64/emit.c',
-     '  uint32_t area = (uint32_t)((stack_words * 8 + 15) / 16 * 16);',
-     '  uint32_t area = (uint32_t)(stack_words * 8);',
+     '  uint32_t area = (uint32_t)((shadow + stack_words * 8 + (hidden ? 16 : 0) + 15) / 16 * 16);',
+     '  uint32_t area = (uint32_t)(shadow + stack_words * 8 + (hidden ? 16 : 0));',
      ['testNatives']),
     ("native: the caller does not pop the stack arguments", "jit",
      'src/x86_64/emit.c',
@@ -294,8 +300,8 @@ M = [
      ['testNatives']),
     ("native: stack argument k is stored one word too high", "jit",
      'src/x86_64/emit.c',
-     '    grjit_asm_store64(a, GRJIT_RSP, (int32_t)(8 * (i - (creg - 1))), GRJIT_RAX);',
-     '    grjit_asm_store64(a, GRJIT_RSP, (int32_t)(8 * (i - (creg - 1)) + 8), GRJIT_RAX);',
+     '    grjit_asm_store64(a, GRJIT_RSP, (int32_t)(shadow + 8 * (i - first_stack)), GRJIT_RAX);',
+     '    grjit_asm_store64(a, GRJIT_RSP, (int32_t)(shadow + 8 * (i - first_stack) + 8), GRJIT_RAX);',
      ['testNatives']),
     ("native: the references are left out of a native call site's stack map", "jit",
      'src/backend/metadata.c',
@@ -366,7 +372,7 @@ M = [
     ('review: liveness: pre-call exit of a status native uses the state after', 'jit', 'src/backend/liveness.c', 'const uint32_t which_state = k == 2 ? op->exit_state : op->state;', 'const uint32_t which_state = k >= 1 && op->exit_state != GRJIT_NO_STATE ? op->exit_state : op->state;', ['testNatives']),
     ('review: status natives: stack arguments not popped', 'jit', 'src/x86_64/emit.c', '  if (area != 0) {\n#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 16', '  if (area != 0 && !status) {\n#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 16', ['testNatives']),
     ('review: status native with no result: status never tested', 'jit', 'src/x86_64/emit.c', '  if (status) {\n    GRJIT_Label leave = grjit_asm_label(a);', '  if (status && op->dst != GRJIT_NO_VREG) {\n    GRJIT_Label leave = grjit_asm_label(a);', ['testNatives']),
-    ('review: status natives: stack argument one word too high', 'jit', 'src/x86_64/emit.c', '    grjit_asm_store64(a, GRJIT_RSP, (int32_t)(8 * (i - (creg - 1))), GRJIT_RAX);\n#endif', '    grjit_asm_store64(a, GRJIT_RSP, (int32_t)(8 * (i - (creg - 1)) + (status ? 8 : 0)), GRJIT_RAX);\n#endif', ['testNatives']),
+    ('review: status natives: stack argument one word too high', 'jit', 'src/x86_64/emit.c', '    grjit_asm_store64(a, GRJIT_RSP, (int32_t)(shadow + 8 * (i - first_stack)), GRJIT_RAX);\n#endif', '    grjit_asm_store64(a, GRJIT_RSP, (int32_t)(shadow + 8 * (i - first_stack) + (status ? 8 : 0)), GRJIT_RAX);\n#endif', ['testNatives']),
     ('review: status natives: stack check omits the area', 'jit', 'src/x86_64/emit.c', '  uint64_t need = (uint64_t)area + d->stack_bytes;', '  uint64_t need = (uint64_t)(status ? 0 : area) + d->stack_bytes;', ['testNatives']),
     ('review: status natives: stack check omits declared use', 'jit', 'src/x86_64/emit.c', '  uint64_t need = (uint64_t)area + d->stack_bytes;', '  uint64_t need = (uint64_t)area + (status ? 0 : d->stack_bytes);', ['testNatives']),
     ('review: call set keeps the result', 'jit', 'src/backend/liveness.c', '                if (result != GRJIT_NO_VREG && result < f->vreg_count &&\n                    index[result] != UINT32_MAX) {\n                  clear_bit(site_set, index[result]);\n                }', '', ['testNatives']),
@@ -375,11 +381,11 @@ M = [
     ('review: native call: no walk start stored on a native whose result is unused', 'jit', 'src/x86_64/emit.c', '#else\n  grjit_emit_store_walk_cell(e, ret);\n#endif', '#else\n  if (op->dst != GRJIT_NO_VREG) grjit_emit_store_walk_cell(e, ret);\n#endif', ['testNatives']),
     ('review: native call: walk start not stored for natives with status', 'jit', 'src/x86_64/emit.c', '#else\n  grjit_emit_store_walk_cell(e, ret);\n#endif', '#else\n  if (!status) grjit_emit_store_walk_cell(e, ret);\n#endif', ['testNatives']),
     ('review: native call: walk start not stored for natives of more than 5 arguments', 'jit', 'src/x86_64/emit.c', '#else\n  grjit_emit_store_walk_cell(e, ret);\n#endif', '#else\n  if (n <= 5) grjit_emit_store_walk_cell(e, ret);\n#endif', ['testNatives']),
-    ('review: native call: ctx reloaded wrongly (rdi from rbp-8 +0) for natives with >10 args', 'jit', 'src/x86_64/emit.c', '  grjit_asm_load64(a, C_ARG(e, 0), GRJIT_RBP, GRJIT_SLOT_CTX);\n  for (size_t i = 0; i < n && i + 1', '  grjit_asm_load64(a, C_ARG(e, 0), GRJIT_RBP, n > 10 ? GRJIT_SLOT_OUT : GRJIT_SLOT_CTX);\n  for (size_t i = 0; i < n && i + 1', ['testNatives']),
+    ('review: native call: ctx reloaded wrongly (rdi from rbp-8 +0) for natives with >10 args', 'jit', 'src/x86_64/emit.c', '  grjit_asm_load64(a, C_ARG(e, ctx_arg), GRJIT_RBP, GRJIT_SLOT_CTX);\n  for (size_t i = 0; i < n && i + 1', '  grjit_asm_load64(a, C_ARG(e, ctx_arg), GRJIT_RBP, n > 10 ? GRJIT_SLOT_OUT : GRJIT_SLOT_CTX);\n  for (size_t i = 0; i < n && i + 1', ['testNatives']),
     ('review: verifier: after-state names a vreg checked only for existence (dst exemption widened to any vreg)', 'jit', 'src/ir/function.c', '              s->slots[i].vreg == op->dst) {', '              true) {', ['testNative_ir']),
     ('review: a refused rebuild after a native exit is ignored (shared hook-call code)', 'jit', 'src/x86_64/exit.c', '  grjit_asm_jcc(a, GRJIT_COND_NE, e->ret_failed);\n}', '}', ['testNatives']),
-    ('review: the status is tested in all 64 bits of rdx, so garbage above a zero status leaves', 'jit', 'src/x86_64/emit.c', '    grjit_asm_mov32_rr(a, second, second);\n    grjit_asm_test_rr(a, second, second);', '    grjit_asm_test_rr(a, second, second);', ['testNatives']),
-    ('review: only the low 16 bits of the status are tested', 'jit', 'src/x86_64/emit.c', '    grjit_asm_mov32_rr(a, second, second);\n    grjit_asm_test_rr(a, second, second);', '    grjit_asm_mov_ri(a, GRJIT_RCX, 0xFFFF);\n    grjit_asm_alu_rr(a, GRJIT_ALU_AND, second, GRJIT_RCX);\n    grjit_asm_test_rr(a, second, second);', ['testNatives']),
+    ('review: the status is tested in all 64 bits of rdx, so garbage above a zero status leaves', 'jit', 'src/x86_64/emit.c', '    if (!hidden) {\n      grjit_asm_mov32_rr(a, second, second);\n    }\n    grjit_asm_test_rr(a, second, second);', '    grjit_asm_test_rr(a, second, second);', ['testNatives']),
+    ('review: only the low 16 bits of the status are tested', 'jit', 'src/x86_64/emit.c', '    if (!hidden) {\n      grjit_asm_mov32_rr(a, second, second);\n    }\n    grjit_asm_test_rr(a, second, second);', '    grjit_asm_mov_ri(a, GRJIT_RCX, 0xFFFF);\n    grjit_asm_alu_rr(a, GRJIT_ALU_AND, second, GRJIT_RCX);\n    grjit_asm_test_rr(a, second, second);', ['testNatives']),
     ('review: the status exit site names the identity of the state before the call', 'jit', 'src/x86_64/exit.c', '  const GRJIT_FrameState * state = &e->c.f->states[p->op->exit_state];\n  grjit_asm_bind(a, p->entry);\n  GRJIT_Label ret = grjit_asm_label(a);\n  grjit_asm_mov32_rr', '  const GRJIT_FrameState * state = &e->c.f->states[p->op->state];\n  grjit_asm_bind(a, p->entry);\n  GRJIT_Label ret = grjit_asm_label(a);\n  grjit_asm_mov32_rr', ['testNatives']),
     # The call target's alignment (story 7).
     ("a call target that is not on a sixteen-byte boundary is accepted", "jit",
@@ -387,13 +393,6 @@ M = [
      "  if ((target & (GRJIT_ENTRY_TAG_BYTES - 1u)) != 0) {\n    return 0;\n  }\n",
      "",
      ['testCalls']),
-    ("Win64 refuses a callable function only after it has allocated", "jit",
-     "src/code/code.c",
-     ["  if (!grjit_emit_supports(arch, function)) {\n    return GRJIT_ERR_UNSUPPORTED;\n  }\n",
-      "  GRJIT_Result r = grjit_liveness_compute(function, a, limits.max_site_entries, &live);\n  if (r != GRJIT_OK) {\n    return r;\n  }\n"],
-     ["",
-      "  GRJIT_Result r = grjit_liveness_compute(function, a, limits.max_site_entries, &live);\n  if (r != GRJIT_OK) {\n    return r;\n  }\n  if (!grjit_emit_supports(arch, function)) {\n    grjit_liveness_free(&live);\n    return GRJIT_ERR_UNSUPPORTED;\n  }\n"],
-     ['testPin']),
     ("a callable poll does not store the walk start before its helper", "jit",
      "src/x86_64/exit.c",
      "    grjit_asm_bind(a, p->entry);\n    grjit_emit_store_walk_cell(e, ret);\n    grjit_asm_mov_rr(a, C_ARG(e, 0), GRJIT_RCX);",
@@ -401,7 +400,7 @@ M = [
      ['testCalls']),
     ("the adapter does not clear the walk-start cell on the way out", "jit",
      "src/x86_64/emit.c",
-     "  grjit_asm_store64(a, GRJIT_R8, (int32_t)e->c.walk_cell_offset, GRJIT_R9);\n  grjit_asm_store64(a, GRJIT_R8, (int32_t)e->c.walk_cell_offset + 8, GRJIT_R9);\n",
+     "  grjit_asm_load64(a, GRJIT_R8, GRJIT_RSP, 16);\n  grjit_asm_alu_rr(a, GRJIT_ALU_XOR, GRJIT_R9, GRJIT_R9);\n  grjit_asm_store64(a, GRJIT_R8, (int32_t)e->c.walk_cell_offset, GRJIT_R9);\n  grjit_asm_store64(a, GRJIT_R8, (int32_t)e->c.walk_cell_offset + 8, GRJIT_R9);\n",
      "",
      ['testCalls']),
     ("the prologue's native-stack check refuses a frame that ends exactly at the limit", "jit",
@@ -702,11 +701,70 @@ for _e in list(M_ARM64):
         M.append(_w)
         M_ARM64.append(_w)
 
+# The mutations of the Windows paths of the x86-64 emitter and of the unwind table (--target=win64):
+# each built with mingw and run under wine, in the container of suite/tools/xwin. The first three are
+# the carried edit of story 7's review (the Win64 register-argument count, which nothing read until
+# story 7b made Win64 emit callable functions): 6 is what a copy from SysV gives, 3 and 8 the others
+# a slip could give; the tests that read the convention out of the code must fail on each.
+_REGS = '#define GRJIT_WIN64_INTERNAL_REG_ARGS 4u'
+M_WIN64 = [
+    ('the Win64 register-argument count is 6 (the SysV one)', 'jit', 'src/backend/backend_internal.h',
+     _REGS, '#define GRJIT_WIN64_INTERNAL_REG_ARGS 6u', ['testWin64_calls']),
+    ('the Win64 register-argument count is 3', 'jit', 'src/backend/backend_internal.h',
+     _REGS, '#define GRJIT_WIN64_INTERNAL_REG_ARGS 3u', ['testWin64_calls']),
+    ('the Win64 register-argument count is 8', 'jit', 'src/backend/backend_internal.h',
+     _REGS, '#define GRJIT_WIN64_INTERNAL_REG_ARGS 8u', ['testWin64_calls']),
+    ('the Win64 adapter reads its saved out pointer where it was before the callee popped the stack arguments', 'jit',
+     'src/x86_64/emit.c',
+     '  grjit_asm_load64(a, GRJIT_RCX, GRJIT_RSP, s_out - (int32_t)in_bytes);',
+     '  grjit_asm_load64(a, GRJIT_RCX, GRJIT_RSP, s_out);', ['testCalls']),
+    ('the Win64 adapter does not clear the walk-start cell on the way out', 'jit', 'src/x86_64/emit.c',
+     '  grjit_asm_load64(a, GRJIT_R8, GRJIT_RSP, s_ctx - (int32_t)in_bytes);\n  grjit_asm_alu_rr(a, GRJIT_ALU_XOR, GRJIT_R9, GRJIT_R9);\n  grjit_asm_store64(a, GRJIT_R8, (int32_t)e->c.walk_cell_offset, GRJIT_R9);\n  grjit_asm_store64(a, GRJIT_R8, (int32_t)e->c.walk_cell_offset + 8, GRJIT_R9);\n',
+     '  grjit_asm_load64(a, GRJIT_R8, GRJIT_RSP, s_ctx - (int32_t)in_bytes);\n', ['testCalls']),
+    ('the Win64 adapter gives back the marker in rbp, not the caller\'s', 'jit', 'src/x86_64/emit.c',
+     '  grjit_asm_add_rsp(a, frame - in_bytes);\n  grjit_asm_pop(a, GRJIT_RBP);',
+     '  grjit_asm_add_rsp(a, frame - in_bytes);\n  grjit_asm_pop(a, GRJIT_RCX);', ['testCalls']),
+    ('a Win64 callee returns with a plain ret even when it has stack arguments', 'jit', 'src/x86_64/exit.c',
+     '    if (e->c.shape.incoming_bytes == 0) {\n      /* Plain `ret` is the form every unwinder knows as an epilogue\'s end. */',
+     '    if (true) {\n      /* Plain `ret` is the form every unwinder knows as an epilogue\'s end. */', ['testCalls']),
+    ('a native\'s area has no shadow space', 'jit', 'src/x86_64/emit.c',
+     '  const uint32_t shadow = e->abi->shadow_bytes;\n#endif\n  /* The IR argument that is the first C stack word',
+     '  const uint32_t shadow = 0;\n#endif\n  /* The IR argument that is the first C stack word', ['testNatives']),
+    ('a native\'s status is read from the reserved half of the buffer', 'jit', 'src/x86_64/emit.c',
+     '    grjit_asm_load32u(a, GRJIT_RDX, GRJIT_RSP, (int32_t)buffer_at + 8);',
+     '    grjit_asm_load32u(a, GRJIT_RDX, GRJIT_RSP, (int32_t)buffer_at + 12);', ['testNatives']),
+    ('a native\'s status is read as 64 bits of the buffer', 'jit', 'src/x86_64/emit.c',
+     '    grjit_asm_load32u(a, GRJIT_RDX, GRJIT_RSP, (int32_t)buffer_at + 8);',
+     '    grjit_asm_load64(a, GRJIT_RDX, GRJIT_RSP, (int32_t)buffer_at + 8);', ['testNatives']),
+    ('the hidden pointer of a native with a status points past its buffer', 'jit', 'src/x86_64/emit.c',
+     '    grjit_asm_lea(a, C_ARG(e, 0), GRJIT_RSP, (int32_t)buffer_at);',
+     '    grjit_asm_lea(a, C_ARG(e, 0), GRJIT_RSP, (int32_t)buffer_at + 16);', ['testNatives']),
+    ('a Win64 tail call copies its stack arguments through rdi', 'jit', 'src/x86_64/emit.c',
+     '    .tail_copy = GRJIT_RCX,', '    .tail_copy = GRJIT_RDI,', ['testTail']),
+    ('the Win64 overflow stub makes no room for the hook\'s shadow space', 'jit', 'src/x86_64/exit.c',
+     '    grjit_asm_sub_rsp(a, e->abi->shadow_bytes);\n  }\n  grjit_asm_load64(a, GRJIT_RCX, GRJIT_RBP, 0);',
+     '  }\n  grjit_asm_load64(a, GRJIT_RCX, GRJIT_RBP, 0);', ['testCalls']),
+    ('a Win64 callable frame of several pages is not probed', 'jit', 'src/x86_64/emit.c',
+     '    emit_stack_probe(e, alloc, GRJIT_RAX, GRJIT_R11);', '    (void)emit_stack_probe;', ['testWin64_calls']),
+    ('the adapter\'s RUNTIME_FUNCTION ends one byte early', 'jit', 'src/code/memory.c',
+     '      put32(rf + 4, prologue->adapter_end);', '      put32(rf + 4, prologue->adapter_end - 1);', ['testWin64_calls']),
+    ('the body\'s RUNTIME_FUNCTION begins sixteen bytes after the internal entry', 'jit', 'src/code/memory.c',
+     '    put32(body_rf, prologue->body_begin);', '    put32(body_rf, prologue->body_begin + 16);', ['testWin64_calls']),
+    ('a body\'s unwind information names no frame register', 'jit', 'src/code/memory.c',
+     '  out[3] = (uint8_t)(setfp_end != 0 ? RBP : 0);', '  out[3] = 0;', ['testWin64_calls']),
+]
+# The register-count edit is also a host mutation: what reads the convention out of the emitted code
+# runs on every host, so the native run shows it too.
+for _e in M_WIN64[:3]:
+    M.append((_e[0] + ' (read from the emitted code on this host)',) + tuple(_e[1:]))
+
 # What each library's tests are.
 CORE_TESTS = ['testRebuild', 'testRegistry', 'testCompiled']
 JIT_TESTS = ['testCalls', 'testCall_ir', 'testTail', 'testTail_ir', 'testNatives', 'testNative_ir']
 # arm64: the same, and the structural test that reads the convention out of the code.
 JIT_TESTS_ARM64 = JIT_TESTS + ['testArm64_calls']
+# Win64: the same, and the tests that read the Win64 convention out of the code and run the unwinder.
+JIT_TESTS_WIN64 = JIT_TESTS + ['testWin64_calls']
 
 # Edits whose verdict is known, for --self-test: (name, expected, file, old, new).
 SELF = [
@@ -731,6 +789,8 @@ def build_and_run(core, jit, mutated_lib, timeout, extra_env=None, only=None):
     global P_HOLDS_MUTATED_CORE
     if ARM64:
         return build_and_run_arm64(jit, timeout, extra_env, only)
+    if WIN64:
+        return build_and_run_win64(jit, timeout, extra_env, only)
     if mutated_lib == 'jit' and P_HOLDS_MUTATED_CORE:
         # The prefix still holds the core of the previous mutation: put the
         # unmutated one back, or this defect is judged against another's.
@@ -771,6 +831,8 @@ def judge(rc, out, t):
     if isinstance(rc, int) and rc < 0 or (rc != 0 and not failed and rc >= 128):
         return 'CAUGHT', '%s: killed by a signal (crash)' % t
     if rc != 0:
+        if not failed and WIN64 and re.search(r'Unhandled exception|page fault|wine: Unhandled|err:seh', out):
+            return 'CAUGHT', '%s: crashed under wine (%s)' % (t, re.search(r'Unhandled exception[^\n]*|page fault[^\n]*|err:seh[^\n]*', out).group(0)[:60])
         if not failed:
             # Non-zero with no failing test named: the program did not run
             # as a test run, which is not evidence about the defect.
@@ -801,12 +863,33 @@ def build_and_run_arm64(jit, timeout, extra_env, only):
     return 'MISSED', ''
 
 
+def build_and_run_win64(jit, timeout, extra_env, only):
+    """The Windows form: the jit tests cross-built with mingw and run under wine. A catch by the pin
+    test alone is PIN-ONLY, not a catch. A test that dies under wine without naming a failure (an
+    unhandled exception, a page fault) is a crash, which is a catch here as a signal is natively."""
+    tests = only or JIT_TESTS_WIN64
+    for t in tests + ['testPin']:
+        rc, out = sh('make -j4 build/win64/release/apps/%s.exe PREFIX=%s' % (t, P), jit)
+        if rc != 0:
+            return 'BUILD FAILED', out[-300:]
+    for t in tests:
+        rc, out = sh('cd build/win64/release/apps && ./%s.exe --gtest_brief=1' % t, jit, timeout, extra_env)
+        verdict = judge(rc, out.replace('\r', ''), t)
+        if verdict is not None:
+            return verdict
+    rc, out = sh('cd build/win64/release/apps && ./testPin.exe --gtest_brief=1', jit, timeout, extra_env)
+    pinned = judge(rc, out.replace('\r', ''), 'testPin')
+    if pinned is not None and pinned[0] == 'CAUGHT':
+        return 'PIN-ONLY', pinned[1]
+    return 'MISSED', ''
+
+
 def tree_pair(rel_lib=None, rel_file=None, old=None, new=None):
     """Fresh copies of both trees, with the one edit applied to its library."""
     core = os.path.join(T, 'core')
     jit = os.path.join(T, 'jit')
     for d, src in ((core, CORE_PRISTINE), (jit, JIT_PRISTINE)):
-        if ARM64 and src == CORE_PRISTINE:
+        if (ARM64 or WIN64) and src == CORE_PRISTINE:
             continue
         if os.path.exists(d):
             shutil.rmtree(d)
@@ -824,7 +907,7 @@ def tree_pair(rel_lib=None, rel_file=None, old=None, new=None):
 ok = True
 # The control: nothing is edited, and every test must pass.
 core, jit = tree_pair()
-if ARM64:
+if ARM64 or WIN64:
     rc, out = 0, ''
 else:
     rc, out = sh('make -j8 install PREFIX=%s' % P, core)
@@ -842,13 +925,13 @@ if SELF_TEST:
         core, jit = tree_pair('jit', rel, old, new)
         # The tests' own watchdog (tests/test_helpers.h) would abort the hang the self-test
         # plants and turn it into a catch; it is off here so that a hang is seen as one.
-        verdict, detail = build_and_run(core, jit, 'jit', 120 if ARM64 else 20, {'GRJIT_TEST_WATCHDOG_SECONDS': '0'})
+        verdict, detail = build_and_run(core, jit, 'jit', 120 if ARM64 else 60 if WIN64 else 20, {'GRJIT_TEST_WATCHDOG_SECONDS': '0'})
         good = verdict == expected
         ok = ok and good
         print('self-test: %-34s want %-12s got %-12s %s' % (name, expected, verdict, 'ok' if good else 'WRONG'),
               flush=True)
 else:
-    for idx, (name, lib, rel, old, new, *rest) in enumerate(M_ARM64 if ARM64 else M):
+    for idx, (name, lib, rel, old, new, *rest) in enumerate(M_ARM64 if ARM64 else M_WIN64 if WIN64 else M):
         if args and not any(a in name or a == str(idx) for a in args):
             continue
         core, jit = tree_pair(lib, rel, old, new)

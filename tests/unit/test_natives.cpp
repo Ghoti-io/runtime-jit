@@ -35,6 +35,8 @@ using namespace fx;
 
 #if FX_ASM_AARCH64
 static_assert(kInternalRegArgs == GRJIT_ARM64_INTERNAL_REG_ARGS, "the test's count is the library's");
+#elif FX_ASM_WIN64
+static_assert(kInternalRegArgs == GRJIT_WIN64_INTERNAL_REG_ARGS, "the test's count is the library's");
 #else
 static_assert(kInternalRegArgs == GRJIT_SYSV_INTERNAL_REG_ARGS, "the test's count is the library's");
 #endif
@@ -375,7 +377,8 @@ TEST(Natives, TheStackIsSixteenAlignedAtTheNativesEntryAndTheSameAfterEveryCallF
     if (n == 0) {
       first_entry[with_status] = grjit_test_entry_rsp[0];
     }
-    EXPECT_EQ(first_entry[with_status] - grjit_test_entry_rsp[0], native_stack_area(n))
+    EXPECT_EQ(first_entry[with_status] - grjit_test_entry_rsp[0],
+        native_stack_area(n, with_status != 0) - native_stack_area(0, with_status != 0))
         << n << " arguments leave exactly the rounded area below the frame";
   }
 }
@@ -662,13 +665,15 @@ TEST(Natives, TheNativeStackIsCheckedAtTheCallSiteForTheStackArgumentsAndTheNati
       // less its own use, counting the return address the entry stack pointer is past) is not
       // below the limit, and is an exit before the call if it is one byte below.
       const uintptr_t lowest = entry + kNativeEntrySpBias - declared;
-      for (long delta : {-1L, 0L, 1L}) {
-        *limit = static_cast<uintptr_t>(static_cast<long>(lowest) + delta);
+      for (long long delta : {-1LL, 0LL, 1LL}) {
+        *limit = static_cast<uintptr_t>(static_cast<long long>(lowest) + delta);
         g_deopts = 0;
         grjit_test_entry_count = 0;
         auto run = c.run(w.ctx, args);
         if (delta <= 0) {
-          EXPECT_EQ(run.exit, uint32_t{GRJIT_EXIT_RETURNED}) << n << " arguments, " << declared << " declared, limit " << delta;
+          EXPECT_EQ(run.exit, uint32_t{GRJIT_EXIT_RETURNED})
+              << n << " arguments, " << declared << " declared, limit " << delta << ": entry " << std::hex << entry
+              << " limit " << *limit;
           EXPECT_EQ(grjit_test_entry_count, 1u);
           EXPECT_EQ(g_deopts, 0);
         } else {
@@ -718,8 +723,8 @@ TEST(Natives, ANativeThatDeclaresSixteenMebibytesOrMoreIsCheckedToTheByteOnEvery
       const uintptr_t entry = grjit_test_entry_rsp[0];
       ASSERT_GT(entry, uintptr_t{declared} + 4096) << "the arithmetic below does not wrap";
       const uintptr_t lowest = entry + kNativeEntrySpBias - declared;
-      for (long delta : {-1L, 0L, 1L}) {
-        *limit = static_cast<uintptr_t>(static_cast<long>(lowest) + delta);
+      for (long long delta : {-1LL, 0LL, 1LL}) {
+        *limit = static_cast<uintptr_t>(static_cast<long long>(lowest) + delta);
         g_deopts = 0;
         grjit_test_entry_count = 0;
         auto run = c.run(w.ctx, args);
@@ -2990,7 +2995,7 @@ TEST(Natives, AReferenceAndADerivedPointerLiveAcrossANativeInAFramePaddedForAWid
 
 /* ---- The other backends ---------------------------------------------------------------- */
 
-TEST(Natives, Win64RefusesANativeCallBeforeAByteAndTheOtherTwoEmitItOnAnyHost) {
+TEST(Natives, EveryBackendEmitsANativeCallOnAnyHost) {
   NativeTab t;
   uint32_t id = t.add(reinterpret_cast<const void *>(sums()[1]), {GRJIT_TYPE_I64}, GRJIT_TYPE_I64);
   B b("native", 1);
@@ -3002,16 +3007,11 @@ TEST(Natives, Win64RefusesANativeCallBeforeAByteAndTheOtherTwoEmitItOnAnyHost) {
   b.ret(V(x));
   Fn f(b.finish());
   GRJIT_Emitted e;
-  for (GRJIT_Arch arch : {GRJIT_ARCH_X86_64, GRJIT_ARCH_ARM64}) {
+  for (GRJIT_Arch arch : {GRJIT_ARCH_X86_64, GRJIT_ARCH_ARM64, GRJIT_ARCH_X86_64_WIN64}) {
     EXPECT_EQ(grjit_emit_for(arch, f, grjit_allocator_default(), nullptr, nullptr, 0x40, &e), GRJIT_OK) << arch;
     EXPECT_GT(e.size, 0u);
     grjit_emitted_free(&e);
   }
-  TrackingAllocator alloc;
-  EXPECT_EQ(grjit_emit_for(GRJIT_ARCH_X86_64_WIN64, f, alloc.get(), nullptr, nullptr, 0x40, &e), GRJIT_ERR_UNSUPPORTED);
-  EXPECT_EQ(e.size, 0u);
-  EXPECT_EQ(e.bytes, nullptr);
-  EXPECT_EQ(alloc.calls, 0) << "and nothing was even asked for";
   EXPECT_TRUE(grjit_backend_calls_available());
 }
 

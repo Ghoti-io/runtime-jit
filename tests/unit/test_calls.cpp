@@ -953,7 +953,7 @@ TEST(Calls, TheStackLimitIsMeasuredInBytesAndTheFirstFrameThatDoesNotFitIsTheOne
     int rec = add_rec(e);
     ASSERT_TRUE(e.compile_fn(rec));
     const GRCORE_CodeMeta * meta = grjit_code_meta(e.code_of(rec).code);
-    const uintptr_t frame = meta->frame_bytes;
+    const uintptr_t frame = meta->frame_bytes + kOutgoingBytes;
     Outcome c = e.run_compiled(rec, {400});
     ASSERT_TRUE(c.finished);
     ASSERT_EQ(c.exit, uint32_t{GRJIT_EXIT_DEOPT});
@@ -1243,7 +1243,10 @@ struct Child {
 Child in_child(const std::function<void()> & fn) {
   Child r;
 #ifdef _WIN32
-  (void)fn; // no fork here; the callers that need one do not run on this target
+  // No fork here: the binary runs itself again (tests/test_helpers.h).
+  grjit_test::ChildOutcome o = grjit_test::run_in_child(fn);
+  r.aborted = o.aborted;
+  r.err = o.err;
 #else
   int fds[2];
   EXPECT_EQ(pipe(fds), 0);
@@ -1694,24 +1697,13 @@ TEST(Calls, ACallableFunctionHasAnInternalEntryAndAPlainOneHasNone) {
   EXPECT_FALSE(grjit_code_callable(nullptr));
 }
 
-TEST(Calls, Win64RefusesACallableFunctionBeforeEmittingAByteAndTheOtherTwoEmitItOnAnyHost) {
+TEST(Calls, EveryBackendEmitsACallableFunctionOnAnyHost) {
   Fn f(callable_identity(GRJIT_TYPE_I64));
   GRCORE_JitLayout layout = *grcore_jit_layout();
-  {
-    GRJIT_Emitted out;
-    TrackingAllocator alloc;
-    EXPECT_EQ(grjit_emit_for(GRJIT_ARCH_X86_64_WIN64, f, alloc.get(), nullptr, nullptr,
-                  layout.request_word_offset, &out),
-        GRJIT_ERR_UNSUPPORTED);
-    EXPECT_EQ(alloc.live, 0) << "nothing was left allocated";
-    EXPECT_EQ(alloc.calls, 0) << "and nothing was even asked for";
-    EXPECT_EQ(out.size, 0u);
-    EXPECT_EQ(out.bytes, nullptr);
-  }
-  // And the same function is emitted for x86-64 SysV and for arm64 on any host, with its internal
+  // The function is emitted for each architecture on any host, with its internal
   // entry on a sixteen-byte boundary and the tag (the magic and the parameter count, then the
   // token) in the sixteen bytes before it.
-  for (GRJIT_Arch arch : {GRJIT_ARCH_X86_64, GRJIT_ARCH_ARM64}) {
+  for (GRJIT_Arch arch : {GRJIT_ARCH_X86_64, GRJIT_ARCH_ARM64, GRJIT_ARCH_X86_64_WIN64}) {
     SCOPED_TRACE(arch);
     GRJIT_Emitted out;
     ASSERT_EQ(grjit_emit_for(arch, f, grjit_allocator_default(), nullptr, nullptr, layout.request_word_offset, &out),
@@ -1930,7 +1922,7 @@ TEST(Calls, AnExitAtAnUncompilableCalleeIsNotCountedAgainstTheCallersDiscardLimi
   }
 }
 
-TEST(Calls, TheBackendSaysWhetherItCanCompileCallsAndOnlyX86SysVAndArm64Can) {
+TEST(Calls, TheBackendSaysWhetherItCanCompileCallsAndEveryBackendCan) {
 #if FX_HAVE_CALLS_ASM
   EXPECT_TRUE(grjit_backend_calls_available());
 #else

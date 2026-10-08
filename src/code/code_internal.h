@@ -112,7 +112,11 @@ struct GRJIT_Code {
  * `[0, length)`, then the `UNWIND_INFO` it names, RVAs from the start of the
  * mapping), before the flip, and registered after it with
  * ::grjit_unwind_register; `*out_unwind_table` receives the registered table,
- * or NULL if this target registers nothing.
+ * or NULL if this target registers nothing. A callable function (the prologue's
+ * `adapter_end` is not zero) has two entries in the one table, sorted by begin
+ * address: the adapter's, `[0, adapter_end)`, with its info (no frame register),
+ * and the body's, `[body_begin, length)`; both are registered together and removed
+ * together.
  *
  * @param prologue Required for Win64, ignored otherwise.
  * @param out_unwind_table Required for Win64, ignored otherwise.
@@ -178,6 +182,15 @@ GRJIT_INTERNAL_API void grjit_memory_destroy(const GRCORE_PageProvider * pages,
 GRJIT_INTERNAL_API size_t grjit_unwind_info_build(
     const GRJIT_Prologue * prologue, uint8_t * out);
 
+/** The `UNWIND_INFO` of a callable function's entry adapter: `push rbp; sub rsp,
+ *  N'` and **no frame register**. The adapter sets `rbp` to
+ *  `GRCORE_COMPILED_CHAIN_END`, which an unwinder reading `SET_FPREG` would take for
+ *  a real base, so its frame is static: everything is addressed from `rsp`, and the
+ *  unwinder recovers the caller from the stack pointer it is given. Same bounds as
+ *  ::grjit_unwind_info_build, from the `adapter_*` fields. */
+GRJIT_INTERNAL_API size_t grjit_unwind_info_build_adapter(
+    const GRJIT_Prologue * prologue, uint8_t * out);
+
 /** What registers and removes a table with the operating system. */
 typedef struct GRJIT_UnwindOps {
   /** Registers `count` entries at `table`, RVAs from `base`. True if done. */
@@ -187,7 +200,7 @@ typedef struct GRJIT_UnwindOps {
 } GRJIT_UnwindOps;
 
 /**
- * Registers the one `RUNTIME_FUNCTION` at `table` (the begin address is an RVA
+ * Registers `count` `RUNTIME_FUNCTION`s at `table` (the begin address is an RVA
  * from `base`) so that a native stack walk can pass through the frame. On
  * Windows x86-64 it is `RtlAddFunctionTable`; on every other target there is
  * nothing to register with and the answer is ::GRJIT_ERR_UNSUPPORTED, which
@@ -196,7 +209,7 @@ typedef struct GRJIT_UnwindOps {
  * @return ::GRJIT_OK; ::GRJIT_ERR_UNSUPPORTED on a target with no registration;
  *   ::GRJIT_ERR_IO if the operating system refused.
  */
-GRJIT_INTERNAL_API GRJIT_Result grjit_unwind_register(void * base, void * table);
+GRJIT_INTERNAL_API GRJIT_Result grjit_unwind_register(void * base, void * table, uint32_t count);
 
 /** Removes a registration made by ::grjit_unwind_register. */
 GRJIT_INTERNAL_API void grjit_unwind_deregister(void * table);

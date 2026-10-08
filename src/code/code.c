@@ -83,8 +83,9 @@ bool grjit_backend_available(void) {
 }
 
 bool grjit_backend_calls_available(void) {
-  return GRJIT_HAVE_BACKEND != 0 &&
-      (GRJIT_NATIVE == GRJIT_ARCH_X86_64 || GRJIT_NATIVE == GRJIT_ARCH_ARM64);
+  /* Calls between compiled functions, tail calls and calls to natives are emitted by
+   * every backend (x86-64 SysV, Win64 and arm64); only a build with none refuses. */
+  return GRJIT_HAVE_BACKEND != 0;
 }
 
 void grjit_code_destroy(GRJIT_Code * code) {
@@ -199,40 +200,12 @@ static GRJIT_Result verify_for_compile(
 }
 #endif
 
-/* Calls between compiled functions (AD-28), tail calls and calls to natives are emitted for
- * x86-64 SysV and arm64; Windows x86-64 has them in story 7b of the calls spec. A function
- * that has the new operations, or is callable (a tail call and a native call are in a
- * callable function only), is refused for Win64 with GRJIT_ERR_UNSUPPORTED before a byte is
- * emitted, so the bytes of every other function are exactly what they were. */
-static bool grjit_emit_supports(GRJIT_Arch arch, const GRJIT_Function * f) {
-  if (arch != GRJIT_ARCH_X86_64_WIN64) {
-    return true;
-  }
-  if (f->callable) {
-    return false;
-  }
-  for (size_t b = 0; b < f->block_count; b++) {
-    for (size_t i = 0; i < f->blocks[b].count; i++) {
-      GRJIT_OpKind k = f->blocks[b].ops[i].kind;
-      if (k == GRJIT_OP_CALL_SLOT || k == GRJIT_OP_CALL_PTR ||
-          k == GRJIT_OP_TAIL_CALL_SLOT || k == GRJIT_OP_TAIL_CALL_PTR ||
-          k == GRJIT_OP_CALL_NATIVE) {
-        return false;
-      }
-    }
-  }
-  return true;
-}
-
 GRJIT_Result grjit_emit_for(GRJIT_Arch arch, const GRJIT_Function * function,
     const GRJIT_Allocator * a, const GRJIT_Limits * limits_in,
     GRJIT_EntryHook hook, uint32_t request_offset, GRJIT_Emitted * out) {
   GRJIT_Limits limits;
   grjit_limits_resolve(limits_in, &limits);
   memset(out, 0, sizeof *out);
-  if (!grjit_emit_supports(arch, function)) {
-    return GRJIT_ERR_UNSUPPORTED;
-  }
   /* Three fixed slots and one per register, rounded to keep the stack pointer
    * 16-aligned. */
   GRJIT_CallableShape shape;

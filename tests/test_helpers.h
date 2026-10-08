@@ -438,6 +438,107 @@ struct Compiled {
   } while (0)
 #endif
 
+/* ---- A child process where there is no fork ------------------------------------------------ */
+
+/* Some tests need a process that may die: a walk that meets a corrupt frame aborts with a message, which is
+ * the behaviour under test. On POSIX the test forks. Windows has no fork, so the test binary runs itself
+ * again: `--gtest_filter` names the running test and the environment variable `GRJIT_TEST_CHILD` carries the
+ * number of the child, counted from 1 in the order the test calls ::grjit_test::run_in_child. The child
+ * runs the test from its start (state is rebuilt, not copied), and each call before its own number does
+ * nothing; at its own it runs the body and leaves with status zero if the body came back, or by the
+ * abort the body made. The parent reads the exit status and everything the child wrote to `stderr`.
+ * `aborted` is true for the abort of the C runtime (status 3, or the fast-fail status newer runtimes
+ * use), which is how `abort()` ends a process here. */
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+/* Names the platform header takes that the tests use for their own (the fixture's `K::CONST`). */
+#undef CONST
+#undef IN
+#undef OUT
+#undef ERROR
+namespace grjit_test {
+
+struct ChildOutcome {
+  bool aborted = false;
+  bool ran = false;       ///< The child started and ended (not that it was found).
+  unsigned long status = 0;
+  std::string err;
+};
+
+inline ChildOutcome run_in_child(const std::function<void()> & body) {
+  static std::string last_test;
+  static int calls = 0;
+  const ::testing::TestInfo * info = ::testing::UnitTest::GetInstance()->current_test_info();
+  const std::string name = std::string(info->test_suite_name()) + "." + info->name();
+  if (name != last_test) {
+    last_test = name;
+    calls = 0;
+  }
+  const int mine = ++calls;
+  ChildOutcome out;
+  const char * which = std::getenv("GRJIT_TEST_CHILD");
+  if (which != nullptr) {
+    // This is the child: the body runs at its own number; the calls before it are not run.
+    if (std::atoi(which) == mine) {
+      std::fflush(nullptr);
+      body();
+      std::fflush(nullptr);
+      std::_Exit(0);
+    }
+    return out;
+  }
+  char exe[MAX_PATH * 2];
+  const DWORD len = GetModuleFileNameA(nullptr, exe, sizeof exe);
+  EXPECT_GT(len, 0u);
+  SetEnvironmentVariableA("GRJIT_TEST_CHILD", std::to_string(mine).c_str());
+  SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
+  HANDLE rd = nullptr, wr = nullptr, nul = CreateFileA("NUL", GENERIC_WRITE, FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr);
+  EXPECT_TRUE(CreatePipe(&rd, &wr, &sa, 0));
+  SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+  STARTUPINFOA si{};
+  si.cb = sizeof si;
+  si.dwFlags = STARTF_USESTDHANDLES;
+  si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+  si.hStdOutput = nul;
+  si.hStdError = wr;
+  PROCESS_INFORMATION pi{};
+  std::string cmd = std::string("\"") + exe + "\" --gtest_filter=" + name;
+  std::vector<char> cmdline(cmd.begin(), cmd.end());
+  cmdline.push_back('\0');
+  std::fflush(nullptr);
+  const BOOL started = CreateProcessA(exe, cmdline.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi);
+  EXPECT_TRUE(started) << "the test binary could not run itself";
+  SetEnvironmentVariableA("GRJIT_TEST_CHILD", nullptr);
+  CloseHandle(wr);
+  CloseHandle(nul);
+  if (started) {
+    char buf[512];
+    DWORD got = 0;
+    while (ReadFile(rd, buf, sizeof buf, &got, nullptr) && got != 0) {
+      out.err.append(buf, got);
+    }
+    WaitForSingleObject(pi.hProcess, 120000);
+    DWORD code = 0;
+    GetExitCodeProcess(pi.hProcess, &code);
+    out.status = code;
+    out.ran = true;
+    out.aborted = code == 3 || code == 0xC0000409u;
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+  }
+  CloseHandle(rd);
+  return out;
+}
+
+} // namespace grjit_test
+#endif
+
 /* A watchdog for every test: compiled code that is wrong can loop forever (a
  * frame base left pointing at the wrong frame does), and a hang is neither a
  * failure a test reports nor a result a harness can read as a catch. Each test

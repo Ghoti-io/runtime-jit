@@ -149,3 +149,13 @@ if [ "$(uname -m)" != "aarch64" ]; then
     printf 'check-planted: SKIPPED on this host: tools/arm64-plants.txt is missing, so the arm64 catches (run by suite/tools/xarch/jit-arm64.sh) are not listed\n'
   fi
 fi
+# What only Win64 code run under wine can show, by name and not counted: tools/win64-plants.txt lists each
+# (the defect, the test that catches it) and suite/tools/xwin/m1-controls.sh runs them in a scratch copy of the
+# cross-built tree, each with its control passing first. 5 to 7 are also caught structurally above, on any host.
+wlist="$(dirname "$0")/win64-plants.txt"
+if [ -f "$wlist" ]; then
+  wnames="$(grep -v '^#' "$wlist" | grep -v '^$' | awk -F'|' '{printf "%s%s", sep, $1; sep=", "}')"
+  printf 'check-planted: SKIPPED on this host, by name: defects %s, each caught by Win64 code run under wine (needs a cross build and a wine; run by suite/tools/xwin/m1-controls.sh, and not counted here).\n' "$wnames"
+else
+  printf 'check-planted: SKIPPED on this host: tools/win64-plants.txt is missing, so the Win64 catches (run by suite/tools/xwin/m1-controls.sh) are not listed\n'
+fi

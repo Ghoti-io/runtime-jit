@@ -311,6 +311,7 @@
 #define grjit_result_string GHOTIIO_RUNTIME_JIT(grjit_result_string)
 #define grjit_unwind_deregister GHOTIIO_RUNTIME_JIT(grjit_unwind_deregister)
 #define grjit_unwind_info_build GHOTIIO_RUNTIME_JIT(grjit_unwind_info_build)
+#define grjit_unwind_info_build_adapter GHOTIIO_RUNTIME_JIT(grjit_unwind_info_build_adapter)
 #define grjit_unwind_register GHOTIIO_RUNTIME_JIT(grjit_unwind_register)
 #define grjit_unwind_set_ops GHOTIIO_RUNTIME_JIT(grjit_unwind_set_ops)
 #define grjit_version_number GHOTIIO_RUNTIME_JIT(grjit_version_number)
