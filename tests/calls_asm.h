@@ -89,8 +89,9 @@ constexpr uint64_t kNativeEntrySpBias = 0;
 /** The bytes a frame has below the metadata's frame size: Win64's outgoing area, 32 bytes of shadow space
  *  for a C callee and two words for its fifth and sixth arguments, which belongs to the frame the stack
  *  limit is checked against and is not in the metadata. */
+constexpr uintptr_t kWin64OutgoingBytes = 48; // tied to GRJIT_WIN64_OUTGOING by a static_assert in test_win64_calls.cpp
 #if FX_ASM_WIN64
-constexpr uintptr_t kOutgoingBytes = 48;
+constexpr uintptr_t kOutgoingBytes = kWin64OutgoingBytes;
 #else
 constexpr uintptr_t kOutgoingBytes = 0;
 #endif
