@@ -27,6 +27,7 @@
 #include "../../src/ir/ir_internal.h"
 #include "../../src/x86_64/asm_internal.h"
 
+#include <algorithm>
 #include <cstring>
 #include <set>
 #include <string>
@@ -64,6 +65,7 @@ struct Emit {
   size_t body_size() const { return e.size - e.internal_offset; }
   size_t count(const Bytes & want, size_t from, size_t to) const {
     size_t n = 0;
+    to = std::min(to, e.size);
     for (size_t i = from; i + want.size() <= to; i++) {
       if (std::memcmp(e.bytes + i, want.data(), want.size()) == 0) {
         n++;
