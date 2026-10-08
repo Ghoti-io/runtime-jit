@@ -467,6 +467,7 @@ namespace grjit_test {
 struct ChildOutcome {
   bool aborted = false;
   bool ran = false;       ///< The child started and ended (not that it was found).
+  bool timed_out = false; ///< It did not end in the time allowed and was terminated: a failure, never an abort.
   unsigned long status = 0;
   std::string err;
 };
@@ -495,18 +496,32 @@ inline ChildOutcome run_in_child(const std::function<void()> & body) {
   }
   char exe[MAX_PATH * 2];
   const DWORD len = GetModuleFileNameA(nullptr, exe, sizeof exe);
-  EXPECT_GT(len, 0u);
-  SetEnvironmentVariableA("GRJIT_TEST_CHILD", std::to_string(mine).c_str());
+  if (len == 0 || len >= sizeof exe) {
+    ADD_FAILURE() << "the path of the test binary is unknown or was truncated";
+    return out;
+  }
+  // The child's stderr goes to a file, so that waiting for it never depends on it closing a pipe and a
+  // hung child can be given up on.
+  char tmp_dir[MAX_PATH], tmp_name[MAX_PATH];
+  if (GetTempPathA(sizeof tmp_dir, tmp_dir) == 0 || GetTempFileNameA(tmp_dir, "gct", 0, tmp_name) == 0) {
+    ADD_FAILURE() << "no temporary file for the child's stderr";
+    return out;
+  }
   SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
-  HANDLE rd = nullptr, wr = nullptr, nul = CreateFileA("NUL", GENERIC_WRITE, FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr);
-  EXPECT_TRUE(CreatePipe(&rd, &wr, &sa, 0));
-  SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+  HANDLE err = CreateFileA(tmp_name, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, CREATE_ALWAYS,
+      FILE_ATTRIBUTE_NORMAL, nullptr);
+  HANDLE nul = CreateFileA("NUL", GENERIC_WRITE, FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr);
+  if (err == INVALID_HANDLE_VALUE || nul == INVALID_HANDLE_VALUE) {
+    ADD_FAILURE() << "could not open the child's output files";
+    return out;
+  }
+  SetEnvironmentVariableA("GRJIT_TEST_CHILD", std::to_string(mine).c_str());
   STARTUPINFOA si{};
   si.cb = sizeof si;
   si.dwFlags = STARTF_USESTDHANDLES;
   si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
   si.hStdOutput = nul;
-  si.hStdError = wr;
+  si.hStdError = err;
   PROCESS_INFORMATION pi{};
   std::string cmd = std::string("\"") + exe + "\" --gtest_filter=" + name;
   std::vector<char> cmdline(cmd.begin(), cmd.end());
@@ -515,24 +530,33 @@ inline ChildOutcome run_in_child(const std::function<void()> & body) {
   const BOOL started = CreateProcessA(exe, cmdline.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi);
   EXPECT_TRUE(started) << "the test binary could not run itself";
   SetEnvironmentVariableA("GRJIT_TEST_CHILD", nullptr);
-  CloseHandle(wr);
+  CloseHandle(err);
   CloseHandle(nul);
   if (started) {
-    char buf[512];
-    DWORD got = 0;
-    while (ReadFile(rd, buf, sizeof buf, &got, nullptr) && got != 0) {
-      out.err.append(buf, got);
+    if (WaitForSingleObject(pi.hProcess, 120000) != WAIT_OBJECT_0) {
+      TerminateProcess(pi.hProcess, 1);
+      WaitForSingleObject(pi.hProcess, 10000);
+      out.timed_out = true;
+      ADD_FAILURE() << "the child did not end in 120 s and was terminated";
     }
-    WaitForSingleObject(pi.hProcess, 120000);
     DWORD code = 0;
-    GetExitCodeProcess(pi.hProcess, &code);
-    out.status = code;
-    out.ran = true;
-    out.aborted = code == 3 || code == 0xC0000409u;
+    if (!out.timed_out && GetExitCodeProcess(pi.hProcess, &code) && code != STILL_ACTIVE) {
+      out.status = code;
+      out.ran = true;
+      out.aborted = code == 3 || code == 0xC0000409u;
+    }
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
   }
-  CloseHandle(rd);
+  if (FILE * f = std::fopen(tmp_name, "rb")) {
+    char buf[512];
+    size_t got;
+    while ((got = std::fread(buf, 1, sizeof buf, f)) > 0) {
+      out.err.append(buf, got);
+    }
+    std::fclose(f);
+  }
+  DeleteFileA(tmp_name);
   return out;
 }
 
