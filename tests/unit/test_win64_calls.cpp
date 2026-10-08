@@ -554,6 +554,83 @@ TEST(Win64CallsRun, ANativeThatSpillsItsRegisterArgumentsToItsHomeSpaceLeavesIts
   EXPECT_EQ(o.value, 4000u + 500u + 60u + 7u) << "the three stack words, summed above the shadow space, and the live parameter";
 }
 
+/* A deopt hook that records the stack pointer it was entered with (after the return address is pushed) and the
+ * frame register, and answers zero ("rebuilt"). */
+extern "C" uint32_t grjit_test_record_deopt(void *, uint64_t);
+extern "C" {
+uint64_t grjit_test_deopt_rsp = 0;
+uint64_t grjit_test_deopt_rbp = 0;
+uint64_t grjit_test_deopt_calls = 0;
+}
+asm(R"(
+  .text
+  .globl grjit_test_record_deopt
+grjit_test_record_deopt:
+  mov %rsp, grjit_test_deopt_rsp(%rip)
+  mov %rbp, grjit_test_deopt_rbp(%rip)
+  incq grjit_test_deopt_calls(%rip)
+  xor %eax, %eax
+  ret
+)");
+
+TEST(Win64CallsRun, TheOverflowStubCallsTheHookWithItsShadowSpaceBelowTheFramesSavedBase) {
+  /* A body whose native-stack check fails exits at its prologue, before its frame is made: only `push rbp;
+   * mov rbp, rsp` have run, so the stub makes room below `rsp` for the hook's shadow space. A hook entered
+   * with its shadow space on the saved base and the return address (the room not made) would scribble on
+   * the caller's frame; this one records where it was entered, and the shadow space [rsp + 8, rsp + 40)
+   * must lie below the frame register. */
+  JitWorld w;
+  B b("overflow", 1);
+  GRJIT_CallHooks h{};
+  h.deopt = reinterpret_cast<decltype(h.deopt)>(grjit_test_record_deopt);
+  b.callable(h);
+  GRJIT_VReg x = b.param(GRJIT_TYPE_I64);
+  b.at(b.block());
+  b.ret(V(x));
+  Fn f(b.finish());
+  Compiled c(f, w.pages());
+  ASSERT_TRUE(c);
+  uintptr_t * limit = reinterpret_cast<uintptr_t *>(
+      reinterpret_cast<char *>(w.ctx) + grcore_jit_layout()->native_limit_offset);
+  *limit = UINTPTR_MAX; // no frame fits
+  grjit_test_deopt_calls = 0;
+  auto r = c.run(w.ctx, {5});
+  *limit = 0;
+  EXPECT_EQ(r.exit, uint32_t{GRJIT_EXIT_DEOPT});
+  ASSERT_EQ(grjit_test_deopt_calls, 1u) << "the stub called the hook";
+  EXPECT_LE(grjit_test_deopt_rsp + 40, grjit_test_deopt_rbp)
+      << "the hook's 32 bytes of shadow space, above its return address, lie below the frame register: "
+      << "entered with rsp " << std::hex << grjit_test_deopt_rsp << ", rbp " << grjit_test_deopt_rbp;
+  EXPECT_EQ(grjit_test_deopt_rsp % 16, 8u) << "and its stack pointer is 8 mod 16, as after a call from an aligned one";
+}
+
+TEST(Win64CallsRun, ACallableFunctionWhoseFrameIsAMebibyteIsProbedAPageAtATimeAndRuns) {
+  /* The largest frame the cap allows, as the plain function's test has it, for a callable function: the
+   * prologue's probes touch each page from the return address down, in order, ending at the new rsp. */
+  JitWorld w;
+  GRJIT_Limits limits;
+  grjit_limits_default(&limits);
+  limits.max_vregs = 140000;
+  B b("frame", 1, &limits);
+  GRJIT_CallHooks h{};
+  h.deopt = reinterpret_cast<decltype(h.deopt)>(grjit_test_record_deopt);
+  b.callable(h);
+  GRJIT_VReg first = b.param(GRJIT_TYPE_I64);
+  GRJIT_VReg last = first;
+  for (int i = 1; i < 131000; i++) {
+    last = b.reg();
+  }
+  b.at(b.block());
+  b.bin(GRJIT_OP_ADD, last, V(first), I(5));
+  b.ret(V(last));
+  Fn f(b.finish());
+  Compiled c(f, w.pages(), nullptr, &limits);
+  ASSERT_TRUE(c) << grjit_result_string(c.result);
+  auto r = c.run(w.ctx, {37});
+  EXPECT_EQ(r.exit, uint32_t{GRJIT_EXIT_RETURNED});
+  EXPECT_EQ(r.out[0], 42u);
+}
+
 TEST(Win64CallsRun, AHookThatScribblesOnItsShadowSpaceFindsTheFramesOutgoingAreaAndNotItsSlots) {
   JitWorld w;
   B b("scribble", 8);

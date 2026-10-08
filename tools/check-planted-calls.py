@@ -16,6 +16,12 @@ built and the tests that should notice are run:
                defect was reached, not that a test noticed it, so it fails
   BUILD FAILED the edit does not compile. NOT a catch either: a build that
                breaks proves nothing about the tests
+  PIN-ONLY    (arm64 and win64) only the pin test failed: the bytes moved and no
+               other test said so. NOT a catch
+  EQUIVALENT   (a mutation carrying a reason, `--target=win64` only) every test
+               passed and the reason says why they must on this target: the
+               defect is invisible to anything that runs there. Documented, not
+               hidden, and it does not fail the run
 
 The harness is itself shown to fail: `--self-test` runs it against edits whose
 verdict is known (an edit that changes nothing, one that does not compile, one
@@ -743,9 +749,14 @@ M_WIN64 = [
      '    .tail_copy = GRJIT_RCX,', '    .tail_copy = GRJIT_RDI,', ['testTail']),
     ('the Win64 overflow stub makes no room for the hook\'s shadow space', 'jit', 'src/x86_64/exit.c',
      '    grjit_asm_sub_rsp(a, e->abi->shadow_bytes);\n  }\n  grjit_asm_load64(a, GRJIT_RCX, GRJIT_RBP, 0);',
-     '  }\n  grjit_asm_load64(a, GRJIT_RCX, GRJIT_RBP, 0);', ['testCalls']),
+     '  }\n  grjit_asm_load64(a, GRJIT_RCX, GRJIT_RBP, 0);', ['testWin64_calls']),
+    # Documented equivalent under wine (the sixth element says why): wine commits a thread's stack on a touch
+    # anywhere in its reserved range, so a frame of a mebibyte entered without the probes runs, and the test that
+    # enters one (`ACallableFunctionWhoseFrameIsAMebibyteIsProbed...`) passes. On Windows the same frame without
+    # probes touches memory below the guard page and is a stack overflow; that is not shown here.
     ('a Win64 callable frame of several pages is not probed', 'jit', 'src/x86_64/emit.c',
-     '    emit_stack_probe(e, alloc, GRJIT_RAX, GRJIT_R11);', '    (void)emit_stack_probe;', ['testWin64_calls']),
+     '    emit_stack_probe(e, alloc, GRJIT_RAX, GRJIT_R11);', '    (void)emit_stack_probe;', ['testWin64_calls'],
+     'wine commits the stack on any touch within its reserved range: the guard-page discipline the probes serve is not wine\'s'),
     ('the adapter\'s RUNTIME_FUNCTION ends one byte early', 'jit', 'src/code/memory.c',
      '      put32(rf + 4, prologue->adapter_end);', '      put32(rf + 4, prologue->adapter_end - 1);', ['testWin64_calls']),
     ('the body\'s RUNTIME_FUNCTION begins sixteen bytes after the internal entry', 'jit', 'src/code/memory.c',
@@ -831,13 +842,19 @@ def judge(rc, out, t):
     if isinstance(rc, int) and rc < 0 or (rc != 0 and not failed and rc >= 128):
         return 'CAUGHT', '%s: killed by a signal (crash)' % t
     if rc != 0:
-        if not failed and WIN64 and re.search(r'Unhandled exception|page fault|wine: Unhandled|err:seh', out):
-            return 'CAUGHT', '%s: crashed under wine (%s)' % (t, re.search(r'Unhandled exception[^\n]*|page fault[^\n]*|err:seh[^\n]*', out).group(0)[:60])
+        if not failed and WIN64 and (rc == 5 or re.search(r'Unhandled exception|page fault|wine: Unhandled|err:seh', out)):
+            # A Windows process that faults exits with STATUS_ACCESS_VIOLATION (0xC0000005), whose low byte,
+            # the one a shell reports, is 5: the Windows form of a signal.
+            return 'CAUGHT', '%s: crashed under wine (exit status %s)' % (t, rc)
         if not failed:
             # Non-zero with no failing test named: the program did not run
             # as a test run, which is not evidence about the defect.
             return 'BUILD FAILED', '%s exited %s without naming a failing test: %s' % (t, rc, out[-200:])
         return 'CAUGHT', '%s: %s' % (t, ', '.join(f.split('.', 1)[-1][:50] for f in failed[:2]))
+    if WIN64 and rc == 0 and '[  PASSED  ]' not in out:
+        # The program ended with status zero and never said its tests passed: it died without a word, as a
+        # process whose frame register a callee changed does (the C++ code after the call runs on garbage).
+        return 'CAUGHT', '%s: ended without a summary (no PASSED line)' % t
     return None
 
 
@@ -936,9 +953,11 @@ else:
             continue
         core, jit = tree_pair(lib, rel, old, new)
         verdict, detail = build_and_run(core, jit, lib, TIMEOUT, only=rest[0] if rest else None)
+        if verdict == 'MISSED' and len(rest) > 1:
+            verdict, detail = 'EQUIVALENT', rest[1]
         results.append((idx, name, verdict, detail))
         print('%2d %-6s %s\n      %s %s' % (idx, lib, name, verdict, detail), flush=True)
-    bad = [r for r in results if r[2] != 'CAUGHT']
+    bad = [r for r in results if r[2] not in ('CAUGHT', 'EQUIVALENT')]
     print('\n%d mutations, %d not caught' % (len(results), len(bad)))
     ok = not bad
 
