@@ -67,13 +67,13 @@ static void put32(uint8_t * at, uint32_t v) {
  * latest first, and a padding slot if their number is odd. `setfp_end` of zero is
  * a frame with no frame register (the entry adapter's: it sets `rbp` to a marker
  * that a frame-register unwinder would take for a base). */
-static size_t info_build(uint32_t push_end, uint32_t setfp_end, uint32_t alloc_end,
-    uint32_t alloc_bytes, uint8_t * out) {
+static size_t info_build(uint32_t push_end, uint32_t setfp_end, bool frame_register,
+    uint32_t alloc_end, uint32_t alloc_bytes, uint8_t * out) {
   enum { UWOP_PUSH_NONVOL = 0, UWOP_ALLOC_LARGE = 1, UWOP_ALLOC_SMALL = 2,
          UWOP_SET_FPREG = 3, RBP = 5 };
   if (push_end == 0 || alloc_end > 255 || alloc_bytes % 8 != 0 ||
-      (setfp_end != 0 ? (setfp_end <= push_end || alloc_end < setfp_end)
-                      : alloc_end < push_end)) {
+      (frame_register ? (setfp_end <= push_end || alloc_end < setfp_end)
+                      : (setfp_end != 0 || alloc_end < push_end))) {
     return 0;
   }
   uint8_t * codes = out + 4;
@@ -98,7 +98,7 @@ static size_t info_build(uint32_t push_end, uint32_t setfp_end, uint32_t alloc_e
       slots += 3;
     }
   }
-  if (setfp_end != 0) {
+  if (frame_register) {
     codes[2 * slots] = (uint8_t)setfp_end;
     codes[2 * slots + 1] = UWOP_SET_FPREG;
     slots += 1;
@@ -109,7 +109,7 @@ static size_t info_build(uint32_t push_end, uint32_t setfp_end, uint32_t alloc_e
   out[0] = 1;
   out[1] = (uint8_t)alloc_end;
   out[2] = (uint8_t)slots;
-  out[3] = (uint8_t)(setfp_end != 0 ? RBP : 0);
+  out[3] = (uint8_t)(frame_register ? RBP : 0);
   if (slots % 2 != 0) {
     codes[2 * slots] = 0;
     codes[2 * slots + 1] = 0;
@@ -125,8 +125,9 @@ size_t grjit_unwind_info_build(const GRJIT_Prologue * p, uint8_t * out) {
   if (p->push_end < b || p->setfp_end < b || p->alloc_end < b) {
     return 0;
   }
-  return info_build(p->push_end - b, p->setfp_end == 0 ? 0 : p->setfp_end - b,
-      p->alloc_end - b, p->alloc_bytes, out);
+  /* A body, plain or callable, has a frame register: a prologue with no `mov rbp, rsp` is refused, and the
+   * form with none is the adapter's builder's alone. */
+  return info_build(p->push_end - b, p->setfp_end - b, true, p->alloc_end - b, p->alloc_bytes, out);
 }
 
 size_t grjit_unwind_info_build_adapter(const GRJIT_Prologue * p, uint8_t * out) {
@@ -134,10 +135,10 @@ size_t grjit_unwind_info_build_adapter(const GRJIT_Prologue * p, uint8_t * out) 
   /* Planted defect 33 (tests only): the adapter's unwind information names rbp as a frame
    * register, which the adapter has set to the chain-end marker: an unwinder takes the
    * marker for the base of the frame and finds its caller in garbage. */
-  return info_build(p->adapter_push_end, p->adapter_alloc_end, p->adapter_alloc_end,
+  return info_build(p->adapter_push_end, p->adapter_alloc_end, true, p->adapter_alloc_end,
       p->adapter_alloc_bytes, out);
 #else
-  return info_build(p->adapter_push_end, 0, p->adapter_alloc_end, p->adapter_alloc_bytes, out);
+  return info_build(p->adapter_push_end, 0, false, p->adapter_alloc_end, p->adapter_alloc_bytes, out);
 #endif
 }
 

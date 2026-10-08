@@ -663,6 +663,9 @@ TEST(Win64Unwind, APrologueThatCannotBeDescribedIsRefused) {
   EXPECT_EQ(grjit_unwind_info_build(&distant, out), 0u) << "SizeOfProlog is a byte";
   GRJIT_Prologue backwards{4, 1, 11, 80, 0, 0, 0, 0, 0};
   EXPECT_EQ(grjit_unwind_info_build(&backwards, out), 0u);
+  GRJIT_Prologue no_frame_register{1, 0, 11, 80, 0, 0, 0, 0, 0};
+  EXPECT_EQ(grjit_unwind_info_build(&no_frame_register, out), 0u)
+      << "a plain function's prologue with no `mov rbp, rsp` is refused: the form with no frame register is the adapter's";
   GRJIT_Prologue none{0, 0, 0, 0, 0, 0, 0, 0, 0};
   EXPECT_EQ(grjit_unwind_info_build(&none, out), 0u);
 }
