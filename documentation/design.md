@@ -1448,6 +1448,17 @@ works there has not been shown to work under a real Windows kernel's exception d
 wine's implementation, the guard-page growth the probes exist for is wine's, and no real Windows machine was used.
 No timing is taken under wine (the benchmark runs `--smoke`).
 
+`tools/check-planted-calls.py --target=win64` runs inside the container and plants 17 edits in the Windows paths
+of `src/x86_64/*.c`, `src/code/memory.c` and the register-argument count (6, 3 and 8, the carried edit), builds each
+with mingw and runs the named tests under wine: 16 are CAUGHT, 9 of them by an assertion naming what it saw and the
+rest by a crash that wine reports (a callee that popped the wrong amount, or changed the adapter's `rbp`, ends the
+process of the test with status 5 or without a summary, which the harness reads as a catch the way it reads a signal),
+and one is documented as equivalent under wine: **a callable frame of a mebibyte entered without its page probes
+runs**, because wine commits a stack on any touch in its reserved range. The probes serve the guard-page discipline of
+Windows, which this run does not have, and the probe is therefore run and not shown to be needed. (The pin tests
+that hash the code of a call through a pointer mask the address of `grjit_call_target_ok`, which is 8 bytes only
+where the process puts the library above 4 GiB; they were measured, as the earlier ones, in a position-independent
+build.)
 ## Gates
 
 `make check-labels` requires every header to carry exactly one `@stability free`
