@@ -33,7 +33,7 @@ encodings and hazards are tested on every host (the assembler is plain C that
 emits bytes, and a small simulator in the tests executes what it emits); running
 its code for real is `suite/tools/xarch/jit-arm64.sh` in the workspace, under
 `qemu-aarch64` (a regression in the arm64 branch of `grjit_compile` passes
-`make test` and fails only that script, so `tools/m1-prerelease.sh` runs it,
+`make test` and fails only that script, so `suite/tools/m1-prerelease.sh` runs it,
 and the Windows run, as the step before a release). Calls between compiled
 functions (a callable function, `CALL_SLOT` and `CALL_PTR`, AD-28), tail calls and calls to
 natives are emitted for Linux x86-64 SysV and Linux arm64: `grjit_backend_calls_available()`

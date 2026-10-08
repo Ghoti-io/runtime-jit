@@ -202,7 +202,7 @@ jobs:
   #
   # The arm64 backend and the Windows backend's run under wine are not here:
   # they need qemu and wine, which a library may not reach for. They are run
-  # by tools/m1-prerelease.sh in the workspace.
+  # by suite/tools/m1-prerelease.sh in the workspace.
   # ---------------------------------------------------------------------------
   gates:
     name: Gates seen to fail
