@@ -32,7 +32,7 @@ Usage: check-planted-calls.py [--prefix=DIR] [--core=DIR] [--timeout=SECONDS]
             it is COPIED, so nothing in it is touched
   --core    runtime-core's checkout (default ../runtime-core beside this one)
   --target  `arm64`: the mutations of src/arm64/*.c, each built for AArch64 with the cross
-            compiler and run under qemu-user (in the container tools/xarch/jit-arm64.sh uses,
+            compiler and run under qemu-user (in the container suite/tools/xarch/jit-arm64.sh uses,
             which has them; the prefix is its AArch64 one, with runtime-core already built
             for it, so no core mutation is made). A mutation caught only by the pin test
             (`testPin`) is PIN-ONLY, which is not a catch: the new tests must see it

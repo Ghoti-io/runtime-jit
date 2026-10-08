@@ -285,14 +285,14 @@ there and not here.
 emits bytes, and it is compiled and tested on every host: each instruction is
 compared with the bytes `aarch64-linux-gnu-as` produces for the same text
 (recorded, with the disassembly `aarch64-linux-gnu-objdump` gives back, which
-`tools/xarch/jit-arm64.sh` re-checks). `tests/a64_sim.h` is a small simulator of
+`suite/tools/xarch/jit-arm64.sh` re-checks). `tests/a64_sim.h` is a small simulator of
 exactly the subset the assembler emits: it decodes only those encodings (any
 other word stops it), executes them against real memory, and checks what AAPCS64
 asks of compiled code: the callee-saved registers, `x29`, `x30` and `sp` are what
 they were on return, `x18` is never touched, `sp` is aligned at every call, and
 after a call the caller-saved registers are noise. The differential runs the
 arm64 emitter's output in it against the evaluator on the same 2000 functions as
-the native one. And `tools/xarch/jit-arm64.sh` runs the real thing: it builds the
+the native one. And `suite/tools/xarch/jit-arm64.sh` runs the real thing: it builds the
 stack for aarch64 and runs every test of this library, and `lang-tang`'s JIT arm,
 under `qemu-aarch64`, with the arm64 planted defect (`SHR` and `SAR` swapped in
 the arm64 emitter) caught by the native differential there.
@@ -335,7 +335,7 @@ own, `GRJIT_ARCH_X86_64_WIN64`, which `grjit_emit_for` can emit on any host. So
 what it emits, the unwind bytes and where they live are tested on Linux, with the
 bytes of a function pinned (`tests/unit/test_win64.cpp`, `test_pin.cpp`), and
 only *running* it needs Windows, which here means wine
-(`tools/xwin/m1-run.sh` in the workspace). Nothing below has run on a Windows
+(`suite/tools/xwin/m1-run.sh` in the workspace). Nothing below has run on a Windows
 machine.
 
 **Calling convention.** Entry is `uint32_t (void * context, const uint64_t * args,
@@ -1262,7 +1262,7 @@ generates, and the executing tests (`testCalls`, `testTail`, `testNatives`) run 
 because a decoder written by the emitter's author agreeing with it is not an execution, and an execution
 that passes does not say which claim it leaned on. The planted defects 20 to 29 and the mutations of
 `src/arm64/` (`tools/arm64-plants.txt`, `check-planted-calls.py --target=arm64`) each run under qemu in
-the container of `tools/xarch/jit-arm64.sh`, with their controls; `check-planted.sh` names them and does
+the container of `suite/tools/xarch/jit-arm64.sh`, with their controls; `check-planted.sh` names them and does
 not count them. The harness accepts a signal as a catch (code freed under a frame faults the process, and a
 hang is the tests' watchdog's signal), which says a defect was reached and not which: seven of the arm64
 mutations that only a crash caught are now also caught by the words of the code (`testArm64_calls` reads the
@@ -1278,7 +1278,7 @@ The "pause resumed on another thread" test runs under qemu without a sanitizer; 
 is TSan's, on x86-64. No timing is taken under qemu: the benchmark runs `--smoke` there, every case once,
 each loop case checking its own sum inside the program and `jit-arm64.sh` reading the check word each prints
 against the one its iteration count must give. Each test binary is bounded in time there (`timeout`, 30 minutes
-by default), and the gates of the script are tried on a pass and a planted failure by `tools/xarch/jit-arm64-selftest.sh`.
+by default), and the gates of the script are tried on a pass and a planted failure by `suite/tools/xarch/jit-arm64-selftest.sh`.
 
 ## Gates
 
@@ -1343,7 +1343,7 @@ numbers; the calibration row is what to read them against.
 - **A real Windows machine.** Everything about the Windows backend has run under
   wine and in the structural tests, and nowhere else: the stack walk, the
   registration, the probes, and `check-planted` (which is a Linux target; the
-  workspace's `tools/xwin/m1-controls.sh` runs the Win64 planted defects against
+  workspace's `suite/tools/xwin/m1-controls.sh` runs the Win64 planted defects against
   the built executables instead).
 - **Pointer authentication and BTI** (above): unsupported and untested.
 - **Real arm64 hardware.** The arm64 backend's code runs under `qemu-aarch64`

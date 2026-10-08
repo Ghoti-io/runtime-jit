@@ -6,7 +6,7 @@
  * what registers it names, what moves the stack pointer, where its tag and internal entry are,
  * what an `adr` points at and what the metadata's sites are. Nothing here runs arm64 code, so it
  * runs on every host; the executing counterpart is `testCalls`, `testTail` and `testNatives` under
- * qemu-aarch64 (tools/xarch/jit-arm64.sh), and each is kept because a decoder written by the
+ * qemu-aarch64 (suite/tools/xarch/jit-arm64.sh), and each is kept because a decoder written by the
  * emitter's own author agreeing with it is not an execution, and an execution that passes does not
  * say which claim of the convention it leaned on.
  *

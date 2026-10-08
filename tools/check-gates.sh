@@ -115,7 +115,7 @@ expect_fail 'edges/planted-example' 'runtime-jit -> runtime-heap' \
 
 printf 'check-edges --links\n'
 # The .dll arm (objdump -p is the reader there) has run under wine, cross-built
-# (tools/xwin in the workspace); it has not run on a Windows machine.
+# (suite/tools/xwin in the workspace); it has not run on a Windows machine.
 case "$(uname -s)" in
   MINGW* | MSYS*) SHEXT=dll; SHFLAGS="-shared" ;;
   Darwin) SHEXT=dylib; SHFLAGS="-dynamiclib" ;;

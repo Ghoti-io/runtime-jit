@@ -6,7 +6,7 @@
  * do not reach, the byte cap, the instruction-cache call and the availability
  * of the backend. The code is *emitted* by `grjit_emit_for` and, where a result
  * is wanted, *executed* by the simulator in tests/a64_sim.h; the same hazards
- * run on real arm64 code under qemu-aarch64 by `tools/xarch/jit-arm64.sh`.
+ * run on real arm64 code under qemu-aarch64 by `suite/tools/xarch/jit-arm64.sh`.
  *
  * Copyright 2026 by Corey Pennycuff
  */

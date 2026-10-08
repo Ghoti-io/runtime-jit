@@ -1,5 +1,5 @@
 # The defects planted in the arm64 emitter, each caught by one test run alone under qemu-aarch64
-# (tools/xarch/jit-arm64.sh in the workspace), in a tree of its own, with its control passing first.
+# (suite/tools/xarch/jit-arm64.sh in the workspace), in a tree of its own, with its control passing first.
 # check-planted.sh lists them by name and does not count them (nothing here can run arm64 code).
 #
 #   id | GRJIT_TEST_PLANT_BUG | test program | gtest filter (the test that catches it) | extra defines | what is planted

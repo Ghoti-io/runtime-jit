@@ -255,7 +255,7 @@ jobs:
   # commit from breaking the port silently. The Windows x86-64 backend is the
   # Microsoft calling convention with an outgoing area, unwind information
   # registered with RtlAddFunctionTable, stack probes and VirtualAlloc-backed
-  # code memory; it has run under wine (tools/xwin/m1-run.sh in the workspace)
+  # code memory; it has run under wine (suite/tools/xwin/m1-run.sh in the workspace)
   # and never on a Windows machine, so this job's first run is the first time
   # it is built and run natively. If the Win64 disassembly tests need an
   # objdump that reads x86-64, the MINGW64 binutils is one.

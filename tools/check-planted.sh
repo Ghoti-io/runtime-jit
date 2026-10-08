@@ -51,7 +51,7 @@
 #
 # Defects 20 to 29 are in the arm64 emitter's calls, tail calls and natives and only arm64 code run
 # under qemu-aarch64 can show them; tools/arm64-plants.txt lists them (and 4 again) with the test that
-# catches each, tools/xarch/jit-arm64.sh runs them, and this script names them at its end without
+# catches each, suite/tools/xarch/jit-arm64.sh runs them, and this script names them at its end without
 # counting them.
 #
 # An entry is `n:test` or `n:test:filter`. With a filter the test binary runs
@@ -59,7 +59,7 @@
 # on every host: by the differential that executes the arm64 emitter's output
 # in the simulator (tests/a64_sim.h), while the same defect in the x86-64
 # emitter's twin has no effect there. The catch by real arm64 code, under
-# qemu-aarch64, is `tools/xarch/jit-arm64.sh`'s; a host without it says so
+# qemu-aarch64, is `suite/tools/xarch/jit-arm64.sh`'s; a host without it says so
 # below, by name, and does not count it.
 #
 # For each one, three things must hold, in this order:
@@ -140,12 +140,12 @@ fi
 printf 'check-planted: all %d planted defects were caught, and each control passes\n' "$count"
 if [ "$(uname -m)" != "aarch64" ]; then
   # What only arm64 code run under qemu-aarch64 can show, by name and not counted: tools/arm64-plants.txt
-  # lists each (the defect, the test that catches it) and tools/xarch/jit-arm64.sh runs them.
+  # lists each (the defect, the test that catches it) and suite/tools/xarch/jit-arm64.sh runs them.
   list="$(dirname "$0")/arm64-plants.txt"
   if [ -f "$list" ]; then
     names="$(grep -v '^#' "$list" | grep -v '^$' | awk -F'|' '{printf "%s%s", sep, $1; sep=", "}')"
-    printf 'check-planted: SKIPPED on this host, by name: defects %s, each caught by arm64 code run under qemu-aarch64 (needs a cross build; run by tools/xarch/jit-arm64.sh, and not counted here). The simulated catch of 4 above is not that.\n' "$names"
+    printf 'check-planted: SKIPPED on this host, by name: defects %s, each caught by arm64 code run under qemu-aarch64 (needs a cross build; run by suite/tools/xarch/jit-arm64.sh, and not counted here). The simulated catch of 4 above is not that.\n' "$names"
   else
-    printf 'check-planted: SKIPPED on this host: tools/arm64-plants.txt is missing, so the arm64 catches (run by tools/xarch/jit-arm64.sh) are not listed\n'
+    printf 'check-planted: SKIPPED on this host: tools/arm64-plants.txt is missing, so the arm64 catches (run by suite/tools/xarch/jit-arm64.sh) are not listed\n'
   fi
 fi

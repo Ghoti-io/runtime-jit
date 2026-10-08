@@ -8,7 +8,7 @@
  * ranges, and the failure behaviour.
  *
  * Nothing here executes AArch64 code, so it runs on every host. The recorded
- * bytes are re-checked against the real disassembler by `tools/xarch/jit-arm64.sh`
+ * bytes are re-checked against the real disassembler by `suite/tools/xarch/jit-arm64.sh`
  * (which sets GRJIT_AARCH64_OBJDUMP to the cross `objdump`); without that
  * variable the disassembly test says so and does nothing, which is the one
  * place this file depends on a tool this machine does not have.
@@ -520,7 +520,7 @@ TEST(AsmArm64, TheRecordedDisassemblyAgreesWithObjdumpWhenTheToolIsPresent) {
   if (tool == nullptr || *tool == 0) {
     GTEST_SKIP() << "GRJIT_AARCH64_OBJDUMP is not set: the bytes are checked "
                     "against the recorded reference, the disassembly only "
-                    "where tools/xarch/jit-arm64.sh sets it";
+                    "where suite/tools/xarch/jit-arm64.sh sets it";
   }
   size_t checked = 0;
   for (const Case & c : cases()) {
