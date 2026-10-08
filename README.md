@@ -36,9 +36,10 @@ its code for real is `suite/tools/xarch/jit-arm64.sh` in the workspace, under
 `make test` and fails only that script, so `suite/tools/m1-prerelease.sh` runs it,
 and the Windows run, as the step before a release). Calls between compiled
 functions (a callable function, `CALL_SLOT` and `CALL_PTR`, AD-28), tail calls and calls to
-natives are emitted for Linux x86-64 SysV and Linux arm64: `grjit_backend_calls_available()`
-says so, and Windows x86-64 refuses them with `GRJIT_ERR_UNSUPPORTED` before emitting a byte
-(story 7b of the calls spec). Every header is labelled `free`: a consumer requires
+natives are emitted for Linux x86-64 SysV, Linux arm64 and Windows x86-64, each with its own
+internal convention: `grjit_backend_calls_available()` is true wherever a backend exists, and only a
+build with none refuses them with `GRJIT_ERR_UNSUPPORTED`. The Windows convention has run under wine
+and not on a Windows machine. Every header is labelled `free`: a consumer requires
 the exact version it was built against.
 
 ## Example

@@ -99,10 +99,11 @@ GRJIT_API bool grjit_backend_available(void);
 
 /**
  * @brief Whether this build can compile calls between compiled functions, tail
- *   calls and calls to natives (AD-28): true on Linux x86-64 SysV and Linux arm64,
- *   false on every other target (Windows x86-64 has them in a later story).
+ *   calls and calls to natives (AD-28): true wherever a backend exists (Linux
+ *   x86-64 SysV, Linux arm64 and Windows x86-64, each with its own internal
+ *   convention), false on every other target.
  *
- * Elsewhere ::grjit_compile refuses a callable function, and a function with
+ * Where there is no backend ::grjit_compile refuses a callable function, and a function with
  * ::GRJIT_OP_CALL_SLOT, ::GRJIT_OP_CALL_PTR, ::GRJIT_OP_TAIL_CALL_SLOT,
  * ::GRJIT_OP_TAIL_CALL_PTR or ::GRJIT_OP_CALL_NATIVE, with
  * ::GRJIT_ERR_UNSUPPORTED before emitting a byte, so an engine asks this once and

@@ -35,11 +35,16 @@
  * with and is the **implicit first argument**: natives allocate, poll and
  * re-enter through it, so it is not an operand of the IR. On x86-64 SysV the
  * pair comes back in `rax:rdx` with no hidden pointer, and on arm64 (AAPCS64) in
- * `x0:x1`. (Win64 returns a 16-byte struct through a hidden pointer; its emission,
- * which story 7b of the calls spec adds, adapts to that and the descriptor does not
- * change.) The context and the first words travel in registers, six on x86-64 and
- * eight on arm64, and the rest on the stack, in an area made by the call and popped
- * by the caller, so the stack pointer is 16-aligned at the call. A native with a
+ * `x0:x1`. On Win64 a 16-byte struct is never returned in registers: the caller
+ * passes a pointer to a buffer in `rcx` (the context moves to `rdx`) and reads the
+ * value and the 32-bit status from it; `reserved`, `rax` and `rdx` are the native's
+ * to leave as it likes. The emission adapts to that and the descriptor does not
+ * change: a native is written once for every target. The context and the first words
+ * travel in registers, six on x86-64 SysV, eight on arm64 and four on Win64, and the
+ * rest on the stack, in an area made by the call and popped by the caller, so the
+ * stack pointer is 16-aligned at the call; on Win64 that area begins with the 32
+ * bytes of shadow space every Win64 callee may use as the home of its register
+ * arguments, and the stack words are above them. A native with a
  * floating-point or variadic signature cannot be described, because the types a
  * descriptor can name are the three words.
  *

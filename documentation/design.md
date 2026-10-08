@@ -527,11 +527,11 @@ caller into the interpreter, and re-entered the callee's compiled code from the
 top. The restriction was story 15's own rule ("no JIT frame calls a JIT frame"),
 not the spine's. This section is the protocol that removes it, as built and
 described for x86-64 SysV; arm64 has its own convention of the same shape (the
-section "The arm64 convention for calls, tail calls and natives", below). Win64
-refuses the new operations with `GRJIT_ERR_UNSUPPORTED` until it has them (story
-7b of the calls spec), before emitting a byte (its emitted bytes, and the pin, are
-unchanged), and `grjit_backend_calls_available()`, true on Linux x86-64 and Linux
-arm64, lets an engine ask once instead of finding out at its first compile.
+section "The arm64 convention for calls, tail calls and natives", below). Win64 has
+its own (the section "The Win64 convention for calls, tail calls and natives", below), and
+`grjit_backend_calls_available()`, true wherever a backend exists (Linux x86-64, Linux arm64,
+Windows x86-64), lets an engine ask once instead of finding out at its first compile; only a
+build with no backend refuses the new operations, with `GRJIT_ERR_UNSUPPORTED`.
 `runtime-core`'s `design.md` ("A, part 5") holds the other half: the walk, the
 rebuild, the native-stack limit and the entry slot.
 
@@ -704,11 +704,9 @@ A compiled function can call another (above); this is the call that replaces the
 caller. Wasm 3.0's `return_call`, `return_call_indirect` and `return_call_ref`
 need it, and so does any tail-recursive guest program: without it a loop written
 as a tail call grows the native stack and the guest stack at every iteration. It
-is described here for x86-64 SysV and exists on arm64 too (the arm64 section,
-below): Win64 refuses a function that has one with `GRJIT_ERR_UNSUPPORTED` before
-a byte is emitted (story 7b), and nothing about a function without one changes
-(the three pins, and a fourth, over callable functions with calls and no tail
-call, were recorded at the commit before and hold).
+is described here for x86-64 SysV and exists on arm64 and Win64 too (the sections below);
+nothing about a function without one changes (the three pins, and a fourth, over callable
+functions with calls and no tail call, were recorded at the commit before and hold).
 
 **The IR.** `TAIL_CALL_SLOT` and `TAIL_CALL_PTR`: terminators with no result and
 *one* frame state, up to sixteen arguments (registers or immediates), the
@@ -896,10 +894,9 @@ most six integer arguments, no result status, no signature, no native-stack
 accounting, and no way to say "this one may allocate, pause, fail or re-enter guest
 code". lang-tang's library calls therefore still left compiled code. This is the call
 that does not. It is described here for x86-64 SysV and exists on arm64 too (the arm64
-section, below, with AAPCS64's eight register words and the pair back in `x0:x1`): Win64
-refuses a function with one (`GRJIT_ERR_UNSUPPORTED`, before a byte), and the pins and the
-callable pin do not move (story 7b gives Win64 the call; it returns a 16-byte struct
-through a hidden pointer, so the *emission* adapts there and the descriptor does not).
+section, below, with AAPCS64's eight register words and the pair back in `x0:x1`) and on Win64
+(four register words, 32 bytes of shadow space, and the pair through a hidden pointer, so the
+*emission* adapts there and the descriptor does not); the pins do not move.
 
 **`CALL` and `CALL_NATIVE` are two operations, decided.** `CALL` stays the *trusted
 helper*: the engine's `gc_store`, a barrier, the poll's slow path. It is a leaf or a
@@ -1279,6 +1276,177 @@ is TSan's, on x86-64. No timing is taken under qemu: the benchmark runs `--smoke
 each loop case checking its own sum inside the program and `jit-arm64.sh` reading the check word each prints
 against the one its iteration count must give. Each test binary is bounded in time there (`timeout`, 30 minutes
 by default), and the gates of the script are tried on a pass and a planted failure by `suite/tools/xarch/jit-arm64-selftest.sh`.
+
+## The Win64 convention for calls, tail calls and natives (AD-28, story 7b of the calls spec)
+
+Win64 refused a callable function and each of the five operations until story 7b, so CAP-1, CAP-7
+and CAP-8 ("on all three backends") held on two of them. It now has its own internal convention in
+the x86-64 emitter, by the same ABI table that story 7 made for SysV: the Win64 column of
+`GRJIT_X86Abi` (`src/x86_64/emit.c`) says which registers carry what, and the callable, dispatch,
+call, tail-call and stub code read it. **Every earlier pin is unchanged** (x86-64, arm64, Win64
+without the new operations, callable, native-call): SysV and Win64 share `emit.c`, so the commits
+that touched it are the ones that could have moved a SysV byte, and none did.
+
+| | x86-64 SysV | arm64 | Win64 |
+|---|---|---|---|
+| Register arguments (internal) | `rdi rsi rdx rcx r8 r9` | `x0`-`x7` | `rcx rdx r8 r9` |
+| Context; result, status | `r10`; `rax`, `rdx` | `x9`; `x0`, `x1` | `r10`; `rax`, `rdx` |
+| Stack arguments, who pops | above the return address, callee (`ret imm16`) | at `[sp]` at the call, callee (`add sp`) | above the return address, **no shadow space**, callee (`ret imm16`) |
+| Native arguments (C ABI) | `rdi rsi rdx rcx r8 r9`, then `[rsp + 8 i]` | `x0`-`x7`, then `[sp + 8 i]` | `rcx rdx r8 r9`, then `[rsp + 32 + 8 i]` above 32 bytes of shadow space the caller reserves |
+| Native pair `{value, status}` | `rax:rdx` | `x0:x1` | **hidden pointer in `rcx`**, the context in `rdx`; a 16-byte struct is never returned in registers here |
+| Tail scratch | `r10 r11 rax rdi` | `x9 x10 x15 x16 x30` | `r10 r11 rax rcx` |
+| Cause in an exit stub | `rsi` | `x1` | `rdx` |
+
+**Registers.** `rbx`, `rbp` (as a register), `rdi`, `rsi`, `r12`-`r15` and `xmm6`-`xmm15` are
+callee-saved on Win64 and are never encoded by compiled code, the adapter included: the tail call's
+copy of a stack argument goes through `rcx` (the SysV sequence uses `rdi`) and is done before the
+register arguments are loaded, and the exit stubs pass the cause in `rdx` (SysV uses `rsi`). Calls
+to the engine's hooks, to `grjit_call_target_ok` and to helpers use `rcx`, `rdx`, `r8`, `r9`. A
+test reads the registers named by the code of all 1,016 generated callable functions (the assembler's
+`regs_used`, and objdump on the host), and the sentinel tests of every call, tail and native test run
+with values in `rbx`, `rbp`, `rdi`, `rsi`, `r12`-`r15` and `xmm6`-`xmm15`.
+
+**No shadow space between compiled functions.** Nothing in the internal convention spills there, so
+reserving it would cost 32 bytes a frame, and it would not make `ret imm16` an epilogue the unwinder
+knows. The C-ABI calls (hooks, helpers, natives) have it: the frame has the 48-byte outgoing area at
+its bottom, outside the metadata's frame size as in a plain function (32 bytes of shadow and two
+words for a helper's fifth and sixth arguments), so `rsp` is 16-aligned at every call and no slot
+overlaps a callee's shadow space. The native-stack check in the prologue counts it.
+
+**Four register arguments, the rest popped by the callee.** An argument past the fourth is above the
+return address in whole 16-byte units that the *callee* pops with `ret imm16` (a plain `ret` for none),
+so a tail call to a callee with more stack arguments than its caller can move the return address, as on
+the other targets. `GRJIT_WIN64_INTERNAL_REG_ARGS` (4) is what `grjit_callable_shape` and
+`grjit_stack_arg_bytes` take for Win64; nothing read it for an emitted function until this story, so a
+copy of SysV's six survived every gate (story 7's review ran that mutation and it was missed). It is
+asserted now from the code: `Win64Calls` tests emit functions of 0 to 16 parameters, calls and tail calls
+of 0 to 16 arguments (every pair, for tail calls) and natives of every arity, and read the `ret imm16` of
+the epilogue, the `sub rsp` of the argument area, the displacement of the tail call's `lea rsp, [rbp + ra']`
+and the stores of the four register parameters, against numbers worked from the convention and not from the
+library's constants. `tools/check-planted-calls.py` carries the edit (6, 3 and 8) as three mutations, on the
+host and under wine, and each is CAUGHT.
+
+**Natives.** Four C words in `rcx`, `rdx`, `r8`, `r9`, the rest at `[rsp + 32 + 8 i]`. A native with
+`GRJIT_NATIVE_STATUS` returns its 16-byte pair `{value, status, reserved}` **through a hidden pointer
+in `rcx`**, the context moving to `rdx`, so the area is `round_up_16(32 + 8 k + 16)` with the buffer
+after the `k` stack words. The call reads the value and the 32-bit status from the buffer **before
+`rsp` is restored**, stores the result, and only then looks at the status; `reserved` is never read, and
+the native may leave it, and `rax` and `rdx`, as it likes (tests plant garbage in all three). Story 6's
+rules hold unchanged: the native-stack check first (`sp_before_call - S - stack_bytes`, `S` including the
+shadow and the buffer, the one formula on every target), the walk start before anything moves, nothing
+assumed preserved. Natives are written once for every target; the tests call real C functions of the exact
+signature, which is what proves the ABI under a Windows compiler, and two assembly natives: one that spills
+its four register arguments to its home space and adds three stack words (which a missing shadow area
+overwrites) and one that writes garbage to the buffer's reserved half, `rax` and `rdx`.
+
+**The entry adapter has a static frame.** Its job is to put `GRCORE_COMPILED_CHAIN_END` in `rbp`, so
+that the first compiled function's saved caller base is the marker, which ends a walk. An unwinder that
+read `UWOP_SET_FPREG` for the adapter would take that marker for a base and compute the frame's `rsp` from
+it. So the adapter is `push rbp; sub rsp, N'` with everything addressed by `rsp`, and **its unwind
+information has no frame register**. `N' = max(32, in_A) + 32`, rounded to 16: the lowest `max(32, in_A)`
+bytes are the 32-byte shadow space of the entry hook and the stack-argument area of the internal call at once
+(so one allocation is right at both), and above them are `args`, the context and `out`. The callee's `ret
+imm16` returns `rsp` above the area, so the adapter reloads from `rsp`-relative slots and frees `N' - in_A`.
+A body frame is correct for the unwinder whatever the callee pops, because it recomputes `rsp` from its own
+`rbp`; the adapter cannot, which is why it is static. Walking up from the first compiled frame the
+unwinder's `rsp` is `rbp + 16`, the address of the stack arguments, which is exactly the bottom of the
+adapter's frame.
+
+**Unwind information.** A callable code has two `RUNTIME_FUNCTION`s, the adapter's `[0, adapter_end)` and
+the body's `[internal entry, end)` (the 16-byte tag and its padding before the entry are in neither), with
+two `UNWIND_INFO`s in the mapping after the code, sorted by begin address and registered together by one
+`RtlAddFunctionTable` of a count of two; destroy removes the table, both entries. The body's is the plain
+function's (push `rbp`, set frame register `rbp`, allocate `N`); a function with no calls and not callable
+still has the one entry for all its code. The prologue of a body, as of a plain function, has the byte check
+(`lea rax, [rsp - N]; cmp rax, [r10 + limit]; jb overflow`), then the page probe for a frame of a page or more
+(through `rax` and `r11`, since `r10` is the context and the four argument registers are live), then the
+allocation. The overflow stub makes 32 bytes of room for the hook's shadow space below `rsp` (the frame
+register keeps the frame right for an unwinder wherever `rsp` is).
+
+**The `ret imm16` probe.** Before the callable emitter was built, a throwaway program (not committed) asked
+the unwinder under wine to unwind from every instruction of `lea rsp, [rbp]; pop rbp; ret 16`. Wine's
+`ntdll` reads `ret imm16` as an epilogue end, and, having emulated the epilogue, **applies the immediate**:
+from `lea`, `pop` and `ret 16` it reports `rsp` as the address of the stack arguments *plus* their size,
+sixteen bytes more than the unwind codes give from any other instruction. The two agree when a function has no
+stack arguments (which is why Win64 ends such a function with a plain `ret`, the one form every unwinder knows)
+and differ by `in_A` otherwise. For a caller with a frame register the difference does not matter (it
+recomputes `rsp` from `rbp`); for the adapter, the only caller without one, an *asynchronous* unwind that
+starts at one of the callee's last three instructions, and at the instructions between a callee's return and
+the adapter's `add rsp`, recovers the adapter's frame `in_A` bytes off. No exception crosses a compiled frame
+(AD-28) and nothing unwinds natively through one except a debugger or a profiler, so this is recorded as the
+one place where an asynchronous unwind is not supported, and every other instruction of both prologues and
+epilogues is tested (`Win64CallsUnwind`, with the answer at those three instructions asserted as wine's, in
+the test's own words). The answer is wine's and says nothing about a real Windows kernel.
+
+**One emitted function, read.** A callable function of six parameters whose only operation is a tail call, through a slot,
+to a callee of seven arguments (`grjit_emit_for` for `GRJIT_ARCH_X86_64_WIN64`, bytes through the host's `objdump -D -b
+binary -mi386:x86-64 -M intel`; 758 bytes, the internal entry at 208, the adapter `[0, 178)`). So `in_A` is 16 (the fifth and
+sixth parameters), `in_T` is 32 (three stack arguments, rounded) and the return address moves to `ra' = 8 + 16 - 32 = -8`:
+
+```
+adapter  0:   push rbp ; sub rsp,0x40                  ; N' = max(32, 16) + 32, rounded: 0x40, one allocation
+         14:  mov r11,[rsp+0x28]                       ; args
+              mov rax,[r11+0x20] ; mov [rsp],rax       ; the fifth parameter, to [rsp]  (above the callee's return address)
+              mov rax,[r11+0x28] ; mov [rsp+8],rax     ; the sixth
+              mov rcx,[r11] ; mov rdx,[r11+8] ; mov r8,[r11+0x10] ; mov r9,[r11+0x18]
+              mov r10,[rsp+0x30]                       ; the context
+         3e:  mov rbp,0x47524a4954454e01 ; lea rax,[rip+0x81] ; call rax        ; the marker, and the internal entry
+         51:  mov rcx,[rsp+0x28]  ; mov r8,[rsp+0x20]  ; ...                    ; reloaded 16 lower: the callee popped them
+         99:  add rsp,0x30 ; pop rbp ; ret                                      ; N' - in_A
+body     d0:  push rbp ; mov rbp,rsp ; lea rax,[rsp-0xc0] ; cmp rax,[r10+0x100] ; jb overflow ; sub rsp,0xc0
+         f0:  mov [rbp-8],r10 ; mov [rbp-0x20],rcx ; ... r9 ; mov rax,[rbp+0x10] -> slot ; mov rax,[rbp+0x18] -> slot
+tail     1a8: mov r10,[rbp-8] ; mov r11,[rbp+8] ; mov rax,[rbp]            ; context, return address, caller's base
+         1b4: mov rcx,[rbp-0x60] ; mov [rbp],rcx                          ; stack argument 4 -> where the callee finds it: ra' + 8
+              mov rcx,[rbp-0x58] ; mov [rbp+8],rcx ; mov rcx,[rbp-0x50] ; mov [rbp+0x10],rcx
+         1cc: mov [rbp-8],r11                                              ; the return address at ra'
+              mov rcx,[rbp-0x80] ; mov rdx,[rbp-0x78] ; mov r8,[rbp-0x70] ; mov r9,[rbp-0x68]
+         1e0: mov r11,[rbp-0x88] ; lea rsp,[rbp-8] ; mov rbp,rax ; jmp r11
+ret      274: lea rsp,[rbp] ; pop rbp ; ret 0x10                           ; the form the unwinder knows as an epilogue
+```
+
+The copy goes through `rcx` and is done before `rcx` is loaded as the first argument; nothing reads `rdi`, `rsi` or
+`rbx`; `rsp` moves last and nothing below it is read after.
+
+**Rejected.** *The SysV registers on Win64* (six arguments would take `rsi` and `rdi`, callee-saved here;
+planted defect 5 is why they are forbidden). *A shadow area between compiled functions* (nothing spills there;
+32 bytes a frame, and it would not make `ret imm16` an epilogue the unwinder knows). *Caller pops* (a tail call
+to a callee with more stack arguments could not move the return address without telling the original caller;
+story 5's reason). *One `GRJIT_NativeResult` layout per target* (every native written three times). *The pair
+in `rax` with the status in a second location* (a second location every native must write and the call must
+read; a stale value is a silent miss, story 6's reason against a status in the context). *`SET_FPREG` on the
+adapter* (above; planted defect 33). *A thunk adapting natives* (a second frame between every compiled function
+and every native). *`ms_abi` natives on Linux in place of wine* (it hides a mismatch with a Windows compiler's
+code, as the flavour section says).
+
+**Planted defects 30 to 37** (`tools/win64-plants.txt`, run by `suite/tools/xwin/m1-controls.sh`, which builds
+each into a scratch copy of the cross-built tree and requires the named test to fail by an assertion, with its
+control passing on the real executable first; `check-planted.sh` lists them by name and does not count them):
+**30** the pair read from `rax:rdx`, not the hidden buffer; **31** a native's area without its 32 bytes of shadow
+space; **32** the tail copy through `rdi`; **33** the adapter's unwind information with `rbp` as its frame
+register (the structural test fails by an assertion; the executing unwind test also dies, wine's unwinder reading
+the marker as a base and faulting, which is seen and not counted as the catch); **34** the callee returning with
+`ret` and not `ret imm16`; **35** only the adapter's `RUNTIME_FUNCTION` registered; **36** the walk start stored
+after the call; **37** the callable frame without its outgoing area (a hook that scribbles on its shadow space
+finds live slots). `check-planted-calls.py --target=win64` carries mutations of the Windows paths of
+`src/x86_64/*.c` and `src/code/memory.c`; each is CAUGHT by a named test or documented below.
+
+**What ran where.** Pins and cross emission run on the host and say the bytes did not move; wine says the
+bytes run. The two new Win64 pins (callable with calls, 336 functions, and native-call, 512) are measured and
+held in `test_pin.cpp`. Under wine (`suite/tools/xwin/m1-run.sh`, `m1-controls.sh`, in
+`ghoti-cross-mingw64:deb13`) every test program of `runtime-core`, `runtime-heap`, `runtime-jit`,
+`runtime-debug` and lang-tang runs, the call, tail and native tests for real: calls and natives of every arity,
+fifty-deep chains under relocation torture, pauses, guards and `DEOPT`/`UNWIND` verdicts, a million-deep tail
+recursion with `rsp` and `rbp` equal at the first and last probe, and the walk-abort cases of `runtime-core`
+through a Windows child helper (the test binary run again with `--gtest_filter` and an environment variable, the
+parent reading the exit status and `stderr`; `tests/test_helpers.h`). `runtime-heap` is built a second time with
+`RELOCATE=yes` in a prefix of its own and its whole suite run with `GRHEAP_RELOCATE=1`, and
+`check-relocation-gates` runs there (a planted stale address dies with an access violation under wine, exit
+status 5, which the gate accepts as the Windows form of a signal). Every skipped test is named, with its reason,
+in `suite/tools/xwin/m1-skips.txt` and counted both ways by `m1-lib.sh`; each is a test that needs a POSIX tool,
+a host disassembler or a descriptor transport, or another architecture. Wine's `ntdll` is wine's own: a walk that
+works there has not been shown to work under a real Windows kernel's exception dispatch, `RtlVirtualUnwind` is
+wine's implementation, the guard-page growth the probes exist for is wine's, and no real Windows machine was used.
+No timing is taken under wine (the benchmark runs `--smoke`).
 
 ## Gates
 
