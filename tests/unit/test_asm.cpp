@@ -194,8 +194,36 @@ TEST(Asm, TheSystemDisassemblerReadsTheSameInstructions) {
   // encodings are still checked byte for byte by the test above.
   GTEST_SKIP() << "needs POSIX mkstemp/popen and a host objdump";
 #endif
-  // objdump is required on the gated target: its absence fails this test,
-  // it is not skipped (a skipped differential reports success over nothing).
+  // objdump is required on an x86-64 host: its absence fails this test, it is
+  // not skipped (a skipped differential reports success over nothing). On a host
+  // of another architecture (a Raspberry Pi's objdump knows aarch64 and not
+  // x86-64) the tool cannot give the reading this test exists for; it is skipped
+  // by name there, and the encodings are still checked byte for byte above.
+#if !defined(__x86_64__)
+  {
+    char probe[] = "/tmp/grjit-asm-probe-XXXXXX";
+    int pfd = mkstemp(probe);
+    ASSERT_GE(pfd, 0);
+    const unsigned char nop = 0x90;
+    ASSERT_EQ(write(pfd, &nop, 1), 1);
+    close(pfd);
+    std::string pcmd = std::string("objdump -D -b binary -mi386:x86-64 -M intel ") + probe + " 2>&1";
+    std::string ptext;
+    int pstatus = -1;
+    if (FILE * pp = popen(pcmd.c_str(), "r")) {
+      char pbuf[256];
+      while (fgets(pbuf, sizeof pbuf, pp) != nullptr) {
+        ptext += pbuf;
+      }
+      pstatus = pclose(pp);
+    }
+    unlink(probe);
+    if (pstatus != 0 || ptext.find("nop") == std::string::npos) {
+      GTEST_SKIP() << "this host's objdump does not disassemble x86-64 (exit status " << pstatus << "); it is a "
+                   << "reading by a tool that cannot be had here";
+    }
+  }
+#endif
   char path[] = "/tmp/grjit-asm-XXXXXX";
   int fd = mkstemp(path);
   ASSERT_GE(fd, 0);

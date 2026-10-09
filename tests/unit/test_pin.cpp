@@ -43,10 +43,14 @@
 
 #include "test_helpers.h"
 
+#include <cstdio>
+#include <string>
+
 #include "../callable_gen.h"
 #include "../ir_gen.h"
 
 #include "../../src/arm64/asm_internal.h"
+#include "../../src/x86_64/asm_internal.h"
 #include "../../src/code/code_internal.h"
 
 namespace {
@@ -106,6 +110,48 @@ std::vector<uint8_t> a64_address_words(uint64_t value) {
   grjit_a64_free(&a);
   return out;
 }
+
+/* The pins of the call-through-pointer functions were recorded with this process's kind of load address: the
+ * address of the library's own target check is an operand of the code (the emitter writes it as a constant), and
+ * how long the instruction that writes it is changes the length of the code and every branch that spans it. It is
+ * ten bytes on x86-64 (`mov r64, imm64`, an address above 4 GiB) and three words on arm64 (`movz`, `movk`, `movk`,
+ * an address of 33 to 48 bits with no zero 16-bit piece). A process that loads the library lower (a position-dependent
+ * executable at 0x400000, as a static test binary does on some hosts) gets a shorter instruction, hence other bytes
+ * that are right and cannot be compared with the recorded hash. Masking the operand does not help, so the test says
+ * what it needs and is skipped, by name, where it is not so; it is never a silent pass or a failure by host. */
+bool target_check_address_has_the_recorded_form(GRJIT_Arch arch, std::string * why) {
+  const uint64_t check = reinterpret_cast<uint64_t>(&grjit_call_target_ok);
+  char hex[32];
+  std::snprintf(hex, sizeof hex, "0x%llx", static_cast<unsigned long long>(check));
+  if (arch == GRJIT_ARCH_ARM64) {
+    const unsigned words = grjit_a64_mov_ri_count(check);
+    if (words != 3) {
+      *why = std::string("grjit_call_target_ok is at ") + hex + ", which arm64 writes in " + std::to_string(words) +
+          " instruction(s), and the pin was recorded with 3 (an address of 33 to 48 bits)";
+      return false;
+    }
+    return true;
+  }
+  GRJIT_Asm a;
+  grjit_asm_init(&a, grjit_allocator_default(), 64);
+  grjit_asm_mov_ri(&a, GRJIT_RAX, check);
+  const size_t bytes = grjit_asm_size(&a);
+  grjit_asm_free(&a);
+  if (bytes != 10) {
+    *why = std::string("grjit_call_target_ok is at ") + hex + ", which x86-64 writes in " + std::to_string(bytes) +
+        " bytes, and the pin was recorded with 10 (an address above 4 GiB): the library is loaded too low";
+    return false;
+  }
+  return true;
+}
+
+#define PIN_NEEDS_THE_RECORDED_ADDRESS_FORM(arch)                                                     \
+  do {                                                                                                \
+    std::string pin_why;                                                                              \
+    if (!target_check_address_has_the_recorded_form((arch), &pin_why)) {                              \
+      GTEST_SKIP() << pin_why;                                                                        \
+    }                                                                                                 \
+  } while (0)
 
 /* Replaces every occurrence of the library's own target check's address in `bytes` by a marker,
  * and returns how many there were: the one thing in the code that is the process's and not the
@@ -250,6 +296,7 @@ TEST(Pin, TheX86_64CodeOfTheGeneratedFunctionsIsByteForByteWhatWasRecorded) {
 }
 
 TEST(Pin, TheX86_64CodeOfCallableFunctionsWithCallsAndNoTailCallIsByteForByteWhatWasRecorded) {
+  PIN_NEEDS_THE_RECORDED_ADDRESS_FORM(GRJIT_ARCH_X86_64);
   /* The bytes depend on the core's layout of the walk-start cell and the
    * native-stack limit (which the code stores to and reads); a change to those
    * offsets is a change to the code, and records a new pin. */
@@ -288,6 +335,7 @@ TEST(Pin, TheArm64CodeOfTheGeneratedFunctionsIsByteForByteWhatWasRecorded) {
 }
 
 TEST(Pin, TheArm64CodeOfCallableFunctionsWithCallsIsByteForByteWhatWasRecorded) {
+  PIN_NEEDS_THE_RECORDED_ADDRESS_FORM(GRJIT_ARCH_ARM64);
   /* Measured after the arm64 emitter of calls landed (story 7 of the calls spec), and held from
    * then on: the code depends on the core's layout of the walk-start cell and the native-stack
    * limit, which it stores to and reads. The same functions as the x86-64 pin above. */
@@ -311,6 +359,7 @@ TEST(Pin, TheArm64CodeOfCallableFunctionsWithCallsIsByteForByteWhatWasRecorded) 
 GRJIT_EntryHook fake_entry_hook() { return reinterpret_cast<GRJIT_EntryHook>(uintptr_t{0x0000123456789ab0ull}); }
 
 TEST(Pin, TheX86_64CodeOfCallableFunctionsWithAnEntryHookIsByteForByteWhatWasRecorded) {
+  PIN_NEEDS_THE_RECORDED_ADDRESS_FORM(GRJIT_ARCH_X86_64);
   unsigned pointer_calls = 0, functions = 0;
   bool emitted = false;
   Pin pin = callable_pin(GRJIT_ARCH_X86_64, &pointer_calls, &functions, &emitted, fake_entry_hook());
@@ -323,6 +372,7 @@ TEST(Pin, TheX86_64CodeOfCallableFunctionsWithAnEntryHookIsByteForByteWhatWasRec
 }
 
 TEST(Pin, TheArm64CodeOfCallableFunctionsWithAnEntryHookIsByteForByteWhatWasRecorded) {
+  PIN_NEEDS_THE_RECORDED_ADDRESS_FORM(GRJIT_ARCH_ARM64);
   unsigned pointer_calls = 0, functions = 0;
   bool emitted = false;
   Pin pin = callable_pin(GRJIT_ARCH_ARM64, &pointer_calls, &functions, &emitted, fake_entry_hook());
@@ -335,6 +385,7 @@ TEST(Pin, TheArm64CodeOfCallableFunctionsWithAnEntryHookIsByteForByteWhatWasReco
 }
 
 TEST(Pin, TheArm64CodeOfCallableFunctionsWithTailCallsIsByteForByteWhatWasRecorded) {
+  PIN_NEEDS_THE_RECORDED_ADDRESS_FORM(GRJIT_ARCH_ARM64);
   /* Measured after the arm64 emitter of tail calls landed. */
   unsigned pointer_calls = 0, functions = 0;
   bool emitted = false;
@@ -373,6 +424,7 @@ TEST(Pin, TheWin64CodeOfTheGeneratedFunctionsIsByteForByteWhatWasRecorded) {
 }
 
 TEST(Pin, TheWin64CodeOfCallableFunctionsWithCallsIsByteForByteWhatWasRecorded) {
+  PIN_NEEDS_THE_RECORDED_ADDRESS_FORM(GRJIT_ARCH_X86_64);
   /* Measured after the Win64 emitter of calls landed (story 7b of the calls spec), and held from
    * then on: the same 336 functions as the x86-64 and arm64 pins above, through the Microsoft
    * x64 flavour. The code depends on the core's layout of the walk-start cell and the
