@@ -53,7 +53,7 @@ Nothing in either repository is edited. Exit status 0 only if the control
 passed and every mutation was CAUGHT (or, for --self-test, every verdict is the
 expected one).
 """
-import os, re, shutil, subprocess, sys, tempfile
+import os, platform, re, shutil, signal, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 JIT_SRC = os.path.dirname(HERE)
@@ -74,6 +74,15 @@ if TARGET not in ('x86-64', 'arm64', 'win64'):
     sys.exit('check-planted-calls: --target is x86-64, arm64 or win64')
 ARM64 = TARGET == 'arm64'
 WIN64 = TARGET == 'win64'
+# The default mutations edit the x86-64 emitter (src/x86_64) and are shown by running x86-64 code: on a host that is
+# not x86-64 that emitter is only ever run to emit (cross emission), so most of them cannot be caught there, and the
+# run would be hours of builds for verdicts that mean nothing. It is skipped by name; the arm64 mutations are
+# `--target=arm64`, run explicitly in the container of suite/tools/xarch/jit-arm64.sh.
+if TARGET == 'x86-64' and platform.machine().lower() not in ('x86_64', 'amd64'):
+    print('check-planted-calls: SKIPPED on this host (%s): the mutations edit the x86-64 emitter and are shown by running '
+          'x86-64 code, which this host cannot run; the arm64 ones are --target=arm64, and the Windows ones --target=win64' %
+          platform.machine())
+    sys.exit(0)
 prefix = opts.get('prefix') or os.environ.get('GHOTI_PREFIX') or os.environ.get('PREFIX')
 if not prefix or not os.path.isdir(prefix):
     sys.exit('check-planted-calls: give --prefix=DIR (or set PREFIX): a prefix that holds '
@@ -100,13 +109,21 @@ def sh(cmd, cwd, timeout=None, extra_env=None):
     e = dict(os.environ, PKG_CONFIG_PATH=pkg)
     e.update(extra_env or {})
     e.pop('LD_LIBRARY_PATH', None)
+    # The command runs in a session of its own, so that on a timeout the whole process group is killed: killing the
+    # shell alone (what subprocess.run's timeout does) leaves the mutant test it started running, and a mutant
+    # that spins is then an orphan that burns a core for ever.
+    proc = subprocess.Popen(cmd, shell=True, cwd=cwd, env=e, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, start_new_session=True)
     try:
-        r = subprocess.run(cmd, shell=True, cwd=cwd, env=e, stdout=subprocess.PIPE,
-                           stderr=subprocess.STDOUT, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired as ex:
-        out = ex.stdout.decode() if isinstance(ex.stdout, bytes) else (ex.stdout or '')
-        return 'timeout', out
-    return r.returncode, r.stdout
+        out, _ = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        out, _ = proc.communicate()
+        return 'timeout', out or ''
+    return proc.returncode, out
 
 
 def copy_tree(src, dst):
