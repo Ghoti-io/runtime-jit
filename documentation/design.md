@@ -716,6 +716,8 @@ and it is recorded once in lang-tang's `design.md` ("Calls, measured"): `fib(22)
 compiled, with no call exit, and the `fib(15)` and library-call figures beside it. (Compile
 of a 100-operation function: 5.5 us here, against 7.9 us on the first machine.)
 
+On real arm64 (a Raspberry Pi 4, Cortex-A72, GCC 16.2.0 aarch64 `-O2 -g` release in the arm64 build image, through `tools/rpi`, the same commit and command, 2026-10-09, three runs; calibration 3.34 ns a step) the same loops read: plain 5.00 to 5.25, poll 6.12, helper call 6.67, **compiled call 17.61**, tail call 12.79, `loop-helper-gc` 6.12 to 6.25, `loop-native` 7.23 and `loop-native-status` 8.34 to 9.56 ns an iteration. A compiled call and return costs 12.6 ns more than the plain loop there, 3.8 times the calibration step (it is 1.9 on the EVO-X2), and a tail call 7.8 ns; compiling a 100-operation function takes 44 us. The loop is the same code with a different arm64 convention, so the ratios are the machine's, not a finding about the convention.
+
 A retired function costs one page
 (4,163 bytes with bookkeeping) while a compiled run stays open: 200 replacements
 under one open JIT record held 832,640 bytes, 400 retired references, all
