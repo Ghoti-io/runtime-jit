@@ -1383,6 +1383,15 @@ are the epilogue rows, and their answer depends on the unwinder reading `ret imm
 (a function with no stack arguments ends in a plain `ret` and does not depend on it). It was shown **only under wine**; whether
 a real Windows unwinder reads `ret imm16` that way, and what `rsp` it then reports, is not shown.
 
+**Accepted limit (Corey, 2026-10-08).** Microsoft's documentation describes an epilogue as ending in `ret` or a `jmp` and does
+not name `ret imm16`. If a real Windows unwinder does not read it as an epilogue end, an asynchronous unwind (a debugger, a
+profiler or an ETW stack sample) that lands on the last instructions of *any* callee that pops stack arguments (`lea rsp, [rbp]`,
+`pop rbp`, `ret N`), a body as much as the adapter's callee, recovers the wrong caller; if it reads it as wine does, the adapter is
+recovered `in_A` bytes off there. Only asynchronous unwinds are affected (no exception crosses a compiled frame, AD-28), and a
+callee with no stack arguments ends in a plain `ret` and is not. This is accepted rather than designed away: the only way to
+remove it is a plain `ret` everywhere, which means giving up callee-pops, and story 5 chose callee-pops for tail calls. The check
+on a real Windows machine is item 1 of `planning/specs/spec-runtime-calls/checks-for-corey.md`.
+
 **One emitted function, read.** A callable function of six parameters whose only operation is a tail call, through a slot,
 to a callee of seven arguments (`grjit_emit_for` for `GRJIT_ARCH_X86_64_WIN64`, bytes through the host's `objdump -D -b
 binary -mi386:x86-64 -M intel`; 758 bytes, the internal entry at 208, the adapter `[0, 178)`). So `in_A` is 16 (the fifth and
