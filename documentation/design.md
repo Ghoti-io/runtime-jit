@@ -681,18 +681,42 @@ return address* to a stub that pops a side record: breaks the return predictor
 on every call and leaves a native unwinder or profiler looking at addresses in
 no registered code. *Caller-pops stack arguments*: above.
 
-**Measured.** (CAP-6; 2026-10-06, GCC 14.2, the machine of "Benchmarks" but
-loaded by other jobs, so read the ratios and not the nanoseconds; minimum of 5
-repeats, three runs.) The loop of "Benchmarks" calling a callable function
-through an entry slot, with `push` and `pop` doing nothing, so the figure is the
-convention, the status test and the hooks' two C calls and not an engine:
-`loop-compiled-call` 4.65 to 4.69 ns per iteration, against 0.74 to 0.77 for the
-plain loop and 1.74 to 1.76 for the loop calling a no-op C helper (calibration
-1.35 that day, against 1.14 on the day of the table above). So a compiled call and
-return through a slot, hooks included, costs about 3.9 ns, 2.9 times the
-calibration step and 2.2 times a helper call; an engine's `push` and `pop` are
-what dominate it in practice, and `fib` against the interpreter (lang-tang's
-measurements) is story 8's. A retired function costs one page
+**Measured.** (CAP-6, AD-26; re-measured 2026-10-09, runtime-jit `b2a40da`.) The
+instrument is `bench/bench.c`, the loop of "Benchmarks" calling a callable function
+through an entry slot with `push` and `pop` doing nothing, so the figure is the
+convention, the status test and the hooks' two C calls and not an engine. The machine is
+the EVO-X2 (AMD Ryzen AI MAX+ 395, Linux 7.2.9, otherwise idle) through `tools/evo`, in
+the build image: GCC 16.2.0, `-std=c17 -O2 -g`, release, x86-64 SysV. The command is
+`make -C libs/runtime-jit build/linux/release/apps/bench/bench PREFIX=<prefix>` and then
+`build/linux/release/apps/bench/bench`, run three times in turn; each figure is the best
+of five repeats inside a run, and the range below is the lowest and highest of the three.
+Calibration 1.17 ns a step in all three.
+
+| Case (ns per iteration) | Range of three runs |
+| --- | --- |
+| `loop-plain`, no poll | 0.479 to 0.500 |
+| `loop-poll`, an inline poll, nothing pending | 0.594 to 0.636 |
+| `loop-call`, a call of a no-op `NO_GC` C helper | 1.012 to 1.073 |
+| `loop-compiled-call`, a call and return through an entry slot, hooks included | **2.641 to 2.823** |
+| `loop-tail-call`, a tail call through a slot | 1.670 to 1.790 |
+| `loop-helper-gc`, `loop-native`, `loop-native-status` | 1.020 to 1.091, 1.021 to 1.107, 1.027 to 1.114 |
+
+So a compiled call and return through a slot, hooks included, costs about 2.2 ns more
+than the plain loop (1.9 times the calibration step), a tail call about 1.2 ns, and a C
+helper about 0.5 ns. Against the first recording of this figure (2026-10-06, an Intel
+Core 7 150U, GCC 14.2, loaded by other jobs: 4.65 to 4.69 for the compiled call, 0.74 to
+0.77 plain, 1.74 to 1.76 for the helper, calibration 1.35) the absolute figures are lower
+on this machine and the ratios are not the same: then the call cost 2.9 times the
+calibration and 2.2 times a helper call, now it costs 1.9 times the calibration and 4.1
+times a helper call, because the helper is cheaper here than the call is. The two
+machines are not one measurement, and no ratio between them is claimed. An engine's
+`push` and `pop` are what dominate a call in practice. **There is no interpreted-against-compiled
+`fib` here, and none is possible in this library:** it has no interpreter, so there is no
+interpreted run to compare with. That figure belongs to the first engine that has both,
+and it is recorded once in lang-tang's `design.md` ("Calls, measured"): `fib(22)` 36% faster
+compiled, with no call exit, and the `fib(15)` and library-call figures beside it. (Compile
+of a 100-operation function: 5.5 us here, against 7.9 us on the first machine.)
+A retired function costs one page
 (4,163 bytes with bookkeeping) while a compiled run stays open: 200 replacements
 under one open JIT record held 832,640 bytes, 400 retired references, all
 released when it left (`Calls.RepeatedReplacementUnderOneLongLivedActivation...`
