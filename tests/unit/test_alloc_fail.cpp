@@ -20,6 +20,17 @@
 
 namespace {
 
+// Arms an alarm that turns a hang into a failure of the test, and cancels it when
+// the test leaves by any path (an early ASSERT included).
+struct HangAlarm {
+#ifndef _WIN32
+  HangAlarm() { alarm(120); }
+  ~HangAlarm() { alarm(0); }
+#endif
+  HangAlarm(const HangAlarm &) = delete;
+  HangAlarm & operator=(const HangAlarm &) = delete;
+};
+
 uint64_t helper(uint64_t a) { return a; }
 uint32_t poll_helper(void *, uint64_t, uint64_t) { return 0; }
 uint32_t deopt_hook(void *, uint64_t) { return 0; }
@@ -99,9 +110,7 @@ TEST(AllocFail, EveryAllocationOfACallableCompileFailsCleanlyAndNoFailureLoopsIn
   // assembler whose buffer could not grow appends nothing: the loop must end
   // when the assembler has failed, or a compile that runs out of memory at that
   // point never returns. The alarm turns a hang into a failure of this test.
-#ifndef _WIN32
-  alarm(120);
-#endif
+  HangAlarm hang_alarm;
   JitWorld w;
   Fn f(build(nullptr, true));
   ASSERT_NE(f.f, nullptr);
@@ -130,9 +139,6 @@ TEST(AllocFail, EveryAllocationOfACallableCompileFailsCleanlyAndNoFailureLoopsIn
     ASSERT_LT(n, 500);
   }
   EXPECT_GT(failures, 10);
-#ifndef _WIN32
-  alarm(0);
-#endif
 }
 
 TEST(AllocFail, EveryAllocationOfACallableArm64EmissionFailsCleanlyAndTheTrapPaddingEnds) {
@@ -142,9 +148,7 @@ TEST(AllocFail, EveryAllocationOfACallableArm64EmissionFailsCleanlyAndTheTrapPad
   // reach a failing buffer there: it shows the callable emission is clean under
   // allocation failure on arm64, which no sweep did, and the guard is by reading.
   // Emission needs no arm64 host. The alarm turns a hang into a failure.
-#ifndef _WIN32
-  alarm(120);
-#endif
+  HangAlarm hang_alarm;
   Fn f(build(nullptr, true));
   ASSERT_NE(f.f, nullptr);
   long failures = 0;
@@ -166,9 +170,6 @@ TEST(AllocFail, EveryAllocationOfACallableArm64EmissionFailsCleanlyAndTheTrapPad
     ASSERT_LT(n, 500);
   }
   EXPECT_GT(failures, 10);
-#ifndef _WIN32
-  alarm(0);
-#endif
 }
 
 TEST(AllocFail, AFailingPageProviderIsOomAndLeavesNothingMapped) {
