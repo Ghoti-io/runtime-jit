@@ -467,12 +467,16 @@ namespace grjit_test {
 struct ChildOutcome {
   bool aborted = false;
   bool ran = false;       ///< The child started and ended (not that it was found).
+  unsigned long pid = 0;  ///< The child's process id.
   bool timed_out = false; ///< It did not end in the time allowed and was terminated: a failure, never an abort.
   unsigned long status = 0;
   std::string err;
 };
 
-inline ChildOutcome run_in_child(const std::function<void()> & body) {
+/* `timeout_ms` is how long the parent waits for the child; a child still running then is terminated and the
+ * outcome says `timed_out`. That is a failure of the test, unless `expect_timeout` says it is the behaviour under test. */
+inline ChildOutcome run_in_child(const std::function<void()> & body, unsigned timeout_ms = 120000,
+    bool expect_timeout = false) {
   static std::string last_test;
   static int calls = 0;
   const ::testing::TestInfo * info = ::testing::UnitTest::GetInstance()->current_test_info();
@@ -533,17 +537,22 @@ inline ChildOutcome run_in_child(const std::function<void()> & body) {
   CloseHandle(err);
   CloseHandle(nul);
   if (started) {
-    if (WaitForSingleObject(pi.hProcess, 120000) != WAIT_OBJECT_0) {
+    out.pid = pi.dwProcessId;
+    if (WaitForSingleObject(pi.hProcess, timeout_ms) != WAIT_OBJECT_0) {
       TerminateProcess(pi.hProcess, 1);
       WaitForSingleObject(pi.hProcess, 10000);
       out.timed_out = true;
-      ADD_FAILURE() << "the child did not end in 120 s and was terminated";
+      if (!expect_timeout) {
+        ADD_FAILURE() << "the child did not end in " << timeout_ms << " ms and was terminated";
+      }
     }
     DWORD code = 0;
-    if (!out.timed_out && GetExitCodeProcess(pi.hProcess, &code) && code != STILL_ACTIVE) {
-      out.status = code;
-      out.ran = true;
-      out.aborted = code == 3 || code == 0xC0000409u;
+    if (GetExitCodeProcess(pi.hProcess, &code)) {
+      out.status = code; // for a child that was terminated: the code it was terminated with
+      if (!out.timed_out && code != STILL_ACTIVE) {
+        out.ran = true;
+        out.aborted = code == 3 || code == 0xC0000409u;
+      }
     }
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
