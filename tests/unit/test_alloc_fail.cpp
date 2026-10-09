@@ -26,6 +26,8 @@ struct HangAlarm {
 #ifndef _WIN32
   HangAlarm() { alarm(120); }
   ~HangAlarm() { alarm(0); }
+#else
+  HangAlarm() = default; // no alarm() on Windows; the per-test watchdog covers a hang
 #endif
   HangAlarm(const HangAlarm &) = delete;
   HangAlarm & operator=(const HangAlarm &) = delete;
