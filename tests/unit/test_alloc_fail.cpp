@@ -27,7 +27,10 @@ struct HangAlarm {
   HangAlarm() { alarm(120); }
   ~HangAlarm() { alarm(0); }
 #else
-  HangAlarm() = default; // no alarm() on Windows; the per-test watchdog covers a hang
+  // No alarm() on Windows; the per-test watchdog covers a hang. The bodies are
+  // user-provided so that an unused guard is not an unused variable.
+  HangAlarm() {}
+  ~HangAlarm() {}
 #endif
   HangAlarm(const HangAlarm &) = delete;
   HangAlarm & operator=(const HangAlarm &) = delete;
