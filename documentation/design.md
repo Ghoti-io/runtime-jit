@@ -522,7 +522,7 @@ Milestone 1's baseline JIT called only C helpers at a fixed address, so a compil
 function could not call another and lang-tang left compiled code at every `CALL`.
 **Calls as deoptimization exits were milestone 1's defect**: `fib(15)` ran 12%
 slower with the JIT on than off, and `fib(22)` 1.2% slower (lang-tang's
-`design.md`, "Measured"), because every call left compiled code, deoptimized the
+`design.md`, "Calls, measured", which also has the current figures), because every call left compiled code, deoptimized the
 caller into the interpreter, and re-entered the callee's compiled code from the
 top. The restriction was story 15's own rule ("no JIT frame calls a JIT frame"),
 not the spine's. This section is the protocol that removes it, as built and
@@ -706,9 +706,8 @@ than the plain loop (1.9 times the calibration step), a tail call about 1.2 ns, 
 helper about 0.5 ns. Against the first recording of this figure (2026-10-06, an Intel
 Core 7 150U, GCC 14.2, loaded by other jobs: 4.65 to 4.69 for the compiled call, 0.74 to
 0.77 plain, 1.74 to 1.76 for the helper, calibration 1.35) the absolute figures are lower
-on this machine and the ratios are not the same: then the call cost 2.9 times the
-calibration and 2.2 times a helper call, now it costs 1.9 times the calibration and 4.1
-times a helper call, because the helper is cheaper here than the call is. The two
+on this machine: the call's cost over the plain loop was 3.9 ns then, 2.9 times that day's
+calibration step, and is 2.2 ns now, 1.9 times this one's. The two
 machines are not one measurement, and no ratio between them is claimed. An engine's
 `push` and `pop` are what dominate a call in practice. **There is no interpreted-against-compiled
 `fib` here, and none is possible in this library:** it has no interpreter, so there is no
@@ -716,11 +715,13 @@ interpreted run to compare with. That figure belongs to the first engine that ha
 and it is recorded once in lang-tang's `design.md` ("Calls, measured"): `fib(22)` 36% faster
 compiled, with no call exit, and the `fib(15)` and library-call figures beside it. (Compile
 of a 100-operation function: 5.5 us here, against 7.9 us on the first machine.)
+
 A retired function costs one page
 (4,163 bytes with bookkeeping) while a compiled run stays open: 200 replacements
 under one open JIT record held 832,640 bytes, 400 retired references, all
 released when it left (`Calls.RepeatedReplacementUnderOneLongLivedActivation...`
-prints it; runtime-core's `design.md` says why no bound or epoch is added).
+prints it; runtime-core's `design.md` says why no bound or epoch is added, and that
+Corey accepted that and documented it as an open risk on 2026-10-09).
 
 ## Tail calls (AD-28, CAP-8)
 
@@ -1535,6 +1536,11 @@ are statements about the baseline: every register is stored and reloaded each
 iteration, and a modern core forwards that store to its load, which is why a loop
 iteration is well under a nanosecond. A different machine will move all of the
 numbers; the calibration row is what to read them against.
+
+The compiled-call, tail-call and native-call loops of `bench/bench.c` are recorded with
+their machine, compiler and date under "Calls between compiled functions", "Measured",
+and the call-heavy `fib` against the interpreter is lang-tang's (this library has no
+interpreter).
 
 ## What is not here
 
