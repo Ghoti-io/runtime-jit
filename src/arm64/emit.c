@@ -911,7 +911,8 @@ static GRJIT_Result emit_pass(const GRJIT_Function * f, GRJIT_A64Emit * e,
     emit_adapter(e);
     /* The internal entry on a 16-byte boundary with the tag just before it: the magic and
      * parameter count, then the function's token. The padding is trap words. */
-    while ((grjit_a64_size(a) + GRJIT_ENTRY_TAG_BYTES) % 16 != 0) {
+    /* A failed assembler emits nothing, so its size stops changing: the loop ends there. */
+    while (grjit_a64_status(a) == GRJIT_A64_OK && (grjit_a64_size(a) + GRJIT_ENTRY_TAG_BYTES) % 16 != 0) {
       grjit_a64_brk(a, 0);
     }
     grjit_a64_data64(a, GRJIT_ENTRY_TAG_WORD(f->param_count));

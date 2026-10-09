@@ -1102,7 +1102,9 @@ static GRJIT_Result emit_callable(const GRJIT_Function * f, GRJIT_Emit * e,
   /* The internal entry on a 16-byte boundary with the tag just before it: the
    * magic and parameter count, then the function's token. */
   static const uint8_t trap = 0xCC;
-  while ((grjit_asm_size(a) + GRJIT_ENTRY_TAG_BYTES) % 16 != 0) {
+  /* An assembler that has failed (its buffer could not grow) appends nothing, so
+   * its size stops changing: the loop ends there, and the status is returned. */
+  while (a->status == GRJIT_ASM_OK && (grjit_asm_size(a) + GRJIT_ENTRY_TAG_BYTES) % 16 != 0) {
     grjit_asm_raw(a, &trap, 1);
   }
   const uint64_t tag[2] = {GRJIT_ENTRY_TAG_WORD(f->param_count), f->token};

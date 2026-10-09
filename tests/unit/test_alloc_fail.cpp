@@ -12,15 +12,28 @@
 
 #include "test_helpers.h"
 
+#include "../../src/code/code_internal.h"
+
+#ifndef _WIN32
+#include <unistd.h>
+#endif
+
 namespace {
 
 uint64_t helper(uint64_t a) { return a; }
 uint32_t poll_helper(void *, uint64_t, uint64_t) { return 0; }
+uint32_t deopt_hook(void *, uint64_t) { return 0; }
 
 /* A function that reaches every allocating arm of the compiler: a derived
  * pointer, a poll, a GC-point call, a guard and a branch. */
-GRJIT_Function * build(const GRJIT_Allocator * allocator) {
+GRJIT_Function * build(const GRJIT_Allocator * allocator, bool callable = false) {
   B b("sweep", 2, nullptr, allocator);
+  if (callable) {
+    GRJIT_CallHooks hooks{};
+    hooks.deopt = deopt_hook;
+    b.callable(hooks);
+    EXPECT_EQ(grjit_builder_set_token(b.b, 7), GRJIT_OK);
+  }
   GRJIT_VReg c = b.param(GRJIT_TYPE_I64);
   GRJIT_VReg r = b.reg(GRJIT_TYPE_REF), q = b.reg(GRJIT_TYPE_PTR), d = b.reg();
   b.derived(q, r, 8);
@@ -77,6 +90,85 @@ TEST(AllocFail, EveryAllocationOfCompileFailsCleanlyAndTheSweepEndsInSuccess) {
     ASSERT_LT(n, 500);
   }
   EXPECT_GT(failures, 10); // the sweep really did fail things
+}
+
+TEST(AllocFail, EveryAllocationOfACallableCompileFailsCleanlyAndNoFailureLoopsInThePaddingOfTheInternalEntry) {
+  GRJIT_REQUIRE_BACKEND();
+  // The internal entry of a callable function is padded to a 16-byte boundary
+  // with a loop that appends one byte (or one trap word) at a time, and an
+  // assembler whose buffer could not grow appends nothing: the loop must end
+  // when the assembler has failed, or a compile that runs out of memory at that
+  // point never returns. The alarm turns a hang into a failure of this test.
+#ifndef _WIN32
+  alarm(120);
+#endif
+  JitWorld w;
+  Fn f(build(nullptr, true));
+  ASSERT_NE(f.f, nullptr);
+  uint64_t bytes = w.bytes_in_use();
+  long failures = 0;
+  for (long n = 1;; n++) {
+    TrackingAllocator t;
+    t.fail_at = n;
+    GRJIT_CompileOptions o{};
+    o.pages = w.pages();
+    o.allocator = t.get();
+    GRJIT_Code * out = reinterpret_cast<GRJIT_Code *>(1);
+    GRJIT_Result r = grjit_compile(&o, f, &out);
+    if (r == GRJIT_OK) {
+      ASSERT_NE(out, reinterpret_cast<GRJIT_Code *>(1));
+      EXPECT_TRUE(grjit_code_callable(out));
+      grjit_code_destroy(out);
+      EXPECT_EQ(t.live, 0);
+      EXPECT_LT(t.calls, n) << "the sweep ended before the Nth allocation was reached";
+      break;
+    }
+    failures++;
+    ASSERT_EQ(r, GRJIT_ERR_OOM) << n;
+    EXPECT_EQ(t.live, 0) << "a block leaked after failing allocation " << n;
+    EXPECT_EQ(w.bytes_in_use(), bytes) << n;
+    ASSERT_LT(n, 500);
+  }
+  EXPECT_GT(failures, 10);
+#ifndef _WIN32
+  alarm(0);
+#endif
+}
+
+TEST(AllocFail, EveryAllocationOfACallableArm64EmissionFailsCleanlyAndTheTrapPaddingEnds) {
+  // The arm64 emitter pads the internal entry with trap words in a loop of its
+  // own, which carries the same guard as the x86-64 one above. Its buffer starts
+  // at 256 bytes, so the padding never needs the allocator and this sweep does not
+  // reach a failing buffer there: it shows the callable emission is clean under
+  // allocation failure on arm64, which no sweep did, and the guard is by reading.
+  // Emission needs no arm64 host. The alarm turns a hang into a failure.
+#ifndef _WIN32
+  alarm(120);
+#endif
+  Fn f(build(nullptr, true));
+  ASSERT_NE(f.f, nullptr);
+  long failures = 0;
+  for (long n = 1;; n++) {
+    TrackingAllocator t;
+    t.fail_at = n;
+    GRJIT_Emitted e{};
+    GRJIT_Result r = grjit_emit_for(GRJIT_ARCH_ARM64, f, t.get(), nullptr, nullptr,
+        grcore_jit_layout()->request_word_offset, &e);
+    if (r == GRJIT_OK) {
+      grjit_emitted_free(&e);
+      EXPECT_EQ(t.live, 0);
+      EXPECT_LT(t.calls, n);
+      break;
+    }
+    failures++;
+    ASSERT_EQ(r, GRJIT_ERR_OOM) << n;
+    EXPECT_EQ(t.live, 0) << "a block leaked after failing allocation " << n;
+    ASSERT_LT(n, 500);
+  }
+  EXPECT_GT(failures, 10);
+#ifndef _WIN32
+  alarm(0);
+#endif
 }
 
 TEST(AllocFail, AFailingPageProviderIsOomAndLeavesNothingMapped) {
