@@ -458,6 +458,90 @@ void grjit_asm_movzx_r8(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg src) {
   modrm_rr(a, dst, src);
 }
 
+/* ---- SSE2 (spec-runtime-float, story 3) ------------------------------------------------------
+ *
+ * Legacy-encoded scalar SSE: an optional mandatory prefix (F3 for single, F2 for double, 66 for the
+ * integer moves and `ucomisd`), then REX if a general register above r7 or REX.W is needed, then 0F
+ * and the opcode. The prefix comes before REX. Only the general registers are recorded in
+ * regs_used. */
+
+static void sse_rr(GRJIT_Asm * a, int prefix, bool w, uint8_t op, int reg, int rm) {
+  if (prefix != 0) {
+    byte(a, (uint8_t)prefix);
+  }
+  rex(a, w, reg, rm, false);
+  byte(a, 0x0F);
+  byte(a, op);
+  modrm_rr(a, reg, rm);
+}
+
+static int sse_prefix(bool dbl) {
+  return dbl ? 0xF2 : 0xF3;
+}
+
+void grjit_asm_movs_load(GRJIT_Asm * a, GRJIT_Xmm dst, GRJIT_Reg base, int32_t disp, bool dbl) {
+  note(a, base);
+  byte(a, (uint8_t)sse_prefix(dbl));
+  rex(a, false, dst, base, false);
+  byte(a, 0x0F);
+  byte(a, 0x10);
+  modrm_mem(a, dst, base, disp);
+}
+
+void grjit_asm_movs_store(GRJIT_Asm * a, GRJIT_Reg base, int32_t disp, GRJIT_Xmm src, bool dbl) {
+  note(a, base);
+  byte(a, (uint8_t)sse_prefix(dbl));
+  rex(a, false, src, base, false);
+  byte(a, 0x0F);
+  byte(a, 0x11);
+  modrm_mem(a, src, base, disp);
+}
+
+void grjit_asm_movd_xr(GRJIT_Asm * a, GRJIT_Xmm dst, GRJIT_Reg src, bool wide) {
+  note(a, src);
+  sse_rr(a, 0x66, wide, 0x6E, dst, src);
+}
+
+void grjit_asm_movd_rx(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Xmm src, bool wide) {
+  note(a, dst);
+  sse_rr(a, 0x66, wide, 0x7E, src, dst);
+}
+
+void grjit_asm_movaps(GRJIT_Asm * a, GRJIT_Xmm dst, GRJIT_Xmm src) {
+  sse_rr(a, 0, false, 0x28, dst, src);
+}
+
+void grjit_asm_sse_rr(GRJIT_Asm * a, GRJIT_SseOp op, GRJIT_Xmm dst, GRJIT_Xmm src, bool dbl) {
+  sse_rr(a, sse_prefix(dbl), false, (uint8_t)op, dst, src);
+}
+
+void grjit_asm_sse_logic(GRJIT_Asm * a, GRJIT_SseLogic op, GRJIT_Xmm dst, GRJIT_Xmm src) {
+  sse_rr(a, 0, false, (uint8_t)op, dst, src);
+}
+
+void grjit_asm_ucomis(GRJIT_Asm * a, GRJIT_Xmm x, GRJIT_Xmm y, bool dbl) {
+  sse_rr(a, dbl ? 0x66 : 0, false, 0x2E, x, y);
+}
+
+void grjit_asm_cmps(GRJIT_Asm * a, GRJIT_SsePred pred, GRJIT_Xmm dst, GRJIT_Xmm src, bool dbl) {
+  sse_rr(a, sse_prefix(dbl), false, 0xC2, dst, src);
+  byte(a, (uint8_t)pred);
+}
+
+void grjit_asm_cvtsi2s(GRJIT_Asm * a, GRJIT_Xmm dst, GRJIT_Reg src, bool dbl, bool wide_src) {
+  note(a, src);
+  sse_rr(a, sse_prefix(dbl), wide_src, 0x2A, dst, src);
+}
+
+void grjit_asm_cvtts2si(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Xmm src, bool dbl, bool wide_dst) {
+  note(a, dst);
+  sse_rr(a, sse_prefix(dbl), wide_dst, 0x2C, dst, src);
+}
+
+void grjit_asm_cvts2s(GRJIT_Asm * a, GRJIT_Xmm dst, GRJIT_Xmm src, bool to_double) {
+  sse_rr(a, to_double ? 0xF3 : 0xF2, false, 0x5A, dst, src);
+}
+
 void grjit_asm_push(GRJIT_Asm * a, GRJIT_Reg r) {
   note(a, r);
   rex(a, false, 0, r, false);

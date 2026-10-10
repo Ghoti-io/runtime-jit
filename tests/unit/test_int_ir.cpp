@@ -257,7 +257,9 @@ TEST(IntTypes, EveryValueThatExistedBeforeTheIntegerOperationsIsWhereItWas) {
   EXPECT_EQ(static_cast<int>(GRJIT_TYPE_PTR), 2);
   EXPECT_EQ(static_cast<int>(GRJIT_NATIVE_NO_RESULT), 3) << "the native-result sentinel did not move";
   EXPECT_EQ(static_cast<int>(GRJIT_TYPE_I32), 4);
-  EXPECT_GT(static_cast<int>(GRJIT_TYPE_COUNT), static_cast<int>(GRJIT_TYPE_I32));
+  EXPECT_EQ(static_cast<int>(GRJIT_TYPE_F32), 5) << "the float types are appended (story 3)";
+  EXPECT_EQ(static_cast<int>(GRJIT_TYPE_F64), 6);
+  EXPECT_EQ(static_cast<int>(GRJIT_TYPE_COUNT), 7);
   const GRJIT_OpKind before[] = {GRJIT_OP_CONST, GRJIT_OP_MOVE, GRJIT_OP_ADD, GRJIT_OP_SUB,
       GRJIT_OP_MUL, GRJIT_OP_AND, GRJIT_OP_OR, GRJIT_OP_XOR, GRJIT_OP_SHL, GRJIT_OP_SHR,
       GRJIT_OP_SAR, GRJIT_OP_NEG, GRJIT_OP_NOT, GRJIT_OP_CMP, GRJIT_OP_LOAD, GRJIT_OP_LOAD_S,
@@ -268,6 +270,8 @@ TEST(IntTypes, EveryValueThatExistedBeforeTheIntegerOperationsIsWhereItWas) {
     EXPECT_EQ(static_cast<int>(before[i]), static_cast<int>(i)) << "operation " << i;
   }
   EXPECT_EQ(static_cast<int>(GRJIT_OP_CLZ), 29) << "the new operations are appended";
+  EXPECT_EQ(static_cast<int>(GRJIT_OP_EXTEND_U), 43);
+  EXPECT_EQ(static_cast<int>(GRJIT_OP_FADD), 44) << "the float operations follow the integer ones";
   EXPECT_EQ(static_cast<int>(GRJIT_CMP_EQ), 0);
   EXPECT_EQ(static_cast<int>(GRJIT_CMP_UGE), 9);
 }

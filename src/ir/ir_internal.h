@@ -99,15 +99,32 @@ const GRJIT_Allocator * grjit_allocator_or_default(
  *  sentinel and is no type, and ::GRJIT_TYPE_COUNT and above are none. */
 static inline bool grjit_type_valid(GRJIT_Type t) {
   return t == GRJIT_TYPE_I64 || t == GRJIT_TYPE_REF || t == GRJIT_TYPE_PTR ||
-         t == GRJIT_TYPE_I32;
+         t == GRJIT_TYPE_I32 || t == GRJIT_TYPE_F32 || t == GRJIT_TYPE_F64;
+}
+
+/** Whether `t` is a float type. */
+static inline bool grjit_type_is_float(GRJIT_Type t) {
+  return t == GRJIT_TYPE_F32 || t == GRJIT_TYPE_F64;
+}
+
+/** Whether `t` is a type whose value is narrower than its word and kept zero-extended
+ *  in it (`I32` and `F32`). */
+static inline bool grjit_type_is_narrow(GRJIT_Type t) {
+  return t == GRJIT_TYPE_I32 || t == GRJIT_TYPE_F32;
+}
+
+/** Whether an operand is a typed float immediate (a call argument). */
+static inline bool grjit_operand_is_float_imm(const GRJIT_Operand * o) {
+  return o->kind == GRJIT_OPERAND_F32_IMM || o->kind == GRJIT_OPERAND_F64_IMM;
 }
 
 /** Whether the function has anything the arm64 and Win64 emitters do not yet
- *  emit: a register of type `I32`, or one of the integer operations added for
- *  numeric-operations.md (story 5 of spec-runtime-float replaces the refusal). */
+ *  emit: a register of type `I32`, `F32` or `F64`, a typed float immediate, or one of
+ *  the integer and float operations added for numeric-operations.md (story 5 of
+ *  spec-runtime-float replaces the refusal). */
 bool grjit_function_needs_int_ext(const GRJIT_Function * function);
 
-/** Whether an operation is one of the integer operations added after `CALL_NATIVE`. */
+/** Whether an operation is one of the integer or float operations added after `CALL_NATIVE`. */
 static inline bool grjit_op_is_int_ext(GRJIT_OpKind kind) {
   return kind >= GRJIT_OP_CLZ && kind < GRJIT_OP_COUNT;
 }

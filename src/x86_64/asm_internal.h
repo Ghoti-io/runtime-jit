@@ -75,6 +75,30 @@ typedef enum GRJIT_AluOp {
   GRJIT_ALU_SUB = 0x29, GRJIT_ALU_XOR = 0x31, GRJIT_ALU_CMP = 0x39
 } GRJIT_AluOp;
 
+/** SSE registers, by hardware number. Only `xmm0` to `xmm7` are used by the emitter, so no
+ *  encoding here needs a REX bit for one (the emitter's own scratch is `xmm0`-`xmm7`). */
+typedef enum GRJIT_Xmm {
+  GRJIT_XMM0 = 0, GRJIT_XMM1, GRJIT_XMM2, GRJIT_XMM3, GRJIT_XMM4, GRJIT_XMM5, GRJIT_XMM6,
+  GRJIT_XMM7
+} GRJIT_Xmm;
+
+/** The scalar arithmetic instructions, by their opcode byte after `0F`. */
+typedef enum GRJIT_SseOp {
+  GRJIT_SSE_SQRT = 0x51, GRJIT_SSE_ADD = 0x58, GRJIT_SSE_MUL = 0x59, GRJIT_SSE_SUB = 0x5C,
+  GRJIT_SSE_MIN = 0x5D, GRJIT_SSE_DIV = 0x5E, GRJIT_SSE_MAX = 0x5F
+} GRJIT_SseOp;
+
+/** The bitwise instructions on a whole register (the `ps` forms, which do not care whether
+ *  the bits are a float's), by their opcode byte after `0F`. */
+typedef enum GRJIT_SseLogic {
+  GRJIT_SSE_AND = 0x54, GRJIT_SSE_ANDN = 0x55, GRJIT_SSE_OR = 0x56, GRJIT_SSE_XOR = 0x57
+} GRJIT_SseLogic;
+
+/** The predicates of `cmpss`/`cmpsd`, which write all ones or all zeros. */
+typedef enum GRJIT_SsePred {
+  GRJIT_SSEP_EQ = 0, GRJIT_SSEP_LT = 1, GRJIT_SSEP_LE = 2, GRJIT_SSEP_UNORD = 3
+} GRJIT_SsePred;
+
 /** The shifts and rotates, by their ModRM extension in `D1`/`D3`/`C1`. */
 typedef enum GRJIT_ShiftOp {
   GRJIT_SHIFT_ROL = 0, GRJIT_SHIFT_ROR = 1, GRJIT_SHIFT_SHL = 4,
@@ -210,6 +234,39 @@ void grjit_asm_cmp_ri32(GRJIT_Asm * a, GRJIT_Reg r, int8_t imm);
 void grjit_asm_setcc(GRJIT_Asm * a, GRJIT_Cond cond, GRJIT_Reg r);
 /** `movzx r32, r8`, which clears the upper half of the 64-bit register. */
 void grjit_asm_movzx_r8(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg src);
+
+/* The SSE2 forms of the float operations (spec-runtime-float, story 3). SSE2 only: no
+ * instruction here is newer than x86-64-v1. `dbl` selects the double (`sd`) form, the single
+ * (`ss`) otherwise. A register operand that is an `xmm` is never recorded in
+ * ::grjit_asm_regs_used (it shares no numbering with the general registers). */
+/** `movss`/`movsd xmm, [base + disp]`: loads 32 or 64 bits and clears the rest of the register. */
+void grjit_asm_movs_load(GRJIT_Asm * a, GRJIT_Xmm dst, GRJIT_Reg base, int32_t disp, bool dbl);
+/** `movss`/`movsd [base + disp], xmm`: stores 32 or 64 bits. */
+void grjit_asm_movs_store(GRJIT_Asm * a, GRJIT_Reg base, int32_t disp, GRJIT_Xmm src, bool dbl);
+/** `movd xmm, r32` or, when `wide`, `movq xmm, r64`: clears the rest of the register. */
+void grjit_asm_movd_xr(GRJIT_Asm * a, GRJIT_Xmm dst, GRJIT_Reg src, bool wide);
+/** `movd r32, xmm` (the upper half of `r` is cleared) or `movq r64, xmm`. */
+void grjit_asm_movd_rx(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Xmm src, bool wide);
+/** `movaps xmm, xmm`. */
+void grjit_asm_movaps(GRJIT_Asm * a, GRJIT_Xmm dst, GRJIT_Xmm src);
+/** `addss`/`subss`/`mulss`/`divss`/`minss`/`maxss`/`sqrtss` and the `sd` forms: `dst = dst op src`
+ *  (`sqrt`: `dst = sqrt(src)`). */
+void grjit_asm_sse_rr(GRJIT_Asm * a, GRJIT_SseOp op, GRJIT_Xmm dst, GRJIT_Xmm src, bool dbl);
+/** `andps`/`andnps`/`orps`/`xorps`: `dst = dst op src` on the whole register (`andn`: `~dst & src`). */
+void grjit_asm_sse_logic(GRJIT_Asm * a, GRJIT_SseLogic op, GRJIT_Xmm dst, GRJIT_Xmm src);
+/** `ucomiss`/`ucomisd x, y`: ZF, PF and CF as for an unsigned compare of `x` with `y`, with all
+ *  three set when either is a NaN. */
+void grjit_asm_ucomis(GRJIT_Asm * a, GRJIT_Xmm x, GRJIT_Xmm y, bool dbl);
+/** `cmpss`/`cmpsd dst, src, pred`: all ones in the low 32 or 64 bits of `dst` if `pred` holds
+ *  for `dst` and `src`, else all zeros. */
+void grjit_asm_cmps(GRJIT_Asm * a, GRJIT_SsePred pred, GRJIT_Xmm dst, GRJIT_Xmm src, bool dbl);
+/** `cvtsi2ss`/`cvtsi2sd xmm, r32` or, when `wide_src`, `r64` (a signed integer). */
+void grjit_asm_cvtsi2s(GRJIT_Asm * a, GRJIT_Xmm dst, GRJIT_Reg src, bool dbl, bool wide_src);
+/** `cvttss2si`/`cvttsd2si r, xmm`: truncating, to 32 or, when `wide_dst`, 64 bits. An operand
+ *  out of range (or a NaN) gives the "integer indefinite" value, not a fault. */
+void grjit_asm_cvtts2si(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Xmm src, bool dbl, bool wide_dst);
+/** `cvtss2sd` (`to_double`) or `cvtsd2ss`. */
+void grjit_asm_cvts2s(GRJIT_Asm * a, GRJIT_Xmm dst, GRJIT_Xmm src, bool to_double);
 
 void grjit_asm_push(GRJIT_Asm * a, GRJIT_Reg r);
 void grjit_asm_pop(GRJIT_Asm * a, GRJIT_Reg r);

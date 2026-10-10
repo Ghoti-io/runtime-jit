@@ -394,7 +394,8 @@ GRJIT_Result grjit_builder_binary(GRJIT_Builder * builder, GRJIT_OpKind kind,
   const bool plain = kind >= GRJIT_OP_ADD && kind <= GRJIT_OP_SAR;
   const bool extended = kind == GRJIT_OP_ROTL || kind == GRJIT_OP_ROTR ||
                         kind == GRJIT_OP_DIV_S || kind == GRJIT_OP_DIV_U ||
-                        kind == GRJIT_OP_REM_S || kind == GRJIT_OP_REM_U;
+                        kind == GRJIT_OP_REM_S || kind == GRJIT_OP_REM_U ||
+                        (kind >= GRJIT_OP_FADD && kind <= GRJIT_OP_FCOPYSIGN);
   if (builder == NULL || (!plain && !extended)) {
     return GRJIT_ERR_INVALID;
   }
@@ -411,7 +412,8 @@ GRJIT_Result grjit_builder_unary(GRJIT_Builder * builder, GRJIT_OpKind kind,
                         kind == GRJIT_OP_POPCNT || kind == GRJIT_OP_EXT8_S ||
                         kind == GRJIT_OP_EXT16_S || kind == GRJIT_OP_EXT32_S ||
                         kind == GRJIT_OP_WRAP || kind == GRJIT_OP_EXTEND_S ||
-                        kind == GRJIT_OP_EXTEND_U;
+                        kind == GRJIT_OP_EXTEND_U ||
+                        (kind >= GRJIT_OP_FNEG && kind <= GRJIT_OP_REINTERPRET);
   if (builder == NULL || (kind != GRJIT_OP_NEG && kind != GRJIT_OP_NOT && !extended)) {
     return GRJIT_ERR_INVALID;
   }

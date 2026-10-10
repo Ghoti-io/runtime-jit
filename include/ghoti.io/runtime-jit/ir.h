@@ -41,6 +41,14 @@
  *   an entry word, a `RET` and a helper's argument stay `uint64_t` words with no
  *   undefined half. Never in a stack map; a frame state names it with the
  *   representation `GRCORE_REPR_I32`.
+ * - ::GRJIT_TYPE_F32, ::GRJIT_TYPE_F64: an IEEE-754 binary32 or binary64 float, held as its
+ *   **bits** in the 64-bit word. An `F32` is **zero-extended in its word at all times**, as
+ *   an `I32` is and for the same reason (an entry word, a `RET`, a `MOVE` and a test's
+ *   comparison stay `uint64_t` words with no undefined half). A float never travels in an
+ *   `xmm` or `v` register across the entry, never is a reference and is never in a stack
+ *   map; a frame state names it with `GRCORE_REPR_F32` or `GRCORE_REPR_F64`. Floats and
+ *   integers never mix: only ::GRJIT_OP_REINTERPRET and the conversions change a value's
+ *   kind, and a `BITCAST` into or out of a float is refused.
  * - ::GRJIT_TYPE_REF: an engine value word, which may be a reference. In a
  *   stack map it has slot kind `VALUE`.
  * - ::GRJIT_TYPE_PTR: a raw non-GC word (an address in the native heap, a
@@ -48,10 +56,47 @@
  *   declared with ::grjit_builder_derived and recorded as a (slot, base slot,
  *   delta) triple.
  *
- * There is no floating point: memory access has widths 8, 16, 32 and 64 bits,
- * a narrow load zero-extends (`LOAD`) or sign-extends (`LOAD_S`) into the 64-bit
- * register (an `I32` register takes a zero-extending load of at most 32 bits),
- * and a narrow store writes the low bits.
+ * Memory access has widths 8, 16, 32 and 64 bits, a narrow load zero-extends
+ * (`LOAD`) or sign-extends (`LOAD_S`) into the 64-bit register (an `I32` register
+ * takes a zero-extending load of at most 32 bits, an `F32` one of exactly 32, an
+ * `F64` one of exactly 64), and a narrow store writes the low bits.
+ *
+ * **Floating point** (numeric-operations.md; spec-runtime-float). The float operations
+ * are their own operations (`FADD`, `FSUB`, ...), not overloads of `ADD`: an integer
+ * operation on a float register is refused by the verifier. The width is the
+ * destination's type. An immediate in a float position is the operand's **bit pattern**
+ * (an `F32` immediate must lie in `[0, UINT32_MAX]`). The semantics are WebAssembly 3.0's,
+ * with the interpreter-style rule that the result is the hardware's unless Wasm says
+ * otherwise: `FNEG`, `FABS` and `FCOPYSIGN` act on the sign bit alone; `FMIN`/`FMAX` of
+ * a NaN is a (quiet) NaN and `min(-0, +0)` is `-0`; the rounding operations keep the sign
+ * of a zero and are ties-to-even for `FNEAREST`; a comparison with a NaN is false (true
+ * for `NE`); `CONVERT_*`, `DEMOTE` and `PROMOTE` round once, to nearest even. Compiled
+ * code assumes the default MXCSR (round to nearest, exceptions masked, no flush to
+ * zero), and never writes it. A NaN result is a NaN of the class the suite asks for
+ * (canonical when every input is canonical, else arithmetic); its sign and payload are
+ * not fixed, because which payload survives when both operands are NaN is not the
+ * source's to decide (C may swap the operands of a commutative operation). A test
+ * compares floats by their bits with any two NaNs equal.
+ *
+ * **Float to integer.** `TRUNC_S` and `TRUNC_U` are **partial**, like a division: the
+ * operation never traps and never yields the hardware's "integer indefinite" as an
+ * answer, because the verifier refuses it without a range guard. The frontend writes the
+ * guard as ordinary IR, with a `GUARD` (the NaN guard `CMP EQ x, x` first, which is the
+ * site for "invalid conversion to integer", then the range guard, the site for "integer
+ * overflow"). The verifier's rule is in ::GRJIT_OP_TRUNC_S. `TRUNC_SAT_S` and
+ * `TRUNC_SAT_U` are total.
+ *
+ * **Helper calls with floats.** An argument of a `CALL` may be an `F32` or `F64` register,
+ * or a typed float immediate (::GRJIT_OPERAND_F32_IMM, ::GRJIT_OPERAND_F64_IMM: an
+ * immediate that is plain bits has no class to pass it by), and its result may be one.
+ * x86-64 SysV classifies: the integer-class arguments take `rdi rsi rdx rcx r8 r9` in order
+ * among themselves, the float ones `xmm0` to `xmm7` in order among themselves, so
+ * `(i64, f64, i64, f32)` is `rdi, xmm0, rsi, xmm1`; an `F32` is in the low 32 bits of its
+ * `xmm` register, and a helper's `float` result is taken from the low 32 bits of `xmm0`,
+ * whatever is above them. Natives (`CALL_NATIVE`) stay integer-only. Between compiled
+ * functions a float travels as its bit word, in the register or stack word an `I64` uses.
+ * The arm64 and Win64 backends refuse a function with a float register or operation
+ * (`GRJIT_ERR_UNSUPPORTED`) until story 5 of spec-runtime-float.
  *
  * **Integer width.** The width of an arithmetic operation is the type of its
  * destination: an `I32` destination makes it a 32-bit operation on `I32`
@@ -140,6 +185,8 @@ typedef enum GRJIT_Type {
    *  that no constant a client compiled against moves when a type is added. */
   GRJIT_TYPE_RESERVED_NO_RESULT,
   GRJIT_TYPE_I32,  ///< A 32-bit integer, zero-extended in its word.
+  GRJIT_TYPE_F32,  ///< An IEEE-754 binary32, its bits zero-extended in its word.
+  GRJIT_TYPE_F64,  ///< An IEEE-754 binary64, its bits.
   GRJIT_TYPE_COUNT ///< Not a type; closes the enum.
 } GRJIT_Type;
 
@@ -157,7 +204,14 @@ typedef uint32_t GRJIT_BlockId;
 typedef enum GRJIT_OperandKind {
   GRJIT_OPERAND_NONE, ///< Absent (a `RET` with no value).
   GRJIT_OPERAND_VREG, ///< A register.
-  GRJIT_OPERAND_IMM   ///< A 64-bit immediate.
+  GRJIT_OPERAND_IMM,  ///< A 64-bit immediate.
+  /** An `F32` immediate: `imm` is its bit pattern, in `[0, UINT32_MAX]`. Only in the
+   *  arguments of a call (`CALL`, `CALL_SLOT`, `CALL_PTR`, tail calls), where a plain
+   *  immediate has no class to pass it by. Elsewhere a float immediate is a plain
+   *  ::GRJIT_OPERAND_IMM of the operand's bits. */
+  GRJIT_OPERAND_F32_IMM,
+  /** An `F64` immediate: `imm` is its bit pattern. The same restriction. */
+  GRJIT_OPERAND_F64_IMM
 } GRJIT_OperandKind;
 
 /** @brief An operand: a register or a 64-bit immediate. */
@@ -182,6 +236,18 @@ static inline GRJIT_Operand grjit_operand_vreg(GRJIT_VReg vreg) {
 /** @brief An immediate operand. */
 static inline GRJIT_Operand grjit_operand_imm(int64_t imm) {
   GRJIT_Operand o = {GRJIT_OPERAND_IMM, GRJIT_NO_VREG, imm};
+  return o;
+}
+
+/** @brief An `F32` immediate, from its bit pattern, as a call argument. */
+static inline GRJIT_Operand grjit_operand_f32_imm(uint32_t bits) {
+  GRJIT_Operand o = {GRJIT_OPERAND_F32_IMM, GRJIT_NO_VREG, (int64_t)bits};
+  return o;
+}
+
+/** @brief An `F64` immediate, from its bit pattern, as a call argument. */
+static inline GRJIT_Operand grjit_operand_f64_imm(uint64_t bits) {
+  GRJIT_Operand o = {GRJIT_OPERAND_F64_IMM, GRJIT_NO_VREG, (int64_t)bits};
   return o;
 }
 
@@ -257,10 +323,55 @@ typedef enum GRJIT_OpKind {
   GRJIT_OP_WRAP,   ///< `dst = a mod 2^32`: `I64` to `I32` (`i32.wrap_i64`).
   GRJIT_OP_EXTEND_S, ///< `dst = a` sign-extended: `I32` to `I64` (`i64.extend_i32_s`).
   GRJIT_OP_EXTEND_U, ///< `dst = a` zero-extended: `I32` to `I64` (`i64.extend_i32_u`).
+  /* The float operations of numeric-operations.md (spec-runtime-float, story 3), appended
+   * after EXTEND_U so no value above moved. The binary ones are built with
+   * ::grjit_builder_binary and the others with ::grjit_builder_unary. The width is the
+   * destination's: `F32` or `F64` operands of the destination's own type. */
+  GRJIT_OP_FADD,   ///< `dst = a + b` (`f32.add`, `f64.add`).
+  GRJIT_OP_FSUB,   ///< `dst = a - b`.
+  GRJIT_OP_FMUL,   ///< `dst = a * b`.
+  GRJIT_OP_FDIV,   ///< `dst = a / b`; a zero divisor gives an infinity or a NaN, as IEEE says.
+  GRJIT_OP_FMIN,   ///< `dst = min(a, b)`: a NaN operand gives a NaN, `min(-0, +0)` is `-0`.
+  GRJIT_OP_FMAX,   ///< `dst = max(a, b)`: a NaN operand gives a NaN, `max(-0, +0)` is `+0`.
+  GRJIT_OP_FCOPYSIGN, ///< `dst = ` the magnitude bits of `a` with the sign bit of `b`.
+  GRJIT_OP_FNEG,   ///< `dst = -a` by the sign bit alone (a signalling NaN keeps its payload).
+  GRJIT_OP_FABS,   ///< `dst = |a|` by the sign bit alone.
+  GRJIT_OP_FSQRT,  ///< `dst = sqrt(a)`.
+  GRJIT_OP_FCEIL,  ///< `dst = ` `a` rounded up to an integer, the sign of a zero kept.
+  GRJIT_OP_FFLOOR, ///< `dst = ` `a` rounded down.
+  GRJIT_OP_FTRUNC, ///< `dst = ` `a` rounded toward zero.
+  GRJIT_OP_FNEAREST, ///< `dst = ` `a` rounded to the nearest integer, ties to even.
+  GRJIT_OP_CONVERT_S, ///< `dst = (float)(signed a)`: `I32` or `I64` to `F32` or `F64`
+                      ///< (`f32/f64.convert_i32/i64_s`). The source is a register.
+  GRJIT_OP_CONVERT_U, ///< The same, unsigned (`..._u`).
+  GRJIT_OP_TRUNC_S, ///< `dst = (signed)a`, truncating: `F32` or `F64` to `I32` or `I64`
+                    ///< (`i32/i64.trunc_f32/f64_s`). **Partial**: needs, earlier in the same
+                    ///< block and with `a` not assigned in between, a `GUARD` (or two) whose
+                    ///< conditions are `CMP`s of `a` against immediates, no wider than the
+                    ///< exact bounds, joined by `AND`: `a > L` or `a >= L` (or the mirrored
+                    ///< `L < a`, `L <= a`) and `a < H` or `a <= H`, such that every `a` passing
+                    ///< both truncates to a value of the destination. The exact bounds, for
+                    ///< `i32` signed: `a > -2147483649` and `a < 2147483648`; `i32` unsigned:
+                    ///< `a > -1` and `a < 2^32`; `i64` signed: `a >= -2^63` (`-2^63 - 1` is no
+                    ///< double) and `a < 2^63`; `i64` unsigned: `a > -1` and `a < 2^64`. A
+                    ///< narrower guard is sound and accepted; a wider is refused; the NaN guard
+                    ///< (`CMP EQ a, a`) alone is not enough; a source set by a `CONST` is
+                    ///< judged as it stands. The source is a register.
+  GRJIT_OP_TRUNC_U, ///< The same, unsigned (`..._u`). **Partial**, with the same rule.
+  GRJIT_OP_TRUNC_SAT_S, ///< `dst = ` `a` truncated and saturated: NaN is 0, out of range is
+                        ///< the nearest bound (`i32/i64.trunc_sat_f32/f64_s`). Total.
+  GRJIT_OP_TRUNC_SAT_U, ///< The same, unsigned. Total.
+  GRJIT_OP_DEMOTE,  ///< `dst = (float)a`: `F64` to `F32` (`f32.demote_f64`).
+  GRJIT_OP_PROMOTE, ///< `dst = (double)a`: `F32` to `F64` (`f64.promote_f32`).
+  GRJIT_OP_REINTERPRET, ///< `dst = a`'s bits: `I32` and `F32`, or `I64` and `F64`, either way
+                        ///< (`i32.reinterpret_f32` and the other three).
   GRJIT_OP_COUNT   ///< Not an operation; closes the enum.
 } GRJIT_OpKind;
 
-/** @brief The conditions of `CMP`. */
+/** @brief The conditions of `CMP`. On two float registers (both `F32` or both `F64`; an
+ *  immediate is the operand's bit pattern) only `EQ NE LT LE GT GE` exist and they are the
+ *  WebAssembly ordered comparisons: `EQ LT LE GT GE` are false when either side is a NaN,
+ *  `NE` is true; the unsigned conditions are refused. */
 typedef enum GRJIT_Cmp {
   GRJIT_CMP_EQ,  ///< Equal.
   GRJIT_CMP_NE,  ///< Not equal.

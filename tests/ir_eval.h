@@ -23,6 +23,10 @@
 #include <cstring>
 #include <vector>
 
+#if !defined(__FP_FAST_FMA) && defined(__FAST_MATH__)
+#error "the evaluator and every float test are built without -ffast-math"
+#endif
+
 namespace ireval {
 
 /* The exit the evaluator reports for a partial operation reached with operands its guards
@@ -128,6 +132,344 @@ inline bool compare(GRJIT_Cmp c, uint64_t a, uint64_t b) {
   }
 }
 
+/* ---- The float operations (numeric-operations.md; spec-runtime-float, story 3) ---------------------
+ *
+ * Written out, not borrowed: `fmin`, `fmax`, `rint`, `nearbyint`, `ceil`, `floor`, `trunc` and the
+ * float-to-integer and integer-to-float casts differ from WebAssembly in a NaN, in a signed zero,
+ * in a tie or in what they do out of range, and are exactly where an emitter and a hand-written
+ * evaluator would share a mistake if both leaned on the C library. What is borrowed is IEEE
+ * arithmetic itself (+ - * / and sqrt on float and double, which the C++ source states and the
+ * tests build with -ffp-contract=off), and the width conversions between float and double, which
+ * are the one thing the standard defines exactly.
+ *
+ * Floats are compared by bits with any two NaNs equal (`same_float`): C++ may swap the operands
+ * of a commutative `a + b`, so which payload survives when both are NaN is not the source's. */
+
+inline float f32_of(uint64_t bits) {
+  uint32_t b = static_cast<uint32_t>(bits);
+  float f;
+  std::memcpy(&f, &b, sizeof f);
+  return f;
+}
+inline uint64_t bits_of(float f) {
+  uint32_t b;
+  std::memcpy(&b, &f, sizeof b);
+  return b;
+}
+inline double f64_of(uint64_t bits) {
+  double d;
+  std::memcpy(&d, &bits, sizeof d);
+  return d;
+}
+inline uint64_t bits_of(double d) {
+  uint64_t b;
+  std::memcpy(&b, &d, sizeof b);
+  return b;
+}
+
+/* A float of `width` (32 or 64) bits as a double, exactly (every float is a double). */
+inline double as_double(unsigned width, uint64_t bits) {
+  return width == 32 ? static_cast<double>(f32_of(bits)) : f64_of(bits);
+}
+
+inline bool is_nan_bits(unsigned width, uint64_t bits) {
+  if (width == 32) {
+    return (bits & 0x7F800000u) == 0x7F800000u && (bits & 0x007FFFFFu) != 0;
+  }
+  return (bits & 0x7FF0000000000000ull) == 0x7FF0000000000000ull && (bits & 0x000FFFFFFFFFFFFFull) != 0;
+}
+
+/* The result of an operation on a NaN: a NaN, quiet. Which one is not fixed (see above). */
+inline uint64_t quiet_nan(unsigned width) { return width == 32 ? 0x7FC00000u : 0x7FF8000000000000ull; }
+
+/* The bit-for-bit comparison of the tests: equal bits, or both NaN. A NaN never equals a number,
+ * and +0 and -0 differ. */
+inline bool same_float(unsigned width, uint64_t a, uint64_t b) {
+  const uint64_t mask = width == 32 ? 0xFFFFFFFFull : ~uint64_t{0};
+  a &= mask;
+  b &= mask;
+  if (is_nan_bits(width, a) || is_nan_bits(width, b)) {
+    return is_nan_bits(width, a) && is_nan_bits(width, b);
+  }
+  return a == b;
+}
+
+inline uint64_t sign_bit(unsigned width) { return width == 32 ? 0x80000000ull : 0x8000000000000000ull; }
+
+inline bool negative(unsigned width, uint64_t bits) { return (bits & sign_bit(width)) != 0; }
+
+/* The double `d` (the value of a float of `width` bits, exactly, or an integer that fits) as that
+ * float's bits. The cast to float rounds to nearest even, once, from a double that is itself exact. */
+inline uint64_t from_double(unsigned width, double d) {
+  return width == 32 ? bits_of(static_cast<float>(d)) : bits_of(d);
+}
+
+/* An integer-valued result with the sign of `like` when it is a zero. */
+inline uint64_t integer_result(unsigned width, double value, uint64_t like) {
+  uint64_t bits = from_double(width, value);
+  if (value == 0.0) {
+    bits = negative(width, like) ? sign_bit(width) : 0;
+  }
+  return bits;
+}
+
+/* trunc, floor, ceil, nearest of a float of `width` bits. The 2^52 (2^23) bound is the magnitude
+ * from which every float is an integer; below it, a signed 64-bit cast is exact. */
+inline uint64_t round_float(GRJIT_OpKind kind, unsigned width, uint64_t bits) {
+  if (is_nan_bits(width, bits)) {
+    return quiet_nan(width);
+  }
+  const double x = as_double(width, bits);
+  const double limit = width == 32 ? 8388608.0 : 4503599627370496.0;
+  if (x >= limit || x <= -limit || x - x != 0.0 /* an infinity */) {
+    return bits;
+  }
+  double t = static_cast<double>(static_cast<int64_t>(x)); /* toward zero */
+  switch (kind) {
+    case GRJIT_OP_FTRUNC:
+      break;
+    case GRJIT_OP_FFLOOR:
+      if (t > x) {
+        t -= 1.0;
+      }
+      break;
+    case GRJIT_OP_FCEIL:
+      if (t < x) {
+        t += 1.0;
+      }
+      break;
+    default: { /* nearest, ties to even */
+      double f = t;
+      if (f > x) {
+        f -= 1.0; /* floor */
+      }
+      const double diff = x - f; /* in [0, 1), exact */
+      if (diff < 0.5) {
+        t = f;
+      } else if (diff > 0.5) {
+        t = f + 1.0;
+      } else {
+        t = (static_cast<int64_t>(f) % 2 == 0) ? f : f + 1.0;
+      }
+      break;
+    }
+  }
+  return integer_result(width, t, bits);
+}
+
+/* min and max as WebAssembly defines them. */
+inline uint64_t min_max(bool want_min, unsigned width, uint64_t a, uint64_t b) {
+  if (is_nan_bits(width, a) || is_nan_bits(width, b)) {
+    return quiet_nan(width);
+  }
+  const double x = as_double(width, a), y = as_double(width, b);
+  if (x == 0.0 && y == 0.0) {
+    /* min: -0 if either is -0; max: +0 if either is +0 */
+    return want_min ? (negative(width, a) ? a : b) : (negative(width, a) ? b : a);
+  }
+  return (want_min ? x < y : x > y) ? a : b;
+}
+
+/* A correctly rounded (to nearest, ties to even) float of `width` bits from an integer magnitude
+ * and a sign, by integer arithmetic alone. */
+inline uint64_t float_from_integer(unsigned width, uint64_t magnitude, bool neg) {
+  const unsigned mant_bits = width == 32 ? 23 : 52;
+  const unsigned bias = width == 32 ? 127 : 1023;
+  uint64_t sign = neg ? sign_bit(width) : 0;
+  if (magnitude == 0) {
+    return 0; /* an integer zero converts to +0 */
+  }
+  unsigned msb = 63;
+  while (((magnitude >> msb) & 1) == 0) {
+    msb--;
+  }
+  uint64_t mant;
+  if (msb <= mant_bits) {
+    mant = magnitude << (mant_bits - msb);
+  } else {
+    const unsigned shift = msb - mant_bits;
+    mant = magnitude >> shift;
+    const uint64_t rem = magnitude & ((uint64_t{1} << shift) - 1);
+    const uint64_t half = uint64_t{1} << (shift - 1);
+    if (rem > half || (rem == half && (mant & 1))) {
+      mant++;
+      if (mant == (uint64_t{2} << mant_bits)) { /* carried out of the significand */
+        mant >>= 1;
+        msb++;
+      }
+    }
+  }
+  const uint64_t exponent = msb + bias;
+  return sign | (exponent << mant_bits) | (mant & ((uint64_t{1} << mant_bits) - 1));
+}
+
+/* The truncation of a float to a destination: false when it does not fit (a NaN included), which
+ * is a trap that the guards in front of a partial operation keep out. `bits` is 32 or 64, signed
+ * or not. */
+inline bool trunc_in_range(unsigned src_width, uint64_t bits, unsigned dst_bits, bool is_signed,
+    uint64_t * out) {
+  if (is_nan_bits(src_width, bits)) {
+    return false;
+  }
+  const double x = as_double(src_width, bits);
+  if (x - x != 0.0) {
+    return false;
+  }
+  double lo, hi; /* the exact bounds, exclusive */
+  if (is_signed) {
+    lo = dst_bits == 32 ? -2147483649.0 : -9223372036854775809.0;
+    hi = dst_bits == 32 ? 2147483648.0 : 9223372036854775808.0;
+  } else {
+    lo = -1.0;
+    hi = dst_bits == 32 ? 4294967296.0 : 18446744073709551616.0;
+  }
+  /* -2^63 - 1 is not a double: it rounds to -2^63, so the bound is "at least" there. */
+  const bool below = dst_bits == 64 && is_signed ? x < lo : x <= lo;
+  if (below || x >= hi) {
+    return false;
+  }
+  if (is_signed) {
+    *out = static_cast<uint64_t>(static_cast<int64_t>(x));
+  } else if (x >= 9223372036854775808.0) {
+    *out = static_cast<uint64_t>(static_cast<int64_t>(x - 9223372036854775808.0)) + (uint64_t{1} << 63);
+  } else {
+    *out = static_cast<uint64_t>(static_cast<int64_t>(x));
+  }
+  if (dst_bits == 32) {
+    *out &= 0xFFFFFFFFu;
+  }
+  return true;
+}
+
+/* The saturating truncation: NaN is 0, out of range is the nearest bound. */
+inline uint64_t trunc_sat(unsigned src_width, uint64_t bits, unsigned dst_bits, bool is_signed) {
+  if (is_nan_bits(src_width, bits)) {
+    return 0;
+  }
+  const double x = as_double(src_width, bits);
+  uint64_t v;
+  if (trunc_in_range(src_width, bits, dst_bits, is_signed, &v)) {
+    return v;
+  }
+  const bool up = x > 0.0;
+  if (is_signed) {
+    if (dst_bits == 32) {
+      return up ? 0x7FFFFFFFull : 0x80000000ull;
+    }
+    return up ? 0x7FFFFFFFFFFFFFFFull : 0x8000000000000000ull;
+  }
+  if (!up) {
+    return 0;
+  }
+  return dst_bits == 32 ? 0xFFFFFFFFull : ~uint64_t{0};
+}
+
+/* One float or conversion operation; false for an operation that is not one. `a` and `b` are the
+ * operand words, `dw` the destination's width in bits, `sw` the width of the source register, and
+ * `src_int` whether it is an integer. A partial truncation out of range is a program error
+ * (`partial` set), reported like a division by zero. */
+inline bool float_op(const GRJIT_Op & op, unsigned dw, unsigned sw, uint64_t a, uint64_t b,
+    bool dst_is_float, uint64_t * out, bool * partial) {
+  const uint64_t sign = sign_bit(dw);
+  switch (op.kind) {
+    case GRJIT_OP_FADD:
+    case GRJIT_OP_FSUB:
+    case GRJIT_OP_FMUL:
+    case GRJIT_OP_FDIV:
+      if (dw == 32) {
+        const float x = f32_of(a), y = f32_of(b);
+        const float r = op.kind == GRJIT_OP_FADD ? x + y
+                        : op.kind == GRJIT_OP_FSUB ? x - y
+                        : op.kind == GRJIT_OP_FMUL ? x * y
+                                                   : x / y;
+        *out = bits_of(r);
+      } else {
+        const double x = f64_of(a), y = f64_of(b);
+        const double r = op.kind == GRJIT_OP_FADD ? x + y
+                         : op.kind == GRJIT_OP_FSUB ? x - y
+                         : op.kind == GRJIT_OP_FMUL ? x * y
+                                                    : x / y;
+        *out = bits_of(r);
+      }
+      return true;
+    case GRJIT_OP_FSQRT:
+      *out = dw == 32 ? bits_of(static_cast<float>(__builtin_sqrt(static_cast<double>(f32_of(a)))))
+                      : bits_of(__builtin_sqrt(f64_of(a)));
+      return true;
+    case GRJIT_OP_FMIN:
+    case GRJIT_OP_FMAX:
+      *out = min_max(op.kind == GRJIT_OP_FMIN, dw, a, b);
+      return true;
+    case GRJIT_OP_FCOPYSIGN:
+      *out = (a & ~sign & (dw == 32 ? 0xFFFFFFFFull : ~uint64_t{0})) | (b & sign);
+      return true;
+    case GRJIT_OP_FNEG:
+      *out = (a ^ sign) & (dw == 32 ? 0xFFFFFFFFull : ~uint64_t{0});
+      return true;
+    case GRJIT_OP_FABS:
+      *out = a & ~sign & (dw == 32 ? 0xFFFFFFFFull : ~uint64_t{0});
+      return true;
+    case GRJIT_OP_FCEIL:
+    case GRJIT_OP_FFLOOR:
+    case GRJIT_OP_FTRUNC:
+    case GRJIT_OP_FNEAREST:
+      *out = round_float(op.kind, dw, a);
+      return true;
+    case GRJIT_OP_CONVERT_S: {
+      const int64_t v = sw == 32 ? sext(32, a) : static_cast<int64_t>(a);
+      const bool neg = v < 0;
+      *out = float_from_integer(dw, neg ? 0 - static_cast<uint64_t>(v) : static_cast<uint64_t>(v), neg);
+      return true;
+    }
+    case GRJIT_OP_CONVERT_U:
+      *out = float_from_integer(dw, sw == 32 ? (a & 0xFFFFFFFFu) : a, false);
+      return true;
+    case GRJIT_OP_TRUNC_S:
+    case GRJIT_OP_TRUNC_U: {
+      uint64_t v = 0;
+      if (!trunc_in_range(sw, a, dw, op.kind == GRJIT_OP_TRUNC_S, &v)) {
+        *partial = true;
+        *out = 0;
+      } else {
+        *out = v;
+      }
+      return true;
+    }
+    case GRJIT_OP_TRUNC_SAT_S:
+    case GRJIT_OP_TRUNC_SAT_U:
+      *out = trunc_sat(sw, a, dw, op.kind == GRJIT_OP_TRUNC_SAT_S);
+      return true;
+    case GRJIT_OP_DEMOTE:
+      *out = bits_of(static_cast<float>(f64_of(a)));
+      return true;
+    case GRJIT_OP_PROMOTE:
+      *out = bits_of(static_cast<double>(f32_of(a)));
+      return true;
+    case GRJIT_OP_REINTERPRET:
+      *out = dw == 32 ? (a & 0xFFFFFFFFu) : a;
+      return true;
+    default:
+      (void)dst_is_float;
+      return false;
+  }
+}
+
+/* A float comparison: the ordered conditions, false for any NaN except NE. */
+inline bool float_compare(GRJIT_Cmp c, unsigned width, uint64_t a, uint64_t b) {
+  if (is_nan_bits(width, a) || is_nan_bits(width, b)) {
+    return c == GRJIT_CMP_NE;
+  }
+  const double x = as_double(width, a), y = as_double(width, b);
+  switch (c) {
+    case GRJIT_CMP_EQ: return x == y;
+    case GRJIT_CMP_NE: return x != y;
+    case GRJIT_CMP_LT: return x < y;
+    case GRJIT_CMP_LE: return x <= y;
+    case GRJIT_CMP_GT: return x > y;
+    default: return x >= y;
+  }
+}
+
 inline void deopt_slots(const GRJIT_Function * f, const GRJIT_Op & op,
     const std::vector<uint64_t> & regs, Result * r) {
   const GRJIT_FrameState * s = grjit_function_frame_state(f, op.state);
@@ -159,8 +501,11 @@ inline Result eval(const GRJIT_Function * f, void * ctx, GRJIT_EntryHook hook,
   }
   std::vector<uint64_t> regs(grjit_function_vreg_count(f), 0);
   std::vector<unsigned> width(regs.size(), 64);
+  std::vector<bool> is_float(regs.size(), false);
   for (size_t v = 0; v < regs.size(); v++) {
-    width[v] = grjit_function_vreg_type(f, static_cast<GRJIT_VReg>(v)) == GRJIT_TYPE_I32 ? 32 : 64;
+    const GRJIT_Type t = grjit_function_vreg_type(f, static_cast<GRJIT_VReg>(v));
+    width[v] = t == GRJIT_TYPE_I32 || t == GRJIT_TYPE_F32 ? 32 : 64;
+    is_float[v] = t == GRJIT_TYPE_F32 || t == GRJIT_TYPE_F64;
   }
   for (size_t i = 0; i < grjit_function_param_count(f); i++) {
     regs[i] = cut(width[i], i < args.size() ? args[i] : 0);
@@ -235,7 +580,49 @@ inline Result eval(const GRJIT_Function * f, void * ctx, GRJIT_EntryHook hook,
           regs[op.dst] = cut(w, v);
           break;
         }
+        case GRJIT_OP_FADD:
+        case GRJIT_OP_FSUB:
+        case GRJIT_OP_FMUL:
+        case GRJIT_OP_FDIV:
+        case GRJIT_OP_FMIN:
+        case GRJIT_OP_FMAX:
+        case GRJIT_OP_FCOPYSIGN:
+        case GRJIT_OP_FNEG:
+        case GRJIT_OP_FABS:
+        case GRJIT_OP_FSQRT:
+        case GRJIT_OP_FCEIL:
+        case GRJIT_OP_FFLOOR:
+        case GRJIT_OP_FTRUNC:
+        case GRJIT_OP_FNEAREST:
+        case GRJIT_OP_CONVERT_S:
+        case GRJIT_OP_CONVERT_U:
+        case GRJIT_OP_TRUNC_S:
+        case GRJIT_OP_TRUNC_U:
+        case GRJIT_OP_TRUNC_SAT_S:
+        case GRJIT_OP_TRUNC_SAT_U:
+        case GRJIT_OP_DEMOTE:
+        case GRJIT_OP_PROMOTE:
+        case GRJIT_OP_REINTERPRET: {
+          const unsigned sw = op.a.kind == GRJIT_OPERAND_VREG ? width[op.a.vreg] : w;
+          bool partial = false;
+          uint64_t v = 0;
+          float_op(op, w, sw, a, b, is_float[op.dst], &v, &partial);
+          if (partial) {
+            r.exit = kPartialFault;
+            return r;
+          }
+          regs[op.dst] = cut(w, v);
+          break;
+        }
         case GRJIT_OP_CMP: {
+          const bool fcmp = (op.a.kind == GRJIT_OPERAND_VREG && is_float[op.a.vreg]) ||
+                            (op.b.kind == GRJIT_OPERAND_VREG && is_float[op.b.vreg]);
+          if (fcmp) {
+            const unsigned cw = op.a.kind == GRJIT_OPERAND_VREG && is_float[op.a.vreg]
+                                    ? width[op.a.vreg] : width[op.b.vreg];
+            regs[op.dst] = float_compare(op.cmp, cw, cut(cw, a), cut(cw, b)) ? 1 : 0;
+            break;
+          }
           /* A comparison of 32-bit registers compares their low 32 bits; the signed ones
            * read them as signed. */
           const bool narrow = (op.a.kind == GRJIT_OPERAND_VREG && width[op.a.vreg] == 32) ||

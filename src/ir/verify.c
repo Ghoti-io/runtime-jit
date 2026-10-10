@@ -34,6 +34,7 @@
 #include "../backend/liveness_internal.h"
 
 #include <inttypes.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -81,6 +82,101 @@ static bool is_i32(GRJIT_Type t) {
  * two spellings of a 32-bit pattern, signed or unsigned. */
 static bool imm32_ok(int64_t imm) {
   return imm >= INT32_MIN && imm <= (int64_t)UINT32_MAX;
+}
+
+/* ---- Floats (spec-runtime-float, story 3) ------------------------------------------------- */
+
+static bool is_float(GRJIT_Type t) {
+  return t == GRJIT_TYPE_F32 || t == GRJIT_TYPE_F64;
+}
+
+/* An `F32` immediate is a 32-bit pattern; unlike an `I32` one it has no second spelling. */
+static bool f32imm_ok(int64_t imm) {
+  return imm >= 0 && imm <= (int64_t)UINT32_MAX;
+}
+
+/* An operand of a float operation of type `want`: a register of exactly that type, or an
+ * immediate that is the operand's bit pattern (a typed float immediate of the same type is
+ * accepted too, where an immediate is). */
+static GRJIT_Result check_float_operand(Verify * v, const char * what,
+    const GRJIT_Operand * o, GRJIT_Type want, GRJIT_BlockId block, size_t index) {
+  if (o->kind == GRJIT_OPERAND_IMM || o->kind == GRJIT_OPERAND_F32_IMM ||
+      o->kind == GRJIT_OPERAND_F64_IMM) {
+    if ((o->kind == GRJIT_OPERAND_F32_IMM && want != GRJIT_TYPE_F32) ||
+        (o->kind == GRJIT_OPERAND_F64_IMM && want != GRJIT_TYPE_F64)) {
+      return refuse(v, GRJIT_ERR_INVALID,
+          "block b%u op %zu: %s is a float immediate of the other width", block, index, what);
+    }
+    if (want == GRJIT_TYPE_F32 && !f32imm_ok(o->imm)) {
+      return refuse(v, GRJIT_ERR_INVALID,
+          "block b%u op %zu: %s immediate does not fit the 32 bits of an f32", block, index,
+          what);
+    }
+    return GRJIT_OK;
+  }
+  if (o->kind != GRJIT_OPERAND_VREG) {
+    return refuse(v, GRJIT_ERR_INVALID,
+        "block b%u op %zu: %s operand is missing", block, index, what);
+  }
+  if (!vreg_ok(v, o->vreg)) {
+    return refuse(v, GRJIT_ERR_INVALID,
+        "block b%u op %zu: %s names v%u, which the function does not have",
+        block, index, what, o->vreg);
+  }
+  if (type_of(v, o->vreg) != want) {
+    return refuse(v, GRJIT_ERR_INVALID,
+        "block b%u op %zu: %s v%u has the wrong type for this operation (a float operation "
+        "takes float operands of its own width)",
+        block, index, what, o->vreg);
+  }
+  return GRJIT_OK;
+}
+
+/* The source of a conversion: a register of exactly one of the types in `a` or `b`. An
+ * immediate has no width to say which conversion it is the source of, so it is refused. */
+static GRJIT_Result check_source_reg(Verify * v, const GRJIT_Operand * o, GRJIT_Type a,
+    GRJIT_Type b, const char * what, GRJIT_BlockId block, size_t index) {
+  if (o->kind != GRJIT_OPERAND_VREG) {
+    return refuse(v, GRJIT_ERR_INVALID,
+        "block b%u op %zu: the source of %s is a register (an immediate has no width to say "
+        "which conversion it is the source of; make it with a const first)",
+        block, index, what);
+  }
+  if (!vreg_ok(v, o->vreg)) {
+    return refuse(v, GRJIT_ERR_INVALID,
+        "block b%u op %zu: the source of %s names v%u, which the function does not have",
+        block, index, what, o->vreg);
+  }
+  GRJIT_Type t = type_of(v, o->vreg);
+  if (t != a && t != b) {
+    return refuse(v, GRJIT_ERR_INVALID,
+        "block b%u op %zu: the source of %s, v%u, has the wrong type", block, index, what,
+        o->vreg);
+  }
+  return GRJIT_OK;
+}
+
+/* An argument of a call: a register of any type, a plain immediate (integer class), or a typed
+ * float immediate whose pattern fits its width. */
+static GRJIT_Result check_call_argument(Verify * v, const GRJIT_Operand * o, size_t i,
+    GRJIT_BlockId block, size_t index) {
+  if (o->kind == GRJIT_OPERAND_VREG) {
+    if (!vreg_ok(v, o->vreg)) {
+      return refuse(v, GRJIT_ERR_INVALID,
+          "block b%u op %zu: argument %zu names v%u, which the function does not have",
+          block, index, i, o->vreg);
+    }
+  } else if (o->kind == GRJIT_OPERAND_F32_IMM) {
+    if (!f32imm_ok(o->imm)) {
+      return refuse(v, GRJIT_ERR_INVALID,
+          "block b%u op %zu: argument %zu is an f32 immediate that does not fit 32 bits", block,
+          index, i);
+    }
+  } else if (o->kind != GRJIT_OPERAND_IMM && o->kind != GRJIT_OPERAND_F64_IMM) {
+    return refuse(v, GRJIT_ERR_INVALID,
+        "block b%u op %zu: argument %zu is missing", block, index, i);
+  }
+  return GRJIT_OK;
 }
 
 /* An operand of an integer operation of width `want` (`I32` or `I64`): a register of
@@ -242,8 +338,25 @@ static GRJIT_Result check_op(
             "block b%u op %zu: const %" PRId64 " does not fit an i32", block, index,
             op->a.imm);
       }
+      if (type_of(v, op->dst) == GRJIT_TYPE_F32 && !f32imm_ok(op->a.imm)) {
+        return refuse(v, GRJIT_ERR_INVALID,
+            "block b%u op %zu: const %" PRId64 " is not the 32-bit pattern of an f32", block,
+            index, op->a.imm);
+      }
       return GRJIT_OK;
     case GRJIT_OP_MOVE:
+      if (vreg_ok(v, op->dst) &&
+          (is_float(type_of(v, op->dst)) ||
+              (op->a.kind == GRJIT_OPERAND_VREG && vreg_ok(v, op->a.vreg) &&
+                  is_float(type_of(v, op->a.vreg))))) {
+        /* A float moves only into a float of its own type. */
+        if (!is_float(type_of(v, op->dst))) {
+          return refuse(v, GRJIT_ERR_INVALID,
+              "block b%u op %zu: move from float v%u to v%u changes the type", block, index,
+              op->a.vreg, op->dst);
+        }
+        return check_float_operand(v, "source", &op->a, type_of(v, op->dst), block, index);
+      }
       if (vreg_ok(v, op->dst) &&
           (is_i32(type_of(v, op->dst)) ||
               (op->a.kind == GRJIT_OPERAND_VREG && is_i32(type_of(v, op->a.vreg))))) {
@@ -285,6 +398,10 @@ static GRJIT_Result check_op(
             "block b%u op %zu: a bitcast cannot make an i32 (it would not be "
             "zero-extended); use wrap",
             block, index);
+      }
+      if (is_float(type_of(v, op->dst))) {
+        return refuse(v, GRJIT_ERR_INVALID,
+            "block b%u op %zu: a bitcast cannot make a float; use reinterpret", block, index);
       }
       return GRJIT_OK;
     case GRJIT_OP_ADD:
@@ -374,6 +491,28 @@ static GRJIT_Result check_op(
             "block b%u op %zu: unknown comparison", block, index);
       }
       bool ref_ok = op->cmp == GRJIT_CMP_EQ || op->cmp == GRJIT_CMP_NE;
+      const bool float_cmp =
+          (op->a.kind == GRJIT_OPERAND_VREG && is_float(type_of(v, op->a.vreg))) ||
+          (op->b.kind == GRJIT_OPERAND_VREG && is_float(type_of(v, op->b.vreg)));
+      if (float_cmp) {
+        /* A float comparison: both register operands are floats of one type (the other
+         * operand may be an immediate, which is that type's bit pattern), the ordered
+         * conditions only, and the result 0 or 1 in an i32 or an i64. */
+        if (op->cmp > GRJIT_CMP_GE) {
+          return refuse(v, GRJIT_ERR_INVALID,
+              "block b%u op %zu: the unsigned conditions do not exist on floats", block, index);
+        }
+        const GRJIT_Operand * reg = op->a.kind == GRJIT_OPERAND_VREG &&
+                                            is_float(type_of(v, op->a.vreg))
+                                        ? &op->a
+                                        : &op->b;
+        const GRJIT_Type want = type_of(v, reg->vreg);
+        if ((r = check_float_operand(v, "left", &op->a, want, block, index)) != GRJIT_OK ||
+            (r = check_float_operand(v, "right", &op->b, want, block, index)) != GRJIT_OK) {
+          return r;
+        }
+        return check_int_dst(v, op, false, block, index);
+      }
       const bool wide32 =
           (op->a.kind == GRJIT_OPERAND_VREG && is_i32(type_of(v, op->a.vreg))) ||
           (op->b.kind == GRJIT_OPERAND_VREG && is_i32(type_of(v, op->b.vreg)));
@@ -409,6 +548,87 @@ static GRJIT_Result check_op(
       }
       return GRJIT_OK;
     }
+    case GRJIT_OP_FADD:
+    case GRJIT_OP_FSUB:
+    case GRJIT_OP_FMUL:
+    case GRJIT_OP_FDIV:
+    case GRJIT_OP_FMIN:
+    case GRJIT_OP_FMAX:
+    case GRJIT_OP_FCOPYSIGN:
+    case GRJIT_OP_FNEG:
+    case GRJIT_OP_FABS:
+    case GRJIT_OP_FSQRT:
+    case GRJIT_OP_FCEIL:
+    case GRJIT_OP_FFLOOR:
+    case GRJIT_OP_FTRUNC:
+    case GRJIT_OP_FNEAREST: {
+      if (!vreg_ok(v, op->dst)) {
+        return refuse(v, GRJIT_ERR_INVALID,
+            "block b%u op %zu: destination v%u does not exist", block, index, op->dst);
+      }
+      const GRJIT_Type t = type_of(v, op->dst);
+      if (!is_float(t)) {
+        return refuse(v, GRJIT_ERR_INVALID,
+            "block b%u op %zu: a float operation writes an f32 or an f64", block, index);
+      }
+      if ((r = check_float_operand(v, "left", &op->a, t, block, index)) != GRJIT_OK) {
+        return r;
+      }
+      if (op->kind <= GRJIT_OP_FCOPYSIGN) {
+        return check_float_operand(v, "right", &op->b, t, block, index);
+      }
+      return GRJIT_OK;
+    }
+    case GRJIT_OP_CONVERT_S:
+    case GRJIT_OP_CONVERT_U:
+      if (!vreg_ok(v, op->dst) || !is_float(type_of(v, op->dst))) {
+        return refuse(v, GRJIT_ERR_INVALID,
+            "block b%u op %zu: convert makes an f32 or an f64", block, index);
+      }
+      return check_source_reg(
+          v, &op->a, GRJIT_TYPE_I32, GRJIT_TYPE_I64, "a convert", block, index);
+    case GRJIT_OP_TRUNC_S:
+    case GRJIT_OP_TRUNC_U:
+    case GRJIT_OP_TRUNC_SAT_S:
+    case GRJIT_OP_TRUNC_SAT_U:
+      if (!vreg_ok(v, op->dst) ||
+          (type_of(v, op->dst) != GRJIT_TYPE_I32 && type_of(v, op->dst) != GRJIT_TYPE_I64)) {
+        return refuse(v, GRJIT_ERR_INVALID,
+            "block b%u op %zu: trunc makes an i32 or an i64", block, index);
+      }
+      return check_source_reg(
+          v, &op->a, GRJIT_TYPE_F32, GRJIT_TYPE_F64, "a trunc", block, index);
+    case GRJIT_OP_DEMOTE:
+    case GRJIT_OP_PROMOTE: {
+      const GRJIT_Type from = op->kind == GRJIT_OP_DEMOTE ? GRJIT_TYPE_F64 : GRJIT_TYPE_F32;
+      const GRJIT_Type to = op->kind == GRJIT_OP_DEMOTE ? GRJIT_TYPE_F32 : GRJIT_TYPE_F64;
+      if (!vreg_ok(v, op->dst) || type_of(v, op->dst) != to) {
+        return refuse(v, GRJIT_ERR_INVALID,
+            "block b%u op %zu: %s makes an %s", block, index,
+            op->kind == GRJIT_OP_DEMOTE ? "demote" : "promote",
+            to == GRJIT_TYPE_F32 ? "f32" : "f64");
+      }
+      return check_source_reg(v, &op->a, from, from,
+          op->kind == GRJIT_OP_DEMOTE ? "a demote" : "a promote", block, index);
+    }
+    case GRJIT_OP_REINTERPRET: {
+      if (!vreg_ok(v, op->dst)) {
+        return refuse(v, GRJIT_ERR_INVALID,
+            "block b%u op %zu: destination v%u does not exist", block, index, op->dst);
+      }
+      GRJIT_Type from;
+      switch (type_of(v, op->dst)) {
+        case GRJIT_TYPE_I32: from = GRJIT_TYPE_F32; break;
+        case GRJIT_TYPE_F32: from = GRJIT_TYPE_I32; break;
+        case GRJIT_TYPE_I64: from = GRJIT_TYPE_F64; break;
+        case GRJIT_TYPE_F64: from = GRJIT_TYPE_I64; break;
+        default:
+          return refuse(v, GRJIT_ERR_INVALID,
+              "block b%u op %zu: reinterpret is between i32 and f32, or i64 and f64", block,
+              index);
+      }
+      return check_source_reg(v, &op->a, from, from, "a reinterpret", block, index);
+    }
     case GRJIT_OP_LOAD:
     case GRJIT_OP_LOAD_S:
     case GRJIT_OP_STORE: {
@@ -427,6 +647,17 @@ static GRJIT_Result check_op(
       }
       if (op->kind == GRJIT_OP_STORE) {
         if (op->b.kind == GRJIT_OPERAND_VREG && vreg_ok(v, op->b.vreg) &&
+            is_float(type_of(v, op->b.vreg))) {
+          /* A float is stored as its bits: exactly its own width. */
+          if (op->width != (type_of(v, op->b.vreg) == GRJIT_TYPE_F32 ? 32u : 64u)) {
+            return refuse(v, GRJIT_ERR_INVALID,
+                "block b%u op %zu: a float is stored at its own width (32 for an f32, 64 for "
+                "an f64)",
+                block, index);
+          }
+          return GRJIT_OK;
+        }
+        if (op->b.kind == GRJIT_OPERAND_VREG && vreg_ok(v, op->b.vreg) &&
             type_of(v, op->b.vreg) == GRJIT_TYPE_REF) {
           return refuse(v, GRJIT_ERR_INVALID,
               "block b%u op %zu: a store of a reference is not expressible; "
@@ -441,6 +672,14 @@ static GRJIT_Result check_op(
       }
       if ((r = check_dst(v, op, false, block, index)) != GRJIT_OK) {
         return r;
+      }
+      if (is_float(type_of(v, op->dst)) &&
+          (op->kind == GRJIT_OP_LOAD_S ||
+              op->width != (type_of(v, op->dst) == GRJIT_TYPE_F32 ? 32u : 64u))) {
+        return refuse(v, GRJIT_ERR_INVALID,
+            "block b%u op %zu: a float register takes a zero-extending load of exactly its "
+            "own width (32 bits for an f32, 64 for an f64)",
+            block, index);
       }
       if (is_i32(type_of(v, op->dst)) && (op->kind == GRJIT_OP_LOAD_S || op->width == 64)) {
         return refuse(v, GRJIT_ERR_INVALID,
@@ -468,17 +707,8 @@ static GRJIT_Result check_op(
             block, index);
       }
       for (size_t i = 0; i < op->arg_count; i++) {
-        const GRJIT_Operand * o = &op->args[i];
-        if (o->kind == GRJIT_OPERAND_VREG) {
-          if (!vreg_ok(v, o->vreg)) {
-            return refuse(v, GRJIT_ERR_INVALID,
-                "block b%u op %zu: argument %zu names v%u, which the "
-                "function does not have",
-                block, index, i, o->vreg);
-          }
-        } else if (o->kind != GRJIT_OPERAND_IMM) {
-          return refuse(v, GRJIT_ERR_INVALID,
-              "block b%u op %zu: argument %zu is missing", block, index, i);
+        if ((r = check_call_argument(v, &op->args[i], i, block, index)) != GRJIT_OK) {
+          return r;
         }
       }
       if (op->dst != GRJIT_NO_VREG &&
@@ -563,17 +793,8 @@ static GRJIT_Result check_op(
         }
       }
       for (size_t i = 0; i < op->arg_count; i++) {
-        const GRJIT_Operand * o = &op->args[i];
-        if (o->kind == GRJIT_OPERAND_VREG) {
-          if (!vreg_ok(v, o->vreg)) {
-            return refuse(v, GRJIT_ERR_INVALID,
-                "block b%u op %zu: argument %zu names v%u, which the "
-                "function does not have",
-                block, index, i, o->vreg);
-          }
-        } else if (o->kind != GRJIT_OPERAND_IMM) {
-          return refuse(v, GRJIT_ERR_INVALID,
-              "block b%u op %zu: argument %zu is missing", block, index, i);
+        if ((r = check_call_argument(v, &op->args[i], i, block, index)) != GRJIT_OK) {
+          return r;
         }
       }
       if (op->dst != GRJIT_NO_VREG &&
@@ -956,6 +1177,15 @@ static GRJIT_Result check_derived(Verify * v) {
  * again" is a later tick of definition, so one comparison answers it. A constant divisor is
  * judged as it stands: zero is refused, and a constant that is not -1 cannot overflow. */
 
+/* What the range guards of a float register proved about it: every value that got past them lies
+ * in the interval `lo .. hi` (an end is open when the compare was strict). The ticks are those of
+ * the partial analysis below, so an assignment of the register retires the interval. */
+typedef struct Range {
+  uint64_t tick; /* when the latest fact was recorded; 0 if none */
+  double lo, hi;
+  bool lo_open, hi_open;
+} Range;
+
 typedef struct Partial {
   uint64_t * tick;       /* per register: the tick of its latest definition anywhere */
   const GRJIT_Op ** def; /* per register: the operation of that definition */
@@ -963,6 +1193,7 @@ typedef struct Partial {
   uint64_t * no_ovf;     /* per divisor: the tick of the guard that proved `a / b` cannot overflow */
   GRJIT_VReg * ovf_a;    /* ... and the dividend it was about */
   uint64_t * not_min;    /* per dividend: the tick of a guard that proved it is not MIN */
+  Range * range;  /* per float register: the interval its range guards proved */
   uint64_t now;
   uint64_t block_start;
 } Partial;
@@ -970,6 +1201,10 @@ typedef struct Partial {
 static bool is_partial_op(GRJIT_OpKind k) {
   return k == GRJIT_OP_DIV_S || k == GRJIT_OP_DIV_U || k == GRJIT_OP_REM_S ||
          k == GRJIT_OP_REM_U;
+}
+
+static bool is_trunc_op(GRJIT_OpKind k) {
+  return k == GRJIT_OP_TRUNC_S || k == GRJIT_OP_TRUNC_U;
 }
 
 static bool imm_is(const GRJIT_Operand * o, GRJIT_Type width, int64_t sixty_four,
@@ -1050,6 +1285,100 @@ static bool joined_flags(const Verify * v, const Partial * p, const GRJIT_Op * j
   return false;
 }
 
+/* A float compare of a register against an immediate, as a bound on the register: `x > k` or
+ * `x >= k` is a lower bound, `x < k` or `x <= k` an upper one, and the mirrored spellings
+ * (`k < x`) are the same. The register must not have been assigned since the compare at `at`.
+ * A NaN bound, an equality and a compare of anything else are not bounds. */
+static bool float_bound(const Verify * v, const Partial * p, const GRJIT_Op * m, uint64_t at,
+    GRJIT_VReg * x, bool * lower, double * k, bool * open) {
+  GRJIT_Cmp c = m->cmp;
+  const GRJIT_Operand * r;
+  const GRJIT_Operand * im;
+  if (vreg_operand(&m->a) && m->b.kind == GRJIT_OPERAND_IMM) {
+    r = &m->a;
+    im = &m->b;
+  } else if (vreg_operand(&m->b) && m->a.kind == GRJIT_OPERAND_IMM) {
+    r = &m->b;
+    im = &m->a;
+    c = c == GRJIT_CMP_LT ? GRJIT_CMP_GT
+        : c == GRJIT_CMP_GT ? GRJIT_CMP_LT
+        : c == GRJIT_CMP_LE ? GRJIT_CMP_GE
+        : c == GRJIT_CMP_GE ? GRJIT_CMP_LE : c;
+  } else {
+    return false;
+  }
+  if (!vreg_ok(v, r->vreg) || !is_float(type_of(v, r->vreg)) || p->tick[r->vreg] >= at) {
+    return false;
+  }
+  double val;
+  if (type_of(v, r->vreg) == GRJIT_TYPE_F32) {
+    uint32_t bits = (uint32_t)im->imm;
+    float f;
+    memcpy(&f, &bits, sizeof f);
+    val = (double)f;
+  } else {
+    uint64_t bits = (uint64_t)im->imm;
+    memcpy(&val, &bits, sizeof val);
+  }
+  if (val != val) {
+    return false;
+  }
+  switch (c) {
+    case GRJIT_CMP_GT: *lower = true; *open = true; break;
+    case GRJIT_CMP_GE: *lower = true; *open = false; break;
+    case GRJIT_CMP_LT: *lower = false; *open = true; break;
+    case GRJIT_CMP_LE: *lower = false; *open = false; break;
+    default: return false;
+  }
+  *x = r->vreg;
+  *k = val;
+  return true;
+}
+
+/* The bounds a passed guard on `c` proves: `c` is a float compare against an immediate, or an AND
+ * of such (and of ANDs of them), all defined in this block with nothing they read assigned since.
+ * A bound narrows the interval already proved for the register, if that one is still standing. */
+static void collect_bounds(const Verify * v, Partial * p, GRJIT_VReg c, uint64_t before,
+    unsigned depth, uint64_t now) {
+  if (depth > 4 || !vreg_ok(v, c) || !defined_here(p, c) || p->tick[c] >= before) {
+    return;
+  }
+  const GRJIT_Op * m = p->def[c];
+  const uint64_t at = p->tick[c];
+  if (m->kind == GRJIT_OP_AND) {
+    if (vreg_operand(&m->a)) {
+      collect_bounds(v, p, m->a.vreg, at, depth + 1, now);
+    }
+    if (vreg_operand(&m->b)) {
+      collect_bounds(v, p, m->b.vreg, at, depth + 1, now);
+    }
+    return;
+  }
+  GRJIT_VReg x;
+  bool lower, open;
+  double k;
+  if (m->kind != GRJIT_OP_CMP || !float_bound(v, p, m, at, &x, &lower, &k, &open)) {
+    return;
+  }
+  Range * r = &p->range[x];
+  if (!(r->tick != 0 && r->tick >= p->block_start && r->tick > p->tick[x])) {
+    r->lo = -INFINITY;
+    r->hi = INFINITY;
+    r->lo_open = true;
+    r->hi_open = true;
+  }
+  if (lower) {
+    if (k > r->lo || (k == r->lo && open)) {
+      r->lo = k;
+      r->lo_open = open;
+    }
+  } else if (k < r->hi || (k == r->hi && open)) {
+    r->hi = k;
+    r->hi_open = open;
+  }
+  r->tick = now;
+}
+
 static void record_guard(const Verify * v, Partial * p, const GRJIT_Operand * cond) {
   if (!vreg_operand(cond) || !vreg_ok(v, cond->vreg)) {
     return;
@@ -1057,6 +1386,7 @@ static void record_guard(const Verify * v, Partial * p, const GRJIT_Operand * co
   const GRJIT_VReg c = cond->vreg;
   const uint64_t now = p->now;
   p->nonzero[c] = now; /* the guard passed: its operand is not zero */
+  collect_bounds(v, p, c, now, 0, now);
   if (!defined_here(p, c)) {
     return;
   }
@@ -1154,12 +1484,96 @@ static GRJIT_Result check_one_partial(Verify * v, const Partial * p, const GRJIT
   return GRJIT_OK;
 }
 
+/* The exact bounds of a float to integer truncation, as reals: the operand must lie strictly
+ * between them for the truncated value to fit the destination. `-2^63 - 1` is no double, so for
+ * the signed 64-bit lower bound the double just above it, `-2^63`, stands for it: a closed bound
+ * there is exact, and anything lower is wider. */
+static void trunc_bounds(bool is_unsigned, bool wide, double * lo, bool * lo_next_below, double * hi) {
+  *lo_next_below = false;
+  if (is_unsigned) {
+    *lo = -1.0;
+    *hi = wide ? 18446744073709551616.0 : 4294967296.0;
+  } else if (wide) {
+    *lo = -9223372036854775808.0;
+    *lo_next_below = true;
+    *hi = 9223372036854775808.0;
+  } else {
+    *lo = -2147483649.0;
+    *hi = 2147483648.0;
+  }
+}
+
+static const char * trunc_name(const Verify * v, const GRJIT_Op * op) {
+  const bool wide = type_of(v, op->dst) == GRJIT_TYPE_I64;
+  const bool f32 = type_of(v, op->a.vreg) == GRJIT_TYPE_F32;
+  const bool uns = op->kind == GRJIT_OP_TRUNC_U;
+  return wide ? (f32 ? (uns ? "i64.trunc_f32_u" : "i64.trunc_f32_s")
+                     : (uns ? "i64.trunc_f64_u" : "i64.trunc_f64_s"))
+              : (f32 ? (uns ? "i32.trunc_f32_u" : "i32.trunc_f32_s")
+                     : (uns ? "i32.trunc_f64_u" : "i32.trunc_f64_s"));
+}
+
+static GRJIT_Result check_one_trunc(Verify * v, const Partial * p, const GRJIT_Op * op,
+    GRJIT_BlockId block, size_t index) {
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 44
+  /* Planted defect 44 (tests only): the verifier does not require the range guard of a
+   * truncation. The negative tests and the Wasm harness must catch it. */
+  (void)v; (void)p; (void)op; (void)block; (void)index;
+  return GRJIT_OK;
+#else
+  const GRJIT_VReg x = op->a.vreg;
+  double lo, hi;
+  bool next_below;
+  trunc_bounds(op->kind == GRJIT_OP_TRUNC_U, type_of(v, op->dst) == GRJIT_TYPE_I64, &lo,
+      &next_below, &hi);
+  if (defined_here(p, x) && p->def[x]->kind == GRJIT_OP_CONST) {
+    /* A constant operand is judged as it stands. */
+    double val;
+    const int64_t imm = p->def[x]->a.imm;
+    if (type_of(v, x) == GRJIT_TYPE_F32) {
+      uint32_t bits = (uint32_t)imm;
+      float f;
+      memcpy(&f, &bits, sizeof f);
+      val = (double)f;
+    } else {
+      uint64_t bits = (uint64_t)imm;
+      memcpy(&val, &bits, sizeof val);
+    }
+    if (val == val && (next_below ? val >= lo : val > lo) && val < hi) {
+      return GRJIT_OK;
+    }
+    return refuse(v, GRJIT_ERR_INVALID,
+        "block b%u op %zu: %s of the constant v%u, which is a NaN or does not truncate to a "
+        "value of the destination (a trap, to be written as one)",
+        block, index, trunc_name(v, op), x);
+  }
+  const Range * r = &p->range[x];
+  const bool standing = r->tick != 0 && r->tick >= p->block_start && r->tick > p->tick[x];
+  bool ok = false;
+  if (standing) {
+    const bool lo_ok = r->lo_open ? r->lo >= lo : (next_below ? r->lo >= lo : r->lo > lo);
+    const bool hi_ok = r->hi_open ? r->hi <= hi : r->hi < hi;
+    ok = lo_ok && hi_ok;
+  }
+  if (!ok) {
+    return refuse(v, GRJIT_ERR_INVALID,
+        "block b%u op %zu: %s needs, earlier in the same block and with v%u not assigned in "
+        "between, a range guard: a GUARD of an AND of an ordered lower compare and an ordered "
+        "upper compare of v%u against immediates no wider than the exact bounds (%s%.0f and "
+        "< %.0f), and the NaN guard alone is not that%s",
+        block, index, trunc_name(v, op), x, x, next_below ? ">= " : "> ", lo, hi,
+        standing ? " (the guard there is wider than the exact bounds)" : "");
+  }
+  return GRJIT_OK;
+#endif
+}
+
 static GRJIT_Result check_partial(Verify * v) {
   const GRJIT_Function * f = v->f;
   bool any = false;
   for (size_t b = 0; b < f->block_count && !any; b++) {
     for (size_t i = 0; i < f->blocks[b].count; i++) {
-      if (is_partial_op(f->blocks[b].ops[i].kind)) {
+      if (is_partial_op(f->blocks[b].ops[i].kind) || is_trunc_op(f->blocks[b].ops[i].kind)) {
         any = true;
         break;
       }
@@ -1180,10 +1594,12 @@ static GRJIT_Result check_partial(Verify * v) {
   uint64_t * words = a->calloc_fn(a->ctx, n == 0 ? 1 : n, 4 * sizeof *words);
   const GRJIT_Op ** defs = a->calloc_fn(a->ctx, n == 0 ? 1 : n, sizeof *defs);
   GRJIT_VReg * dividends = a->calloc_fn(a->ctx, n == 0 ? 1 : n, sizeof *dividends);
-  if (words == NULL || defs == NULL || dividends == NULL) {
+  Range * ranges = a->calloc_fn(a->ctx, n == 0 ? 1 : n, sizeof *ranges);
+  if (words == NULL || defs == NULL || dividends == NULL || ranges == NULL) {
     a->free_fn(a->ctx, words);
     a->free_fn(a->ctx, defs);
     a->free_fn(a->ctx, dividends);
+    a->free_fn(a->ctx, ranges);
     return GRJIT_ERR_OOM;
   }
   p.tick = words;
@@ -1192,6 +1608,7 @@ static GRJIT_Result check_partial(Verify * v) {
   p.not_min = words + 3 * n;
   p.def = defs;
   p.ovf_a = dividends;
+  p.range = ranges;
   GRJIT_Result result = GRJIT_OK;
   for (size_t b = 0; b < f->block_count && result == GRJIT_OK; b++) {
     const GRJIT_BlockInfo * blk = &f->blocks[b];
@@ -1201,6 +1618,8 @@ static GRJIT_Result check_partial(Verify * v) {
       p.now++;
       if (is_partial_op(op->kind)) {
         result = check_one_partial(v, &p, op, (GRJIT_BlockId)b, i);
+      } else if (is_trunc_op(op->kind)) {
+        result = check_one_trunc(v, &p, op, (GRJIT_BlockId)b, i);
       } else if (op->kind == GRJIT_OP_GUARD) {
         record_guard(v, &p, &op->a);
       }
@@ -1214,6 +1633,7 @@ static GRJIT_Result check_partial(Verify * v) {
   a->free_fn(a->ctx, words);
   a->free_fn(a->ctx, defs);
   a->free_fn(a->ctx, dividends);
+  a->free_fn(a->ctx, ranges);
   return result;
 }
 

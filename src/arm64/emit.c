@@ -735,6 +735,29 @@ static void emit_op(GRJIT_A64Emit * e, const GRJIT_Op * op, size_t block) {
     case GRJIT_OP_DIV_U:
     case GRJIT_OP_REM_S:
     case GRJIT_OP_REM_U:
+    case GRJIT_OP_FADD:
+    case GRJIT_OP_FSUB:
+    case GRJIT_OP_FMUL:
+    case GRJIT_OP_FDIV:
+    case GRJIT_OP_FMIN:
+    case GRJIT_OP_FMAX:
+    case GRJIT_OP_FCOPYSIGN:
+    case GRJIT_OP_FNEG:
+    case GRJIT_OP_FABS:
+    case GRJIT_OP_FSQRT:
+    case GRJIT_OP_FCEIL:
+    case GRJIT_OP_FFLOOR:
+    case GRJIT_OP_FTRUNC:
+    case GRJIT_OP_FNEAREST:
+    case GRJIT_OP_CONVERT_S:
+    case GRJIT_OP_CONVERT_U:
+    case GRJIT_OP_TRUNC_S:
+    case GRJIT_OP_TRUNC_U:
+    case GRJIT_OP_TRUNC_SAT_S:
+    case GRJIT_OP_TRUNC_SAT_U:
+    case GRJIT_OP_DEMOTE:
+    case GRJIT_OP_PROMOTE:
+    case GRJIT_OP_REINTERPRET:
       /* Not yet (story 5 of spec-runtime-float); the function-wide check in
        * grjit_a64_emit_function refuses first, and this arm keeps the refusal in force
        * if that check is ever narrowed. */

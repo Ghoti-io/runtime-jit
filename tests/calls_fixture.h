@@ -80,7 +80,9 @@ enum class K {
   LOAD,      // d = the 64-bit word at the address in a (a PTR or REF)
   TAILCALL,  // return fn(args...): replaces this frame, through fn's entry slot
   TAILCALLP, // the same through the code pointer in local a
-  NATIVE     // d = native[native](args...): a registered native, called from either tier
+  NATIVE,    // d = native[native](args...): a registered native, called from either tier
+  FADD,      // d = a + b, floats of d's type (F32 or F64; spec-runtime-float)
+  FMUL       // d = a * b, floats of d's type
 };
 
 struct Ins {
@@ -816,6 +818,8 @@ inline GRJIT_Function * Engine::build_ir(int fn) {
       case K::SUB: b.bin(GRJIT_OP_SUB, in.d, V(in.a), V(in.b)); break;
       case K::MUL: b.bin(GRJIT_OP_MUL, in.d, V(in.a), V(in.b)); break;
       case K::AND: b.bin(GRJIT_OP_AND, in.d, V(in.a), V(in.b)); break;
+      case K::FADD: b.bin(GRJIT_OP_FADD, in.d, V(in.a), V(in.b)); break;
+      case K::FMUL: b.bin(GRJIT_OP_FMUL, in.d, V(in.a), V(in.b)); break;
       case K::LT: b.cmp(GRJIT_CMP_LT, in.d, V(in.a), V(in.b)); break;
       case K::EQ: b.cmp(GRJIT_CMP_EQ, in.d, V(in.a), V(in.b)); break;
       case K::BRZ: b.br_if(V(in.a), blk[pc + 1], blk[in.t]); terminated = true; break;
@@ -1524,6 +1528,32 @@ inline void Engine::interpret(Outcome & out) {
       case K::SUB: wr(S, fn, in.d, L(in.a) - L(in.b)); S[0] = pc + 1; break;
       case K::MUL: wr(S, fn, in.d, L(in.a) * L(in.b)); S[0] = pc + 1; break;
       case K::AND: wr(S, fn, in.d, L(in.a) & L(in.b)); S[0] = pc + 1; break;
+      case K::FADD:
+      case K::FMUL: {
+        /* Floats of the destination's type, as bit words (an f32 zero-extended). */
+        const bool wide = F.type[static_cast<size_t>(in.d)] == GRJIT_TYPE_F64;
+        u64 r;
+        if (wide) {
+          double x, y;
+          u64 xa = L(in.a), ya = L(in.b);
+          std::memcpy(&x, &xa, sizeof x);
+          std::memcpy(&y, &ya, sizeof y);
+          double z = in.k == K::FADD ? x + y : x * y;
+          std::memcpy(&r, &z, sizeof r);
+        } else {
+          float x, y;
+          uint32_t xa = static_cast<uint32_t>(L(in.a)), ya = static_cast<uint32_t>(L(in.b));
+          std::memcpy(&x, &xa, sizeof x);
+          std::memcpy(&y, &ya, sizeof y);
+          float z = in.k == K::FADD ? x + y : x * y;
+          uint32_t zb;
+          std::memcpy(&zb, &z, sizeof zb);
+          r = zb;
+        }
+        wr(S, fn, in.d, r);
+        S[0] = pc + 1;
+        break;
+      }
       case K::LT:
         wr(S, fn, in.d, static_cast<int64_t>(L(in.a)) < static_cast<int64_t>(L(in.b)) ? 1 : 0);
         S[0] = pc + 1;

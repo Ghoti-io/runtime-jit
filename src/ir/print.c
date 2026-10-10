@@ -64,6 +64,10 @@ static const char * type_name(GRJIT_Type t) {
       return "ptr";
     case GRJIT_TYPE_I32:
       return "i32";
+    case GRJIT_TYPE_F32:
+      return "f32";
+    case GRJIT_TYPE_F64:
+      return "f64";
     case GRJIT_TYPE_RESERVED_NO_RESULT:
     case GRJIT_TYPE_COUNT:
       break;
@@ -77,7 +81,11 @@ static const char * op_name(GRJIT_OpKind k) {
       "load_s", "store", "call", "poll", "guard", "br", "br_if", "ret",
       "bitcast", "call_slot", "call_ptr", "tail_call_slot", "tail_call_ptr",
       "call_native", "clz", "ctz", "popcnt", "rotl", "rotr", "ext8_s", "ext16_s",
-      "ext32_s", "div_s", "div_u", "rem_s", "rem_u", "wrap", "extend_s", "extend_u"};
+      "ext32_s", "div_s", "div_u", "rem_s", "rem_u", "wrap", "extend_s", "extend_u",
+      /* The float operations: the type prefix (`f32.`, `i64.`) is put before the name. */
+      "add", "sub", "mul", "div", "min", "max", "copysign", "neg", "abs", "sqrt", "ceil",
+      "floor", "trunc", "nearest", "convert_i_s", "convert_i_u", "trunc_f_s", "trunc_f_u",
+      "trunc_sat_f_s", "trunc_sat_f_u", "demote_f64", "promote_f32", "reinterpret"};
   _Static_assert(sizeof names / sizeof names[0] == (size_t)GRJIT_OP_COUNT,
       "one name for every operation");
   return (unsigned)k < (unsigned)GRJIT_OP_COUNT ? names[k] : "?";
@@ -103,10 +111,35 @@ static void put_operand(Out * o, const GRJIT_Operand * a) {
     case GRJIT_OPERAND_IMM:
       put(o, "#%" PRId64, a->imm);
       break;
+    case GRJIT_OPERAND_F32_IMM:
+      put(o, "#f32:0x%08" PRIx64, (uint64_t)a->imm);
+      break;
+    case GRJIT_OPERAND_F64_IMM:
+      put(o, "#f64:0x%016" PRIx64, (uint64_t)a->imm);
+      break;
     default:
       put(o, "_");
       break;
   }
+}
+
+/* An operand of a float operation: an immediate is the operand's bit pattern, printed as hex. */
+static void put_float_operand(Out * o, const GRJIT_Operand * a) {
+  if (a->kind == GRJIT_OPERAND_IMM) {
+    put(o, "#0x%" PRIx64, (uint64_t)a->imm);
+  } else {
+    put_operand(o, a);
+  }
+}
+
+static bool vreg_is_float(const GRJIT_Function * f, const GRJIT_Operand * a) {
+  return a->kind == GRJIT_OPERAND_VREG && a->vreg < f->vreg_count &&
+         (f->vregs[a->vreg].type == GRJIT_TYPE_F32 || f->vregs[a->vreg].type == GRJIT_TYPE_F64);
+}
+
+static GRJIT_Type type_of_operand(const GRJIT_Function * f, const GRJIT_Operand * a) {
+  return a->kind == GRJIT_OPERAND_VREG && a->vreg < f->vreg_count ? f->vregs[a->vreg].type
+                                                                  : GRJIT_TYPE_COUNT;
 }
 
 static void put_state(Out * o, const GRJIT_Function * f, uint32_t index) {
@@ -142,6 +175,41 @@ static void put_mem(Out * o, const GRJIT_Op * op) {
   put(o, "]");
 }
 
+/* The name of a float operation as WebAssembly spells it: `f64.add`, `i32.trunc_f64_s`,
+ * `f32.convert_i64_u`, `i64.reinterpret_f64`. */
+static void put_float_op_name(Out * o, const GRJIT_Function * f, const GRJIT_Op * op) {
+  const GRJIT_Type dst = op->dst < f->vreg_count ? f->vregs[op->dst].type : GRJIT_TYPE_COUNT;
+  const GRJIT_Type src = type_of_operand(f, &op->a);
+  const char * d = type_name(dst);
+  const char * s = type_name(src);
+  switch (op->kind) {
+    case GRJIT_OP_CONVERT_S:
+    case GRJIT_OP_CONVERT_U:
+      put(o, "%s.convert_%s_%c", d, s, op->kind == GRJIT_OP_CONVERT_S ? 's' : 'u');
+      break;
+    case GRJIT_OP_TRUNC_S:
+    case GRJIT_OP_TRUNC_U:
+      put(o, "%s.trunc_%s_%c", d, s, op->kind == GRJIT_OP_TRUNC_S ? 's' : 'u');
+      break;
+    case GRJIT_OP_TRUNC_SAT_S:
+    case GRJIT_OP_TRUNC_SAT_U:
+      put(o, "%s.trunc_sat_%s_%c", d, s, op->kind == GRJIT_OP_TRUNC_SAT_S ? 's' : 'u');
+      break;
+    case GRJIT_OP_DEMOTE:
+      put(o, "f32.demote_f64");
+      break;
+    case GRJIT_OP_PROMOTE:
+      put(o, "f64.promote_f32");
+      break;
+    case GRJIT_OP_REINTERPRET:
+      put(o, "%s.reinterpret_%s", d, s);
+      break;
+    default:
+      put(o, "%s.%s", d, op_name(op->kind));
+      break;
+  }
+}
+
 static void put_op(Out * o, const GRJIT_Function * f, const GRJIT_Op * op) {
   put(o, "  ");
   GRJIT_VReg def = grjit_op_def(op);
@@ -150,7 +218,49 @@ static void put_op(Out * o, const GRJIT_Function * f, const GRJIT_Op * op) {
   }
   switch (op->kind) {
     case GRJIT_OP_CONST:
-      put(o, "const %" PRId64, op->a.imm);
+      if (def != GRJIT_NO_VREG && def < f->vreg_count &&
+          (f->vregs[def].type == GRJIT_TYPE_F32 || f->vregs[def].type == GRJIT_TYPE_F64)) {
+        put(o, "const 0x%" PRIx64, (uint64_t)op->a.imm);
+      } else {
+        put(o, "const %" PRId64, op->a.imm);
+      }
+      break;
+    case GRJIT_OP_FADD:
+    case GRJIT_OP_FSUB:
+    case GRJIT_OP_FMUL:
+    case GRJIT_OP_FDIV:
+    case GRJIT_OP_FMIN:
+    case GRJIT_OP_FMAX:
+    case GRJIT_OP_FCOPYSIGN:
+      put_float_op_name(o, f, op);
+      put(o, " ");
+      put_float_operand(o, &op->a);
+      put(o, ", ");
+      put_float_operand(o, &op->b);
+      break;
+    case GRJIT_OP_FNEG:
+    case GRJIT_OP_FABS:
+    case GRJIT_OP_FSQRT:
+    case GRJIT_OP_FCEIL:
+    case GRJIT_OP_FFLOOR:
+    case GRJIT_OP_FTRUNC:
+    case GRJIT_OP_FNEAREST:
+      put_float_op_name(o, f, op);
+      put(o, " ");
+      put_float_operand(o, &op->a);
+      break;
+    case GRJIT_OP_CONVERT_S:
+    case GRJIT_OP_CONVERT_U:
+    case GRJIT_OP_TRUNC_S:
+    case GRJIT_OP_TRUNC_U:
+    case GRJIT_OP_TRUNC_SAT_S:
+    case GRJIT_OP_TRUNC_SAT_U:
+    case GRJIT_OP_DEMOTE:
+    case GRJIT_OP_PROMOTE:
+    case GRJIT_OP_REINTERPRET:
+      put_float_op_name(o, f, op);
+      put(o, " ");
+      put_operand(o, &op->a);
       break;
     case GRJIT_OP_MOVE:
     case GRJIT_OP_BITCAST:
@@ -166,9 +276,24 @@ static void put_op(Out * o, const GRJIT_Function * f, const GRJIT_Op * op) {
     case GRJIT_OP_EXTEND_S:
     case GRJIT_OP_EXTEND_U:
       put(o, "%s ", op_name(op->kind));
-      put_operand(o, &op->a);
+      if (op->kind == GRJIT_OP_MOVE && def != GRJIT_NO_VREG && def < f->vreg_count &&
+          (f->vregs[def].type == GRJIT_TYPE_F32 || f->vregs[def].type == GRJIT_TYPE_F64)) {
+        put_float_operand(o, &op->a);
+      } else {
+        put_operand(o, &op->a);
+      }
       break;
     case GRJIT_OP_CMP:
+      if (vreg_is_float(f, &op->a) || vreg_is_float(f, &op->b)) {
+        /* A float comparison names the width, and its immediate is a bit pattern. */
+        put(o, "cmp.%s.%s ", type_name(vreg_is_float(f, &op->a) ? type_of_operand(f, &op->a)
+                                                                  : type_of_operand(f, &op->b)),
+            cmp_name(op->cmp));
+        put_float_operand(o, &op->a);
+        put(o, ", ");
+        put_float_operand(o, &op->b);
+        break;
+      }
       put(o, "cmp.%s ", cmp_name(op->cmp));
       put_operand(o, &op->a);
       put(o, ", ");

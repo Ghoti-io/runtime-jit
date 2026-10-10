@@ -101,8 +101,10 @@ static void store_result(GRJIT_Emit * e, GRJIT_VReg dst, GRJIT_Reg r) {
   grjit_asm_store64(&e->as, GRJIT_RBP, grjit_emit_slot(dst), r);
 }
 
+/* A register kept zero-extended in its word: an i32, and an f32 for the same reason (its bits
+ * are 32; a word that arrives from a caller, a callee or memory is cut to them). */
 static bool dst_is_i32_reg(const GRJIT_Emit * e, GRJIT_VReg v) {
-  return e->c.f->vregs[v].type == GRJIT_TYPE_I32;
+  return e->c.f->vregs[v].type == GRJIT_TYPE_I32 || e->c.f->vregs[v].type == GRJIT_TYPE_F32;
 }
 
 static GRJIT_Cond cmp_cond(GRJIT_Cmp c) {
@@ -218,6 +220,79 @@ static void emit_binary(GRJIT_Emit * e, const GRJIT_Op * op) {
   store_result(e, op->dst, GRJIT_RAX);
 }
 
+/* ---- Float arguments of a helper call (SysV; spec-runtime-float, story 3) ---------------------
+ *
+ * The integer-class arguments take `rdi rsi rdx rcx r8 r9` in order among themselves, the float
+ * ones `xmm0` to `xmm7` in order among themselves. An f32 is in the low 32 bits of its register,
+ * an f64 in its 64; a typed immediate goes through `rax`, which the call loads over afterwards. */
+
+static bool operand_is_float(const GRJIT_Emit * e, const GRJIT_Operand * o) {
+  if (o->kind == GRJIT_OPERAND_F32_IMM || o->kind == GRJIT_OPERAND_F64_IMM) {
+    return true;
+  }
+  if (o->kind != GRJIT_OPERAND_VREG) {
+    return false;
+  }
+  const GRJIT_Type t = e->c.f->vregs[o->vreg].type;
+  return t == GRJIT_TYPE_F32 || t == GRJIT_TYPE_F64;
+}
+
+static bool operand_is_double(const GRJIT_Emit * e, const GRJIT_Operand * o) {
+  return o->kind == GRJIT_OPERAND_F64_IMM ||
+         (o->kind == GRJIT_OPERAND_VREG && e->c.f->vregs[o->vreg].type == GRJIT_TYPE_F64);
+}
+
+static bool call_has_float(const GRJIT_Emit * e, const GRJIT_Op * op) {
+  for (size_t i = 0; i < op->arg_count; i++) {
+    if (operand_is_float(e, &op->args[i])) {
+      return true;
+    }
+  }
+  if (op->dst != GRJIT_NO_VREG) {
+    const GRJIT_Type t = e->c.f->vregs[op->dst].type;
+    return t == GRJIT_TYPE_F32 || t == GRJIT_TYPE_F64;
+  }
+  return false;
+}
+
+static void emit_float_arguments(GRJIT_Emit * e, const GRJIT_Op * op) {
+  GRJIT_Asm * a = &e->as;
+  if (e->win64) {
+    /* Win64 numbers its four argument slots jointly and shadows the float ones: story 5. */
+    e->c.error = GRJIT_ERR_UNSUPPORTED;
+    return;
+  }
+  unsigned integer = 0;
+  unsigned floating = 0;
+  for (size_t i = 0; i < op->arg_count; i++) {
+    const GRJIT_Operand * o = &op->args[i];
+    if (!operand_is_float(e, o)) {
+      load_operand(e, C_ARG(e, integer++), o);
+      continue;
+    }
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 49
+    /* Planted defect 49 (tests only): the float and integer arguments are numbered jointly, as
+     * Win64 numbers them, so the second float of (i64, f64, i64, f32) goes to xmm3. */
+    const GRJIT_Xmm x = (GRJIT_Xmm)(i < 8 ? i : 7);
+    (void)floating;
+#elif defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 48
+    /* Planted defect 48 (tests only): the second float argument goes to the wrong register,
+     * xmm2 and not xmm1. */
+    const GRJIT_Xmm x = (GRJIT_Xmm)(floating == 1 ? 2 : floating);
+    floating++;
+#else
+    const GRJIT_Xmm x = (GRJIT_Xmm)floating++;
+#endif
+    const bool dbl = operand_is_double(e, o);
+    if (o->kind == GRJIT_OPERAND_VREG) {
+      grjit_asm_movs_load(a, x, GRJIT_RBP, grjit_emit_slot(o->vreg), dbl);
+    } else {
+      grjit_asm_mov_ri(a, GRJIT_RAX, (uint64_t)o->imm);
+      grjit_asm_movd_xr(a, x, GRJIT_RAX, dbl);
+    }
+  }
+}
+
 static void emit_call(GRJIT_Emit * e, const GRJIT_Op * op) {
   GRJIT_Asm * a = &e->as;
   /* In a callable function every call that can reach a GC point records where
@@ -242,6 +317,8 @@ static void emit_call(GRJIT_Emit * e, const GRJIT_Op * op) {
     for (size_t i = 0; i < op->arg_count && i < e->abi->c_reg_args; i++) {
       load_operand(e, C_ARG(e, i), &op->args[i]);
     }
+  } else if (call_has_float(e, op)) {
+    emit_float_arguments(e, op);
   } else {
     for (size_t i = 0; i < op->arg_count; i++) {
       load_operand(e, C_ARG(e, i), &op->args[i]);
@@ -259,7 +336,12 @@ static void emit_call(GRJIT_Emit * e, const GRJIT_Op * op) {
         s->identity, e->c.live_cursor++, op->state);
   }
   if (op->dst != GRJIT_NO_VREG) {
-    if (dst_is_i32_reg(e, op->dst)) {
+    const GRJIT_Type result = e->c.f->vregs[op->dst].type;
+    if (result == GRJIT_TYPE_F32 || result == GRJIT_TYPE_F64) {
+      /* A float comes back in xmm0: an f32 in its low 32 bits (whatever is above them is not
+       * ours), an f64 in its 64. */
+      grjit_asm_movd_rx(a, GRJIT_RAX, GRJIT_XMM0, result == GRJIT_TYPE_F64);
+    } else if (dst_is_i32_reg(e, op->dst)) {
       grjit_asm_mov32_rr(a, GRJIT_RAX, GRJIT_RAX); /* a helper's 32-bit result: its upper half is not ours */
     }
     store_result(e, op->dst, GRJIT_RAX);
@@ -957,6 +1039,548 @@ static void emit_cmp32(GRJIT_Emit * e, const GRJIT_Op * op) {
   store_result(e, op->dst, GRJIT_RAX);
 }
 
+/* ---- The float operations of numeric-operations.md (spec-runtime-float, story 3) --------------
+ *
+ * Every sequence is SSE2 (x86-64-v1), runs the same on every host, and keeps the emitter's shape: a
+ * value is a bit word in its frame slot, `xmm0` to `xmm7` are scratch, and a result goes back to its
+ * slot as a full word. An f32 result is taken out of its register with `movd eax, xmm`, which
+ * clears the upper half of the word, so an f32 is zero-extended in its slot by construction (the
+ * upper bits of an xmm register after a scalar single operation are not always zero: `cvtsd2ss`
+ * leaves bits 32 to 63 of its destination alone). Story 4 adds the SSE4.1 `roundss`/`roundsd` arm of
+ * the four rounding operations; the sequences here stay as its fallback, so they are separate
+ * functions.
+ *
+ * Nothing here calls libm and nothing reads or writes MXCSR: the default rounding (to nearest
+ * even), exceptions masked, no flush to zero. Nothing traps: a conversion that would is guarded in
+ * the IR, and `cvtt*` returns the "integer indefinite" value in hardware, never a fault. */
+
+static bool type_is_float(GRJIT_Type t) {
+  return t == GRJIT_TYPE_F32 || t == GRJIT_TYPE_F64;
+}
+
+static bool reg_is_f64(const GRJIT_Emit * e, GRJIT_VReg v) {
+  return e->c.f->vregs[v].type == GRJIT_TYPE_F64;
+}
+
+/* A float operand into an xmm register: the slot (a 32- or 64-bit load that clears the rest), or
+ * an immediate's bits through `rax`. */
+static void load_float(GRJIT_Emit * e, GRJIT_Xmm x, const GRJIT_Operand * o, bool dbl) {
+  GRJIT_Asm * a = &e->as;
+  if (o->kind == GRJIT_OPERAND_VREG) {
+    grjit_asm_movs_load(a, x, GRJIT_RBP, grjit_emit_slot(o->vreg), dbl);
+  } else {
+    grjit_asm_mov_ri(a, GRJIT_RAX, (uint64_t)o->imm);
+    grjit_asm_movd_xr(a, x, GRJIT_RAX, dbl);
+  }
+}
+
+/* A float result into its slot as a whole word. */
+static void store_float(GRJIT_Emit * e, GRJIT_VReg dst, GRJIT_Xmm x, bool dbl) {
+  GRJIT_Asm * a = &e->as;
+  if (dbl) {
+    grjit_asm_movs_store(a, GRJIT_RBP, grjit_emit_slot(dst), x, true);
+  } else {
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 55
+    /* Planted defect 55 (tests only): an f32 is taken out of its register as 64 bits, so
+     * whatever the operation left above bit 31 (`cvtsd2ss` leaves half of the double there)
+     * lands in the slot and the f32 is not zero-extended. */
+    grjit_asm_movd_rx(a, GRJIT_RAX, x, true);
+#else
+    grjit_asm_movd_rx(a, GRJIT_RAX, x, false);
+#endif
+    store_result(e, dst, GRJIT_RAX);
+  }
+}
+
+/* The bit patterns of the constants the sequences need, for the width they work in. */
+static uint64_t float_bits(double v, bool dbl) {
+  if (dbl) {
+    uint64_t b;
+    memcpy(&b, &v, sizeof b);
+    return b;
+  }
+  float f = (float)v;
+  uint32_t b;
+  memcpy(&b, &f, sizeof b);
+  return b;
+}
+
+static uint64_t sign_mask(bool dbl) { return dbl ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000); }
+static uint64_t abs_mask(bool dbl) { return dbl ? UINT64_C(0x7FFFFFFFFFFFFFFF) : UINT64_C(0x7FFFFFFF); }
+
+/* FADD FSUB FMUL FDIV. IEEE-754 operations on SSE2 are the hardware's own, operands in order. */
+static void emit_float_arith(GRJIT_Emit * e, const GRJIT_Op * op, bool dbl) {
+  GRJIT_Asm * a = &e->as;
+  GRJIT_Operand left = op->a;
+  GRJIT_Operand right = op->b;
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 45
+  /* Planted defect 45 (tests only): the operands of a float subtraction are swapped. */
+  if (op->kind == GRJIT_OP_FSUB) {
+    left = op->b;
+    right = op->a;
+  }
+#endif
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 46
+  /* Planted defect 46 (tests only): the operands of a float division are swapped. */
+  if (op->kind == GRJIT_OP_FDIV) {
+    left = op->b;
+    right = op->a;
+  }
+#endif
+  load_float(e, GRJIT_XMM0, &left, dbl);
+  load_float(e, GRJIT_XMM1, &right, dbl);
+  const GRJIT_SseOp which = op->kind == GRJIT_OP_FADD   ? GRJIT_SSE_ADD
+                            : op->kind == GRJIT_OP_FSUB ? GRJIT_SSE_SUB
+                            : op->kind == GRJIT_OP_FMUL ? GRJIT_SSE_MUL
+                                                        : GRJIT_SSE_DIV;
+  grjit_asm_sse_rr(a, which, GRJIT_XMM0, GRJIT_XMM1, dbl);
+  store_float(e, op->dst, GRJIT_XMM0, dbl);
+}
+
+static void emit_float_sqrt(GRJIT_Emit * e, const GRJIT_Op * op, bool dbl) {
+  load_float(e, GRJIT_XMM1, &op->a, dbl);
+  grjit_asm_sse_rr(&e->as, GRJIT_SSE_SQRT, GRJIT_XMM0, GRJIT_XMM1, dbl);
+  store_float(e, op->dst, GRJIT_XMM0, dbl);
+}
+
+/* FMIN and FMAX. `minsd`/`maxsd` return their second operand for a NaN and for equal operands,
+ * which is wrong twice for WebAssembly: a NaN must give a NaN, and `min(-0, +0)` is `-0` while
+ * `max(-0, +0)` is `+0`. So: an unordered compare is the NaN case (an add of the two returns a
+ * quiet NaN, the first operand's if it is one), equal operands combine their bits (OR for min, AND
+ * for max, which on two zeros is the sign rule and on any other equal pair changes nothing), and
+ * everything else is the instruction. */
+static void emit_float_minmax(GRJIT_Emit * e, const GRJIT_Op * op, bool dbl) {
+  GRJIT_Asm * a = &e->as;
+  const bool is_min = op->kind == GRJIT_OP_FMIN;
+  load_float(e, GRJIT_XMM0, &op->a, dbl);
+  load_float(e, GRJIT_XMM1, &op->b, dbl);
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 50
+  /* Planted defect 50 (tests only): min and max are the bare instruction, which returns the
+   * second operand for a NaN on either side and for min(-0, +0) and max(-0, +0). */
+  grjit_asm_sse_rr(a, is_min ? GRJIT_SSE_MIN : GRJIT_SSE_MAX, GRJIT_XMM0, GRJIT_XMM1, dbl);
+  store_float(e, op->dst, GRJIT_XMM0, dbl);
+  return;
+#endif
+  GRJIT_Label nan = grjit_asm_label(a);
+  GRJIT_Label equal = grjit_asm_label(a);
+  GRJIT_Label done = grjit_asm_label(a);
+  grjit_asm_ucomis(a, GRJIT_XMM0, GRJIT_XMM1, dbl);
+  grjit_asm_jcc(a, GRJIT_COND_P, nan);
+  grjit_asm_jcc(a, GRJIT_COND_E, equal);
+  grjit_asm_sse_rr(a, is_min ? GRJIT_SSE_MIN : GRJIT_SSE_MAX, GRJIT_XMM0, GRJIT_XMM1, dbl);
+  grjit_asm_jmp(a, done);
+  grjit_asm_bind(a, equal);
+  grjit_asm_sse_logic(a, is_min ? GRJIT_SSE_OR : GRJIT_SSE_AND, GRJIT_XMM0, GRJIT_XMM1);
+  grjit_asm_jmp(a, done);
+  grjit_asm_bind(a, nan);
+  grjit_asm_sse_rr(a, GRJIT_SSE_ADD, GRJIT_XMM0, GRJIT_XMM1, dbl);
+  grjit_asm_bind(a, done);
+  store_float(e, op->dst, GRJIT_XMM0, dbl);
+}
+
+/* FNEG, FABS and FCOPYSIGN act on the sign bit only, in the integer registers: a signalling NaN
+ * keeps its payload and its quiet bit, and neg(+0) is -0, neither of which arithmetic gives. */
+static void emit_float_sign(GRJIT_Emit * e, const GRJIT_Op * op, bool dbl) {
+  GRJIT_Asm * a = &e->as;
+#define ALU(o, d, s) (dbl ? grjit_asm_alu_rr(a, o, d, s) : grjit_asm_alu32_rr(a, o, d, s))
+  if (op->kind == GRJIT_OP_FNEG || op->kind == GRJIT_OP_FABS) {
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 53
+    /* Planted defect 53 (tests only): negation and absolute value go through arithmetic: x * -1
+     * and (x with the sign cleared) + 0, which quiet a signalling NaN. */
+    if (op->kind == GRJIT_OP_FNEG) {
+      load_float(e, GRJIT_XMM0, &op->a, dbl);
+      grjit_asm_mov_ri(a, GRJIT_RAX, float_bits(-1.0, dbl));
+      grjit_asm_movd_xr(a, GRJIT_XMM1, GRJIT_RAX, dbl);
+      grjit_asm_sse_rr(a, GRJIT_SSE_MUL, GRJIT_XMM0, GRJIT_XMM1, dbl);
+    } else {
+      load_operand(e, GRJIT_RAX, &op->a);
+      grjit_asm_mov_ri(a, GRJIT_RCX, abs_mask(dbl));
+      ALU(GRJIT_ALU_AND, GRJIT_RAX, GRJIT_RCX);
+      grjit_asm_movd_xr(a, GRJIT_XMM0, GRJIT_RAX, dbl);
+      grjit_asm_sse_logic(a, GRJIT_SSE_XOR, GRJIT_XMM1, GRJIT_XMM1);
+      grjit_asm_sse_rr(a, GRJIT_SSE_ADD, GRJIT_XMM0, GRJIT_XMM1, dbl);
+    }
+    store_float(e, op->dst, GRJIT_XMM0, dbl);
+    return;
+#endif
+    load_operand(e, GRJIT_RAX, &op->a);
+    if (op->kind == GRJIT_OP_FNEG) {
+      grjit_asm_mov_ri(a, GRJIT_RCX, sign_mask(dbl));
+      ALU(GRJIT_ALU_XOR, GRJIT_RAX, GRJIT_RCX);
+    } else {
+      grjit_asm_mov_ri(a, GRJIT_RCX, abs_mask(dbl));
+      ALU(GRJIT_ALU_AND, GRJIT_RAX, GRJIT_RCX);
+    }
+  } else {
+    load_operand(e, GRJIT_RAX, &op->a);
+    load_operand(e, GRJIT_RCX, &op->b);
+    grjit_asm_mov_ri(a, GRJIT_RDX, abs_mask(dbl));
+    ALU(GRJIT_ALU_AND, GRJIT_RAX, GRJIT_RDX);
+    grjit_asm_mov_ri(a, GRJIT_RDX, sign_mask(dbl));
+    ALU(GRJIT_ALU_AND, GRJIT_RCX, GRJIT_RDX);
+    ALU(GRJIT_ALU_OR, GRJIT_RAX, GRJIT_RCX);
+  }
+#undef ALU
+  store_result(e, op->dst, GRJIT_RAX);
+}
+
+/* FCEIL FFLOOR FTRUNC FNEAREST on SSE2 alone, no `roundss`, no libm.
+ *
+ * For |x| below 2^52 (2^23 for f32) `(|x| + 2^52) - 2^52` is the nearest integer to |x|, ties to
+ * even, because the sum has no bits below the unit place and the default mode rounds it that way.
+ * That is `nearest` after the sign of x is put back with a bit operation (which keeps the sign of a
+ * zero result: nearest(-0.3) is -0). The others adjust it by one: `trunc` subtracts 1 when the
+ * nearest of |x| is above |x|; `ceil` adds 1 to the signed nearest when it is below x; `floor`
+ * subtracts 1 when it is above x. The adjustment is a compare mask ANDed with 1.0, no branch.
+ * A value with |x| >= 2^52 is an integer already, and an infinity is unchanged: the result is x.
+ * A NaN (the compare is unordered) gets the quiet bit by an add, which keeps its sign and payload
+ * otherwise. */
+static void emit_float_round(GRJIT_Emit * e, const GRJIT_Op * op, bool dbl) {
+  GRJIT_Asm * a = &e->as;
+  const GRJIT_Xmm X = GRJIT_XMM0, ABS = GRJIT_XMM2, MAGIC = GRJIT_XMM3, SIGN = GRJIT_XMM4,
+                  T = GRJIT_XMM5, MASK = GRJIT_XMM6, ONE = GRJIT_XMM7, MAG = GRJIT_XMM1;
+  GRJIT_Label nan = grjit_asm_label(a);
+  GRJIT_Label done = grjit_asm_label(a);
+  load_float(e, X, &op->a, dbl);
+  grjit_asm_mov_ri(a, GRJIT_RAX, abs_mask(dbl));
+  grjit_asm_movd_xr(a, ABS, GRJIT_RAX, dbl);
+  grjit_asm_movaps(a, MAG, X);
+  grjit_asm_sse_logic(a, GRJIT_SSE_AND, MAG, ABS);                    /* |x| */
+  grjit_asm_mov_ri(a, GRJIT_RAX, float_bits(dbl ? 4503599627370496.0 : 8388608.0, dbl));
+  grjit_asm_movd_xr(a, MAGIC, GRJIT_RAX, dbl);                         /* 2^52 or 2^23 */
+  grjit_asm_ucomis(a, MAGIC, MAG, dbl);
+  grjit_asm_jcc(a, GRJIT_COND_P, nan);
+  grjit_asm_jcc(a, GRJIT_COND_BE, done);                               /* 2^52 <= |x|: x itself */
+  grjit_asm_movaps(a, T, MAG);
+  grjit_asm_sse_rr(a, GRJIT_SSE_ADD, T, MAGIC, dbl);
+  grjit_asm_sse_rr(a, GRJIT_SSE_SUB, T, MAGIC, dbl);                   /* nearest(|x|) */
+  grjit_asm_movaps(a, SIGN, ABS);
+  grjit_asm_sse_logic(a, GRJIT_SSE_ANDN, SIGN, X);                     /* the sign bit of x */
+  grjit_asm_mov_ri(a, GRJIT_RAX, float_bits(1.0, dbl));
+  grjit_asm_movd_xr(a, ONE, GRJIT_RAX, dbl);
+  switch (op->kind) {
+    case GRJIT_OP_FNEAREST:
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 52
+      /* Planted defect 52 (tests only): halves round away from zero. The ties-to-even
+       * result is bumped by one when |x| is exactly half a unit above it, which turns 2.5
+       * into 3 (and leaves 3.5, which rounds up to even anyway, alone). */
+      grjit_asm_movaps(a, MASK, MAG);
+      grjit_asm_sse_rr(a, GRJIT_SSE_SUB, MASK, T, dbl);
+      grjit_asm_mov_ri(a, GRJIT_RAX, float_bits(0.5, dbl));
+      grjit_asm_movd_xr(a, ABS, GRJIT_RAX, dbl);
+      grjit_asm_cmps(a, GRJIT_SSEP_EQ, MASK, ABS, dbl);
+      grjit_asm_sse_logic(a, GRJIT_SSE_AND, MASK, ONE);
+      grjit_asm_sse_rr(a, GRJIT_SSE_ADD, T, MASK, dbl);
+#endif
+      grjit_asm_sse_logic(a, GRJIT_SSE_OR, T, SIGN);
+      break;
+    case GRJIT_OP_FTRUNC:
+      grjit_asm_movaps(a, MASK, MAG);
+      grjit_asm_cmps(a, GRJIT_SSEP_LT, MASK, T, dbl);                  /* |x| < nearest(|x|) */
+      grjit_asm_sse_logic(a, GRJIT_SSE_AND, MASK, ONE);
+      grjit_asm_sse_rr(a, GRJIT_SSE_SUB, T, MASK, dbl);
+      grjit_asm_sse_logic(a, GRJIT_SSE_OR, T, SIGN);
+      break;
+    case GRJIT_OP_FCEIL:
+      grjit_asm_sse_logic(a, GRJIT_SSE_OR, T, SIGN);
+      grjit_asm_movaps(a, MASK, T);
+      grjit_asm_cmps(a, GRJIT_SSEP_LT, MASK, X, dbl);                  /* t < x */
+      /* t + 1 as t - (-1): a masked-out term is +0, and -0 - (+0) is -0 where -0 + (+0) is +0. */
+      grjit_asm_mov_ri(a, GRJIT_RAX, float_bits(-1.0, dbl));
+      grjit_asm_movd_xr(a, ONE, GRJIT_RAX, dbl);
+      grjit_asm_sse_logic(a, GRJIT_SSE_AND, MASK, ONE);
+      grjit_asm_sse_rr(a, GRJIT_SSE_SUB, T, MASK, dbl);
+      /* ceil(-0.999) is -0, and (-1) + 1 is +0: a result of x's sign bit is right for every
+       * ceil (a negative x ceils to a value at or below -0). */
+      grjit_asm_sse_logic(a, GRJIT_SSE_OR, T, SIGN);
+      break;
+    default: /* FFLOOR */
+      grjit_asm_sse_logic(a, GRJIT_SSE_OR, T, SIGN);
+      grjit_asm_movaps(a, MASK, X);
+      grjit_asm_cmps(a, GRJIT_SSEP_LT, MASK, T, dbl);                  /* x < t */
+      grjit_asm_sse_logic(a, GRJIT_SSE_AND, MASK, ONE);
+      grjit_asm_sse_rr(a, GRJIT_SSE_SUB, T, MASK, dbl);
+      break;
+  }
+  grjit_asm_movaps(a, X, T);
+  grjit_asm_jmp(a, done);
+  grjit_asm_bind(a, nan);
+  grjit_asm_sse_rr(a, GRJIT_SSE_ADD, X, X, dbl);                       /* quiet, sign and payload kept */
+  grjit_asm_bind(a, done);
+  store_float(e, op->dst, X, dbl);
+}
+
+/* An x86 `setcc` pair joins the flags of `ucomis*`, which sets ZF, PF and CF together for an
+ * unordered pair: EQ needs ZF and no PF, NE needs not-ZF or PF, and LT/LE are GT/GE with the
+ * operands swapped, because the unordered case then fails the `above` test (CF is set) by
+ * itself. */
+static void emit_float_cmp(GRJIT_Emit * e, const GRJIT_Op * op) {
+  GRJIT_Asm * a = &e->as;
+  GRJIT_VReg witness = op->a.kind == GRJIT_OPERAND_VREG &&
+                               type_is_float(e->c.f->vregs[op->a.vreg].type)
+                           ? op->a.vreg
+                           : op->b.vreg;
+  const bool dbl = reg_is_f64(e, witness);
+  load_float(e, GRJIT_XMM0, &op->a, dbl);
+  load_float(e, GRJIT_XMM1, &op->b, dbl);
+  bool swap = op->cmp == GRJIT_CMP_LT || op->cmp == GRJIT_CMP_LE;
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 47
+  /* Planted defect 47 (tests only): the operands of an ordered float compare are not swapped for
+   * LT and LE and are for GT and GE. */
+  swap = op->cmp == GRJIT_CMP_GT || op->cmp == GRJIT_CMP_GE;
+#endif
+  grjit_asm_alu32_rr(a, GRJIT_ALU_XOR, GRJIT_RAX, GRJIT_RAX);
+  grjit_asm_alu32_rr(a, GRJIT_ALU_XOR, GRJIT_RCX, GRJIT_RCX);
+  if (swap) {
+    grjit_asm_ucomis(a, GRJIT_XMM1, GRJIT_XMM0, dbl);
+  } else {
+    grjit_asm_ucomis(a, GRJIT_XMM0, GRJIT_XMM1, dbl);
+  }
+  switch (op->cmp) {
+    case GRJIT_CMP_EQ:
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 43
+      /* Planted defect 43 (tests only): no test of PF, so an unordered pair compares equal. */
+      grjit_asm_setcc(a, GRJIT_COND_E, GRJIT_RAX);
+#else
+      grjit_asm_setcc(a, GRJIT_COND_E, GRJIT_RAX);
+      grjit_asm_setcc(a, GRJIT_COND_NP, GRJIT_RCX);
+      grjit_asm_alu32_rr(a, GRJIT_ALU_AND, GRJIT_RAX, GRJIT_RCX);
+#endif
+      break;
+    case GRJIT_CMP_NE:
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 43
+      grjit_asm_setcc(a, GRJIT_COND_NE, GRJIT_RAX);
+#else
+      grjit_asm_setcc(a, GRJIT_COND_NE, GRJIT_RAX);
+      grjit_asm_setcc(a, GRJIT_COND_P, GRJIT_RCX);
+      grjit_asm_alu32_rr(a, GRJIT_ALU_OR, GRJIT_RAX, GRJIT_RCX);
+#endif
+      break;
+    case GRJIT_CMP_GT:
+    case GRJIT_CMP_LT:
+      grjit_asm_setcc(a, GRJIT_COND_A, GRJIT_RAX);
+      break;
+    default: /* GE, LE */
+      grjit_asm_setcc(a, GRJIT_COND_AE, GRJIT_RAX);
+      break;
+  }
+  store_result(e, op->dst, GRJIT_RAX);
+}
+
+/* CONVERT_S and CONVERT_U: integer to float. From 32 bits the value is widened (sign- or
+ * zero-extended) and converted as the 64-bit integer it now is, which is exact in the integer and
+ * one rounding in the float. From 64 bits unsigned there is no SSE2 form: a value below 2^63 is a
+ * signed one; above it, the halve-with-sticky-bit sequence: shift right one and OR the bit shifted
+ * out back in (so the halved value rounds the way the whole would, round-to-odd), convert, double.
+ * Converting the halved value without the sticky bit rounds twice (a tie that was not one). */
+static void emit_float_convert(GRJIT_Emit * e, const GRJIT_Op * op, bool dbl) {
+  GRJIT_Asm * a = &e->as;
+  const bool wide_src = e->c.f->vregs[op->a.vreg].type == GRJIT_TYPE_I64;
+  const bool is_signed = op->kind == GRJIT_OP_CONVERT_S;
+  load_operand(e, GRJIT_RAX, &op->a);
+  grjit_asm_sse_logic(a, GRJIT_SSE_XOR, GRJIT_XMM0, GRJIT_XMM0);
+  if (!wide_src) {
+    if (is_signed) {
+      grjit_asm_movsx(a, GRJIT_RAX, GRJIT_RAX, 32, true);
+    }
+    grjit_asm_cvtsi2s(a, GRJIT_XMM0, GRJIT_RAX, dbl, true);
+  } else if (is_signed) {
+    grjit_asm_cvtsi2s(a, GRJIT_XMM0, GRJIT_RAX, dbl, true);
+  } else {
+    GRJIT_Label big = grjit_asm_label(a);
+    GRJIT_Label done = grjit_asm_label(a);
+    grjit_asm_test_rr(a, GRJIT_RAX, GRJIT_RAX);
+    grjit_asm_jcc(a, GRJIT_COND_S, big);
+    grjit_asm_cvtsi2s(a, GRJIT_XMM0, GRJIT_RAX, dbl, true);
+    grjit_asm_jmp(a, done);
+    grjit_asm_bind(a, big);
+    grjit_asm_mov_rr(a, GRJIT_RCX, GRJIT_RAX);
+    grjit_asm_shift_ri(a, GRJIT_SHIFT_SHR, GRJIT_RCX, 1, true);
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 51
+    /* Planted defect 51 (tests only): the bit shifted out is dropped, so the halved value
+     * rounds twice. */
+#else
+    grjit_asm_mov_ri(a, GRJIT_RDX, 1);
+    grjit_asm_alu_rr(a, GRJIT_ALU_AND, GRJIT_RAX, GRJIT_RDX);
+    grjit_asm_alu_rr(a, GRJIT_ALU_OR, GRJIT_RCX, GRJIT_RAX);
+#endif
+    grjit_asm_cvtsi2s(a, GRJIT_XMM0, GRJIT_RCX, dbl, true);
+    grjit_asm_sse_rr(a, GRJIT_SSE_ADD, GRJIT_XMM0, GRJIT_XMM0, dbl);
+    grjit_asm_bind(a, done);
+  }
+  store_float(e, op->dst, GRJIT_XMM0, dbl);
+}
+
+/* TRUNC_S and TRUNC_U: float to integer, partial. The IR has put its guards in front, so the
+ * operand is not a NaN and its truncation fits the destination, and `cvtt*2si` to 64 bits is exact.
+ * An unsigned 64-bit result at or above 2^63 does not fit a signed conversion: subtract 2^63,
+ * convert, set the top bit. */
+static void load_float_const(GRJIT_Emit * e, GRJIT_Xmm x, double v, bool dbl) {
+  grjit_asm_mov_ri(&e->as, GRJIT_RAX, float_bits(v, dbl));
+  grjit_asm_movd_xr(&e->as, x, GRJIT_RAX, dbl);
+}
+
+/* The conversion of x (in xmm0) to a 64-bit integer, unsigned semantic for a value that may be at
+ * or above 2^63, into rax. Clobbers xmm1, rcx. */
+static void emit_cvt_u64(GRJIT_Emit * e, bool dbl) {
+  GRJIT_Asm * a = &e->as;
+  GRJIT_Label big = grjit_asm_label(a);
+  GRJIT_Label done = grjit_asm_label(a);
+  load_float_const(e, GRJIT_XMM1, 9223372036854775808.0, dbl);
+  grjit_asm_ucomis(a, GRJIT_XMM0, GRJIT_XMM1, dbl);
+  grjit_asm_jcc(a, GRJIT_COND_AE, big);
+  grjit_asm_cvtts2si(a, GRJIT_RAX, GRJIT_XMM0, dbl, true);
+  grjit_asm_jmp(a, done);
+  grjit_asm_bind(a, big);
+  grjit_asm_sse_rr(a, GRJIT_SSE_SUB, GRJIT_XMM0, GRJIT_XMM1, dbl);
+  grjit_asm_cvtts2si(a, GRJIT_RAX, GRJIT_XMM0, dbl, true);
+  grjit_asm_mov_ri(a, GRJIT_RCX, UINT64_C(0x8000000000000000));
+  grjit_asm_alu_rr(a, GRJIT_ALU_XOR, GRJIT_RAX, GRJIT_RCX);
+  grjit_asm_bind(a, done);
+}
+
+static void emit_float_trunc(GRJIT_Emit * e, const GRJIT_Op * op) {
+  GRJIT_Asm * a = &e->as;
+  const bool dbl = reg_is_f64(e, op->a.vreg);
+  const bool to64 = e->c.f->vregs[op->dst].type == GRJIT_TYPE_I64;
+  load_float(e, GRJIT_XMM0, &op->a, dbl);
+  if (to64 && op->kind == GRJIT_OP_TRUNC_U) {
+    emit_cvt_u64(e, dbl);
+  } else {
+    /* In range, so the 64-bit conversion is exact; an i32 result is its low half (for a
+     * signed one, in range, the two's-complement low half is the value). */
+    grjit_asm_cvtts2si(a, GRJIT_RAX, GRJIT_XMM0, dbl, true);
+    if (!to64) {
+      grjit_asm_mov32_rr(a, GRJIT_RAX, GRJIT_RAX);
+    }
+  }
+  store_result(e, op->dst, GRJIT_RAX);
+}
+
+/* TRUNC_SAT_S and TRUNC_SAT_U: total. NaN is 0; a value at or beyond a bound is that bound's
+ * integer; the rest truncates. `cvtt*2si` returns the "integer indefinite" value (the minimum) for
+ * what it cannot represent, which is an answer for nothing here, so every case it would get wrong
+ * is decided before it runs. */
+static void emit_float_trunc_sat(GRJIT_Emit * e, const GRJIT_Op * op) {
+  GRJIT_Asm * a = &e->as;
+  const bool dbl = reg_is_f64(e, op->a.vreg);
+  const bool to64 = e->c.f->vregs[op->dst].type == GRJIT_TYPE_I64;
+  const bool sgn = op->kind == GRJIT_OP_TRUNC_SAT_S;
+  GRJIT_Label nan = grjit_asm_label(a);
+  GRJIT_Label low = grjit_asm_label(a);
+  GRJIT_Label high = grjit_asm_label(a);
+  GRJIT_Label done = grjit_asm_label(a);
+  load_float(e, GRJIT_XMM0, &op->a, dbl);
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 54
+  /* Planted defect 54 (tests only): a NaN is not given 0: the unordered compares below fall to
+   * the low bound. */
+  (void)nan;
+#else
+  grjit_asm_ucomis(a, GRJIT_XMM0, GRJIT_XMM0, dbl);
+  grjit_asm_jcc(a, GRJIT_COND_P, nan);
+#endif
+  if (sgn) {
+    load_float_const(e, GRJIT_XMM1, to64 ? -9223372036854775808.0 : -2147483648.0, dbl);
+  } else {
+    grjit_asm_sse_logic(a, GRJIT_SSE_XOR, GRJIT_XMM1, GRJIT_XMM1); /* the lower bound is 0 */
+  }
+  grjit_asm_ucomis(a, GRJIT_XMM0, GRJIT_XMM1, dbl);
+  grjit_asm_jcc(a, GRJIT_COND_BE, low);
+  load_float_const(e, GRJIT_XMM1,
+      sgn ? (to64 ? 9223372036854775808.0 : 2147483648.0)
+          : (to64 ? 18446744073709551616.0 : 4294967296.0),
+      dbl);
+  grjit_asm_ucomis(a, GRJIT_XMM0, GRJIT_XMM1, dbl);
+  grjit_asm_jcc(a, GRJIT_COND_AE, high);
+  if (to64 && !sgn) {
+    emit_cvt_u64(e, dbl);
+  } else {
+    grjit_asm_cvtts2si(a, GRJIT_RAX, GRJIT_XMM0, dbl, true);
+    if (!to64) {
+      grjit_asm_mov32_rr(a, GRJIT_RAX, GRJIT_RAX);
+    }
+  }
+  grjit_asm_jmp(a, done);
+  grjit_asm_bind(a, low); /* signed: the minimum; unsigned: 0 */
+  grjit_asm_mov_ri(a, GRJIT_RAX, !sgn ? 0 : to64 ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000));
+  grjit_asm_jmp(a, done);
+  grjit_asm_bind(a, high);
+  grjit_asm_mov_ri(a, GRJIT_RAX,
+      sgn ? (to64 ? UINT64_C(0x7FFFFFFFFFFFFFFF) : UINT64_C(0x7FFFFFFF))
+          : (to64 ? UINT64_MAX : UINT64_C(0xFFFFFFFF)));
+  grjit_asm_jmp(a, done);
+  grjit_asm_bind(a, nan);
+  grjit_asm_alu32_rr(a, GRJIT_ALU_XOR, GRJIT_RAX, GRJIT_RAX);
+  grjit_asm_bind(a, done);
+  store_result(e, op->dst, GRJIT_RAX);
+}
+
+static void emit_float_op(GRJIT_Emit * e, const GRJIT_Op * op) {
+  GRJIT_Asm * a = &e->as;
+  const bool dbl = op->dst != GRJIT_NO_VREG && reg_is_f64(e, op->dst);
+  switch (op->kind) {
+    case GRJIT_OP_FADD:
+    case GRJIT_OP_FSUB:
+    case GRJIT_OP_FMUL:
+    case GRJIT_OP_FDIV:
+      emit_float_arith(e, op, dbl);
+      break;
+    case GRJIT_OP_FMIN:
+    case GRJIT_OP_FMAX:
+      emit_float_minmax(e, op, dbl);
+      break;
+    case GRJIT_OP_FCOPYSIGN:
+    case GRJIT_OP_FNEG:
+    case GRJIT_OP_FABS:
+      emit_float_sign(e, op, dbl);
+      break;
+    case GRJIT_OP_FSQRT:
+      emit_float_sqrt(e, op, dbl);
+      break;
+    case GRJIT_OP_FCEIL:
+    case GRJIT_OP_FFLOOR:
+    case GRJIT_OP_FTRUNC:
+    case GRJIT_OP_FNEAREST:
+      emit_float_round(e, op, dbl);
+      break;
+    case GRJIT_OP_CONVERT_S:
+    case GRJIT_OP_CONVERT_U:
+      emit_float_convert(e, op, dbl);
+      break;
+    case GRJIT_OP_TRUNC_S:
+    case GRJIT_OP_TRUNC_U:
+      emit_float_trunc(e, op);
+      break;
+    case GRJIT_OP_TRUNC_SAT_S:
+    case GRJIT_OP_TRUNC_SAT_U:
+      emit_float_trunc_sat(e, op);
+      break;
+    case GRJIT_OP_DEMOTE:
+      load_float(e, GRJIT_XMM0, &op->a, true);
+      grjit_asm_cvts2s(a, GRJIT_XMM0, GRJIT_XMM0, false);
+      store_float(e, op->dst, GRJIT_XMM0, false);
+      break;
+    case GRJIT_OP_PROMOTE:
+      load_float(e, GRJIT_XMM0, &op->a, false);
+      grjit_asm_cvts2s(a, GRJIT_XMM0, GRJIT_XMM0, true);
+      store_float(e, op->dst, GRJIT_XMM0, true);
+      break;
+    case GRJIT_OP_REINTERPRET:
+      /* The bits are the bits: a slot to a slot. Both an i32 and an f32 are zero-extended, so the
+       * word needs no cut, but it is cut anyway where the destination is 32 bits wide. */
+      load_operand(e, GRJIT_RAX, &op->a);
+      if (e->c.f->vregs[op->dst].type == GRJIT_TYPE_I32 ||
+          e->c.f->vregs[op->dst].type == GRJIT_TYPE_F32) {
+        grjit_asm_mov32_rr(a, GRJIT_RAX, GRJIT_RAX);
+      }
+      store_result(e, op->dst, GRJIT_RAX);
+      break;
+    default:
+      e->c.error = GRJIT_ERR_INTERNAL;
+      break;
+  }
+}
+
 static void emit_op(GRJIT_Emit * e, const GRJIT_Op * op, size_t block) {
   GRJIT_Asm * a = &e->as;
   switch (op->kind) {
@@ -964,8 +1588,8 @@ static void emit_op(GRJIT_Emit * e, const GRJIT_Op * op, size_t block) {
     case GRJIT_OP_MOVE:
     case GRJIT_OP_BITCAST:
       load_operand(e, GRJIT_RAX, &op->a);
-      if (dst_is_i32(e, op)) {
-        grjit_asm_mov32_rr(a, GRJIT_RAX, GRJIT_RAX); /* an i32 immediate: its low 32 bits */
+      if (dst_is_i32_reg(e, op->dst)) {
+        grjit_asm_mov32_rr(a, GRJIT_RAX, GRJIT_RAX); /* an i32 or f32 immediate: its low 32 bits */
       }
       store_result(e, op->dst, GRJIT_RAX);
       break;
@@ -999,6 +1623,14 @@ static void emit_op(GRJIT_Emit * e, const GRJIT_Op * op, size_t block) {
       store_result(e, op->dst, GRJIT_RAX);
       break;
     case GRJIT_OP_CMP:
+      if (operand_is_float(e, &op->a) || operand_is_float(e, &op->b)) {
+        if (e->win64) {
+          e->c.error = GRJIT_ERR_UNSUPPORTED;
+        } else {
+          emit_float_cmp(e, op);
+        }
+        break;
+      }
       if (operand_is_i32(e, &op->a) || operand_is_i32(e, &op->b)) {
         emit_cmp32(e, op);
         break;
@@ -1125,6 +1757,37 @@ static void emit_op(GRJIT_Emit * e, const GRJIT_Op * op, size_t block) {
         emit_divide(e, op);
       } else {
         emit_int_unary(e, op);
+      }
+      break;
+    case GRJIT_OP_FADD:
+    case GRJIT_OP_FSUB:
+    case GRJIT_OP_FMUL:
+    case GRJIT_OP_FDIV:
+    case GRJIT_OP_FMIN:
+    case GRJIT_OP_FMAX:
+    case GRJIT_OP_FCOPYSIGN:
+    case GRJIT_OP_FNEG:
+    case GRJIT_OP_FABS:
+    case GRJIT_OP_FSQRT:
+    case GRJIT_OP_FCEIL:
+    case GRJIT_OP_FFLOOR:
+    case GRJIT_OP_FTRUNC:
+    case GRJIT_OP_FNEAREST:
+    case GRJIT_OP_CONVERT_S:
+    case GRJIT_OP_CONVERT_U:
+    case GRJIT_OP_TRUNC_S:
+    case GRJIT_OP_TRUNC_U:
+    case GRJIT_OP_TRUNC_SAT_S:
+    case GRJIT_OP_TRUNC_SAT_U:
+    case GRJIT_OP_DEMOTE:
+    case GRJIT_OP_PROMOTE:
+    case GRJIT_OP_REINTERPRET:
+      if (e->win64) {
+        /* Story 5 of spec-runtime-float emits these for Win64; until then the flavour refuses,
+         * by name (the function-wide check in grjit_emit_function says so first). */
+        e->c.error = GRJIT_ERR_UNSUPPORTED;
+      } else {
+        emit_float_op(e, op);
       }
       break;
     case GRJIT_OP_COUNT:
