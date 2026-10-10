@@ -60,6 +60,35 @@
 #  42  the operands of an i32 subtraction and of an   -> testInt_ir, testWast,
 #      i32 ordered comparison swapped                    testDifferential
 #
+#  43  an unordered float comparison read as ordered  -> testFloat_ir, testWast,
+#      (no test of PF)                                   testDifferential
+#  44  the verifier does not require the range guard  -> testFloat_ir (the negative
+#      of a float-to-integer truncation                  tests), testWast (the unguarded
+#                                                        variants must be refused)
+#  45  the operands of a float subtraction swapped    -> testFloat_ir, testWast,
+#                                                        testDifferential
+#  46  the operands of a float division swapped       -> testFloat_ir, testWast,
+#                                                        testDifferential
+#  47  the operands of an ordered float comparison    -> testFloat_ir, testWast,
+#      swapped the wrong way                             testDifferential
+#  48  the second float argument of a helper in the   -> testFloat_ir (the helper ABI,
+#      wrong xmm register                                checked against an assembly probe)
+#  49  float and integer arguments numbered jointly   -> testFloat_ir (the same)
+#  50  min and max by the bare minsd/maxsd           -> testFloat_ir, testWast,
+#                                                        testDifferential
+#  51  the unsigned 64-bit conversion with no sticky  -> testFloat_ir, testWast,
+#      bit (rounds twice)                                testDifferential
+#  52  nearest rounds halves away from zero          -> testFloat_ir, testWast,
+#                                                        testDifferential
+#  53  neg and abs by arithmetic (a signalling NaN    -> testFloat_ir, testWast
+#      comes out quiet)
+#  54  the saturating truncation of a NaN is not 0   -> testFloat_ir, testWast,
+#                                                        testDifferential
+#  55  an f32 taken out of its register as 64 bits    -> testFloat_ir, testWast (the
+#      (not zero-extended)                               differential folds through a
+#                                                        reinterpret, which cuts the word,
+#                                                        so it cannot see it)
+#
 # Defects 20 to 29 are in the arm64 emitter's calls, tail calls and natives and only arm64 code run
 # under qemu-aarch64 can show them; tools/arm64-plants.txt lists them (and 4 again) with the test that
 # catches each, suite/tools/xarch/jit-arm64.sh runs them, and this script names them at its end without

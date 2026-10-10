@@ -784,7 +784,18 @@ endif
 # unguarded variants are refused), 39: `idiv` is reached on MIN % -1 (a hardware fault,
 # which the tests catch and report), 40: an i32 shift count is masked to 64 and not to 32,
 # 41: an i32 addition is a 64-bit one, so the upper half is not zero, 42: the operands of
-# an i32 subtraction and of an i32 ordered comparison are swapped), and the test
+# an i32 subtraction and of an i32 ordered comparison are swapped), and the float ones
+# (story 3): 43: an unordered float comparison is treated as ordered (no test of PF),
+# 44: the verifier does not require the range guard of a float-to-integer truncation (caught
+# by the negative tests and by the Wasm harness's refused-variant check, because an emitter
+# that dropped the guard would only return the hardware's indefinite value), 45 and 46: the
+# operands of a float subtraction and of a float division are swapped, 47: the operands of
+# an ordered float comparison are swapped the wrong way, 48: the second float argument of
+# a helper goes to the wrong xmm register, 49: float and integer arguments are numbered
+# jointly, 50: min and max are the bare instruction, 51: the unsigned 64-bit conversion
+# drops its sticky bit, 52: nearest rounds halves away from zero, 53: neg and abs go through
+# arithmetic and quiet a signalling NaN, 54: a saturating truncation of a NaN is not 0,
+# 55: an f32 is taken out of its register as 64 bits and so not zero-extended), and the test
 # that is meant to catch it is built and run there. Defects 20 to 29 are the arm64
 # emitter's own versions of the call, tail-call and native ones (the walk start stored
 # after a native call, a native's stack area not rounded or not popped, a callee that
@@ -819,7 +830,28 @@ PLANT_DEFECTS := 1:testDifferential 2:testReadback 3:testReadback \
 	41:testInt_ir:IntRun.AnI32EntersAndLeaves* 41:testWast:Wast.TheI32SuiteFile* \
 	41:testDifferential:Differential.GeneratedIntegerPrograms* \
 	42:testInt_ir:IntRun.EveryOperationGivesTheWorkedAnswer* 42:testWast:Wast.TheI32SuiteFile* \
-	42:testDifferential:Differential.GeneratedIntegerPrograms*
+	42:testDifferential:Differential.GeneratedIntegerPrograms* \
+	43:testFloat_ir:FloatRun.EveryOperationGivesTheWorkedAnswer* 43:testWast:Wast.TheF32CmpSuiteFile*:Wast.TheF64CmpSuiteFile* \
+	43:testDifferential:Differential.GeneratedFloatPrograms* \
+	44:testFloat_ir:FloatVerify.ATruncationWithNoRangeGuard*:FloatVerify.TheNanGuardAlone*:FloatVerify.ABoundOneUlp*:FloatVerify.AnInclusiveLowerBound*:FloatVerify.AGuardOnAnotherRegister* \
+	44:testWast:Wast.TheConversionsSuiteFile*:Wast.TheFloatExpectations* \
+	45:testFloat_ir:FloatRun.EveryOperationGivesTheWorkedAnswer* 45:testWast:Wast.TheF32SuiteFile* \
+	45:testDifferential:Differential.GeneratedFloatPrograms* \
+	46:testFloat_ir:FloatRun.EveryOperationGivesTheWorkedAnswer* 46:testWast:Wast.TheF64SuiteFile* \
+	46:testDifferential:Differential.GeneratedFloatPrograms* \
+	47:testFloat_ir:FloatRun.EveryOperationGivesTheWorkedAnswer* 47:testWast:Wast.TheF32CmpSuiteFile*:Wast.TheF64CmpSuiteFile* \
+	47:testDifferential:Differential.GeneratedFloatPrograms* \
+	48:testFloat_ir:FloatHelpers.* 49:testFloat_ir:FloatHelpers.* \
+	50:testFloat_ir:FloatRun.EveryOperationGivesTheWorkedAnswer* 50:testWast:Wast.TheF32SuiteFile*:Wast.TheFloatMiscSuiteFile* \
+	50:testDifferential:Differential.GeneratedFloatPrograms* \
+	51:testFloat_ir:FloatRun.EveryOperationGivesTheWorkedAnswer* 51:testWast:Wast.TheConversionsSuiteFile* \
+	51:testDifferential:Differential.GeneratedFloatPrograms* \
+	52:testFloat_ir:FloatRun.EveryOperationGivesTheWorkedAnswer* 52:testWast:Wast.TheF32SuiteFile*:Wast.TheF64SuiteFile* \
+	52:testDifferential:Differential.GeneratedFloatPrograms* \
+	53:testFloat_ir:FloatRun.EveryOperationGivesTheWorkedAnswer* 53:testWast:Wast.TheF32BitwiseSuiteFile*:Wast.TheF64BitwiseSuiteFile* \
+	54:testFloat_ir:FloatRun.EveryOperationGivesTheWorkedAnswer* 54:testWast:Wast.TheConversionsSuiteFile* \
+	54:testDifferential:Differential.GeneratedFloatPrograms* \
+	55:testFloat_ir:FloatRun.EveryOperationGivesTheWorkedAnswer*:FloatRun.AnF32Enters* 55:testWast:Wast.TheConversionsSuiteFile*:Wast.TheF32SuiteFile*
 
 # The controls the script runs are built by this make, as prerequisites, and
 # not by the script's own sub-make. Under `make -j test` the sibling goals
