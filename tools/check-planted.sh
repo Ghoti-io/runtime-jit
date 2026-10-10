@@ -49,6 +49,17 @@
 #  19  stack argument k of a native call one word   -> testNatives
 #      too high: the native reads the wrong words
 #
+#  38  the verifier does not require the guards    -> testInt_ir (the negative
+#      of a division or a remainder                   tests) and testWast (the
+#                                                     unguarded variants must be refused)
+#  39  `idiv` reached on MIN % -1 (a hardware fault)  -> testInt_ir, testWast
+#  40  an i32 shift count masked to 64, not to 32     -> testInt_ir, testWast,
+#                                                        testDifferential
+#  41  an i32 addition done in 64 bits: the upper     -> testInt_ir, testWast,
+#      half is not zero                                  testDifferential
+#  42  the operands of an i32 subtraction and of an   -> testInt_ir, testWast,
+#      i32 ordered comparison swapped                    testDifferential
+#
 # Defects 20 to 29 are in the arm64 emitter's calls, tail calls and natives and only arm64 code run
 # under qemu-aarch64 can show them; tools/arm64-plants.txt lists them (and 4 again) with the test that
 # catches each, suite/tools/xarch/jit-arm64.sh runs them, and this script names them at its end without

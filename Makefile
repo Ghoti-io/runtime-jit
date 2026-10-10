@@ -776,7 +776,13 @@ endif
 # walk start stored after the call and not before it, 16: the stack arguments not
 # popped by the caller, 17: the stack-argument area not rounded to sixteen bytes,
 # 18: the native-stack check that leaves out the stack-argument area, 19: stack
-# argument k one word too high), and the test
+# argument k one word too high; and the five of the integer operations (spec-runtime-float,
+# story 2): 38: the verifier does not require the guards of a division or a remainder
+# (caught by the negative tests and by the Wasm harness, whose control is that the
+# unguarded variants are refused), 39: `idiv` is reached on MIN % -1 (a hardware fault,
+# which the tests catch and report), 40: an i32 shift count is masked to 64 and not to 32,
+# 41: an i32 addition is a 64-bit one, so the upper half is not zero, 42: the operands of
+# an i32 subtraction and of an i32 ordered comparison are swapped), and the test
 # that is meant to catch it is built and run there. Defects 20 to 29 are the arm64
 # emitter's own versions of the call, tail-call and native ones (the walk start stored
 # after a native call, a native's stack area not rounded or not popped, a callee that
@@ -803,7 +809,15 @@ PLANT_DEFECTS := 1:testDifferential 2:testReadback 3:testReadback \
 	16:testNatives:Natives.TheStackIsSixteenAlignedAtTheNativesEntryAndTheSameAfterEveryCallForOddAndEvenStackArguments \
 	17:testNatives:Natives.TheStackIsSixteenAlignedAtTheNativesEntryAndTheSameAfterEveryCallForOddAndEvenStackArguments \
 	18:testNatives:Natives.TheNativeStackIsCheckedAtTheCallSiteForTheStackArgumentsAndTheNativesOwnUseToTheByte \
-	19:testNatives:Natives.EveryArityFromZeroToSixteenArrivesInTheOrderOfTheCAbiAndTheResultIsTheNativesOwn
+	19:testNatives:Natives.EveryArityFromZeroToSixteenArrivesInTheOrderOfTheCAbiAndTheResultIsTheNativesOwn \
+	38:testInt_ir:IntVerify.* 38:testWast:Wast.TheI32SuiteFile* \
+	39:testInt_ir:IntRun.DivideByZeroAndSignedOverflow* 39:testWast:Wast.TheI32SuiteFile* \
+	40:testInt_ir:IntRun.EveryOperationGivesTheWorkedAnswer* 40:testWast:Wast.TheI32SuiteFile* \
+	40:testDifferential:Differential.GeneratedIntegerPrograms* \
+	41:testInt_ir:IntRun.AnI32EntersAndLeaves* 41:testWast:Wast.TheI32SuiteFile* \
+	41:testDifferential:Differential.GeneratedIntegerPrograms* \
+	42:testInt_ir:IntRun.EveryOperationGivesTheWorkedAnswer* 42:testWast:Wast.TheI32SuiteFile* \
+	42:testDifferential:Differential.GeneratedIntegerPrograms*
 
 # The controls the script runs are built by this make, as prerequisites, and
 # not by the script's own sub-make. Under `make -j test` the sibling goals
