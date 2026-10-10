@@ -12,3 +12,6 @@ docs
 # Python
 **/__pycache__
 *.pyc
+
+# The WebAssembly spec suite, fetched by tools/wasm/fetch.sh (not ours, not committed)
+third_party
