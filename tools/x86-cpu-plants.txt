@@ -1,0 +1,10 @@
+# The defects of the CPU-feature code that the qemu CPU-model gate catches as well as the native tables do, each
+# caught by one test run alone under `qemu-x86_64 -cpu <model>` (suite/tools/xarch/jit-x86-cpu.sh in the workspace),
+# in a tree of its own, with its control (the same run, unplanted) passing first. tools/check-planted.sh catches the
+# same two natively (the decoder table and the mask algebra), so each is seen to fail in two places.
+#
+#   id | GRJIT_TEST_PLANT_BUG | test program | gtest filter (the test that catches it) | extra defines | qemu model | what is planted
+#
+# The catch must be an assertion that names what it saw: a crash, a hang or a build failure is not one.
+56|56|testCpu_features|CpuModel.TheDetectedSetIsTheOneTheRunExpectsAndTheNativeRunExpectsTheHostsOwn||Haswell,-popcnt|LZCNT read from leaf 1 ECX bit 5 (VMX) and not from the extended leaf: a model that has LZCNT (and no VMX under TCG) loses it
+59|59|testCpu_features|CpuModel.TheDetectedSetIsTheOneTheRunExpectsAndTheNativeRunExpectsTheHostsOwn||qemu64|the mask applied without the detected set: a model with none of the four features is given all of them

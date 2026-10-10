@@ -795,7 +795,16 @@ endif
 # jointly, 50: min and max are the bare instruction, 51: the unsigned 64-bit conversion
 # drops its sticky bit, 52: nearest rounds halves away from zero, 53: neg and abs go through
 # arithmetic and quiet a signalling NaN, 54: a saturating truncation of a NaN is not 0,
-# 55: an f32 is taken out of its register as 64 bits and so not zero-extended), and the test
+# 55: an f32 is taken out of its register as 64 bits and so not zero-extended), and the CPU-feature ones
+# (story 4): 56: LZCNT decoded from leaf 1 (VMX) and not the extended leaf, 57: leaf 7 read without the
+# maximum basic leaf, 58: the mask ignored, 59: the mask applied without the detected set, so a feature the
+# CPU lacks appears, 60: the recorded set always empty, 61: the reuse predicate reversed, 62: the arm chosen
+# from the detected set and not the effective one, 63: the feature arm never taken, 64: `lzcnt` without its F3
+# (that is `bsr`), 65: the floor and ceil immediates of `roundsd` swapped, 66: a wrong constant in the v1
+# `popcnt` only, 67: a wrong zero case in the v1 `clz` only (66 and 67 sit in sequences a host with the
+# feature never runs unless the feature is masked off, so the tests that catch them run the masked arm
+# explicitly), 68: the stamp's names in the wrong order with one dropped (56 and 59 are also caught by
+# tools/x86-cpu-plants.txt under qemu CPU models, by suite/tools/xarch/jit-x86-cpu.sh in the workspace), and the test
 # that is meant to catch it is built and run there. Defects 20 to 29 are the arm64
 # emitter's own versions of the call, tail-call and native ones (the walk start stored
 # after a native call, a native's stack area not rounded or not popped, a callee that
@@ -851,7 +860,19 @@ PLANT_DEFECTS := 1:testDifferential 2:testReadback 3:testReadback \
 	53:testFloat_ir:FloatRun.EveryOperationGivesTheWorkedAnswer* 53:testWast:Wast.TheF32BitwiseSuiteFile*:Wast.TheF64BitwiseSuiteFile* \
 	54:testFloat_ir:FloatRun.EveryOperationGivesTheWorkedAnswer* 54:testWast:Wast.TheConversionsSuiteFile* \
 	54:testDifferential:Differential.GeneratedFloatPrograms* \
-	55:testFloat_ir:FloatRun.EveryOperationGivesTheWorkedAnswer*:FloatRun.AnF32Enters* 55:testWast:Wast.TheConversionsSuiteFile*:Wast.TheF32SuiteFile*
+	55:testFloat_ir:FloatRun.EveryOperationGivesTheWorkedAnswer*:FloatRun.AnF32Enters* 55:testWast:Wast.TheConversionsSuiteFile*:Wast.TheF32SuiteFile* \
+	56:testCpu_features:CpuDecode.* 57:testCpu_features:CpuDecode.* \
+	58:testCpu_features:CpuMask.*:CpuRecord.* 58:testWast:Wast.TheI32SuiteFile*:Wast.TheF32SuiteFile* \
+	59:testCpu_features:CpuMask.* \
+	60:testCpu_features:CpuRecord.*:CpuReuse.*:CpuArms.* 60:testWast:Wast.TheI32SuiteFile*:Wast.TheF32SuiteFile* \
+	61:testCpu_features:CpuReuse.* \
+	62:testCpu_features:CpuArms.* 62:testWast:Wast.TheI32SuiteFile*:Wast.TheF32SuiteFile* \
+	63:testCpu_features:CpuArms.* 63:testWast:Wast.TheI32SuiteFile*:Wast.TheF32SuiteFile* \
+	64:testAsm:Asm.* 64:testCpu_features:CpuRun.* \
+	65:testCpu_features:CpuRun.* 65:testWast:Wast.TheF32SuiteFile*:Wast.TheFloatMiscSuiteFile* \
+	66:testCpu_features:CpuRun.TheV1Arm* 66:testInt_ir:IntRun.EveryOperationGivesTheWorkedAnswer* 66:testWast:Wast.TheI32SuiteFile* \
+	67:testCpu_features:CpuRun.TheV1Arm* 67:testInt_ir:IntRun.EveryOperationGivesTheWorkedAnswer* 67:testWast:Wast.TheI32SuiteFile* \
+	68:testCpu_features:CpuStamp.*
 
 # The controls the script runs are built by this make, as prerequisites, and
 # not by the script's own sub-make. Under `make -j test` the sibling goals

@@ -89,6 +89,30 @@
 #                                                        reinterpret, which cuts the word,
 #                                                        so it cannot see it)
 #
+#  56  LZCNT decoded from leaf 1 ECX bit 5 (VMX)      -> testCpu_features (the decoder table);
+#      and not from the extended leaf                    and, under a qemu CPU model, the model gate
+#  57  leaf 7 read without the maximum basic leaf     -> testCpu_features (the decoder table)
+#  58  the feature mask ignored                        -> testCpu_features (the mask and the record),
+#                                                        testWast (the masked run compiled feature arms)
+#  59  the mask applied without the detected set, so   -> testCpu_features (the algebra against a synthetic
+#      a feature the CPU lacks appears                   empty set); and the qemu64 model gate
+#  60  the recorded feature set always empty           -> testCpu_features (record, reuse, arm pins),
+#                                                        testWast (the detected run recorded no arm)
+#  61  the reuse predicate reversed                    -> testCpu_features
+#  62  an arm chosen from the detected set, not the    -> testCpu_features (the arm pins), testWast
+#      effective one                                     (the masked run compiled feature arms)
+#  63  the feature arm never taken                     -> testCpu_features (the arm pins), testWast
+#  64  `lzcnt` emitted without its F3 (that is bsr)    -> testAsm (the encoding), testCpu_features
+#  65  roundsd's floor and ceil immediates swapped     -> testCpu_features, testWast
+#  66  a wrong constant in the v1 popcnt only          -> testCpu_features, testInt_ir and testWast, all
+#                                                        through the masked arm (this host has POPCNT)
+#  67  a wrong zero case in the v1 clz only           -> the same
+#  68  the stamp's names in the wrong order, one lost  -> testCpu_features
+#
+# An existing defect in a sequence only the fallback runs is 52 (nearest rounds halves away from zero): on a host
+# with SSE4.1 the v1 rounding is run only through a mask of ALL, which testFloat_ir's worked answers and boundary
+# sweep, testWast and testDifferential (every subset of the host's features) do explicitly.
+#
 # Defects 20 to 29 are in the arm64 emitter's calls, tail calls and natives and only arm64 code run
 # under qemu-aarch64 can show them; tools/arm64-plants.txt lists them (and 4 again) with the test that
 # catches each, suite/tools/xarch/jit-arm64.sh runs them, and this script names them at its end without
@@ -198,4 +222,14 @@ if [ -f "$wlist" ]; then
   printf 'check-planted: SKIPPED on this host, by name: defects %s, each caught by Win64 code run under wine (needs a cross build and a wine; run by suite/tools/xwin/m1-controls.sh, and not counted here).\n' "$wnames"
 else
   printf 'check-planted: SKIPPED on this host: tools/win64-plants.txt is missing, so the Win64 catches (run by suite/tools/xwin/m1-controls.sh) are not listed\n'
+fi
+# What only a qemu CPU model can show, by name and not counted: tools/x86-cpu-plants.txt lists each (the defect, the test, the
+# model) and suite/tools/xarch/jit-x86-cpu.sh in the workspace runs them, one tree each, with the control passing first. The
+# native tables above catch the same defects, so each is seen to fail in two places.
+xlist="$(dirname "$0")/x86-cpu-plants.txt"
+if [ -f "$xlist" ]; then
+  xnames="$(grep -v '^#' "$xlist" | grep -v '^$' | awk -F'|' '{printf "%s%s", sep, $1; sep=", "}')"
+  printf 'check-planted: SKIPPED here, by name: defects %s, each also caught under a qemu CPU model (needs the xarch container and qemu-x86_64; run by suite/tools/xarch/jit-x86-cpu.sh, and not counted here).\n' "$xnames"
+else
+  printf 'check-planted: SKIPPED here: tools/x86-cpu-plants.txt is missing, so the qemu CPU-model catches (run by suite/tools/xarch/jit-x86-cpu.sh) are not listed\n'
 fi
