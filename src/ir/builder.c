@@ -119,7 +119,7 @@ GRJIT_Result grjit_builder_finish(
 static GRJIT_Result add_vreg(
     GRJIT_Builder * b, GRJIT_Type type, GRJIT_VReg * out, bool param) {
   GRJIT_Function * f = b->function;
-  if (out == NULL || (unsigned)type >= (unsigned)GRJIT_TYPE_COUNT) {
+  if (out == NULL || !grjit_type_valid(type)) {
     return GRJIT_ERR_INVALID;
   }
   if (param && f->vreg_count != f->param_count) {
@@ -391,7 +391,11 @@ GRJIT_Result grjit_builder_bitcast(
 
 GRJIT_Result grjit_builder_binary(GRJIT_Builder * builder, GRJIT_OpKind kind,
     GRJIT_VReg dst, GRJIT_Operand a, GRJIT_Operand b) {
-  if (builder == NULL || kind < GRJIT_OP_ADD || kind > GRJIT_OP_SAR) {
+  const bool plain = kind >= GRJIT_OP_ADD && kind <= GRJIT_OP_SAR;
+  const bool extended = kind == GRJIT_OP_ROTL || kind == GRJIT_OP_ROTR ||
+                        kind == GRJIT_OP_DIV_S || kind == GRJIT_OP_DIV_U ||
+                        kind == GRJIT_OP_REM_S || kind == GRJIT_OP_REM_U;
+  if (builder == NULL || (!plain && !extended)) {
     return GRJIT_ERR_INVALID;
   }
   GRJIT_Op op = blank(kind);
@@ -403,7 +407,12 @@ GRJIT_Result grjit_builder_binary(GRJIT_Builder * builder, GRJIT_OpKind kind,
 
 GRJIT_Result grjit_builder_unary(GRJIT_Builder * builder, GRJIT_OpKind kind,
     GRJIT_VReg dst, GRJIT_Operand a) {
-  if (builder == NULL || (kind != GRJIT_OP_NEG && kind != GRJIT_OP_NOT)) {
+  const bool extended = kind == GRJIT_OP_CLZ || kind == GRJIT_OP_CTZ ||
+                        kind == GRJIT_OP_POPCNT || kind == GRJIT_OP_EXT8_S ||
+                        kind == GRJIT_OP_EXT16_S || kind == GRJIT_OP_EXT32_S ||
+                        kind == GRJIT_OP_WRAP || kind == GRJIT_OP_EXTEND_S ||
+                        kind == GRJIT_OP_EXTEND_U;
+  if (builder == NULL || (kind != GRJIT_OP_NEG && kind != GRJIT_OP_NOT && !extended)) {
     return GRJIT_ERR_INVALID;
   }
   GRJIT_Op op = blank(kind);

@@ -165,13 +165,17 @@ TEST(NativeTable, ADescriptorTheLibraryCannotDescribeOrWillNotAcceptIsRefusedAnd
   d.flags = GRJIT_NATIVE_STATUS | 0x80;
   EXPECT_EQ(grjit_native_table_add(t, &d, nullptr), GRJIT_ERR_INVALID);
   d = base(two);
-  d.result = GRJIT_TYPE_COUNT; // spelled GRJIT_NATIVE_NO_RESULT: that one is allowed...
+  d.result = GRJIT_NATIVE_NO_RESULT; // no result is allowed...
   EXPECT_EQ(grjit_native_table_add(t, &d, nullptr), GRJIT_OK) << "no result is a result of none";
   ASSERT_EQ(grjit_native_table_count(t), 2u);
   d = base(two);
   d.result = static_cast<GRJIT_Type>(GRJIT_TYPE_COUNT + 1);
-  EXPECT_EQ(grjit_native_table_add(t, &d, nullptr), GRJIT_ERR_INVALID) << "a result that is no type";
-  std::vector<GRJIT_Type> bad = {TI, static_cast<GRJIT_Type>(GRJIT_TYPE_COUNT)};
+  EXPECT_EQ(grjit_native_table_add(t, &d, nullptr), GRJIT_ERR_INVALID) << "a result past the last type";
+  d = base(two);
+  d.result = GRJIT_TYPE_I32;
+  EXPECT_EQ(grjit_native_table_add(t, &d, nullptr), GRJIT_ERR_INVALID)
+      << "a native returns i64, ref or ptr: an i32 is a register type only";
+  std::vector<GRJIT_Type> bad = {TI, GRJIT_NATIVE_NO_RESULT};
   d = base(bad);
   EXPECT_EQ(grjit_native_table_add(t, &d, nullptr), GRJIT_ERR_INVALID)
       << "a parameter of none is not a parameter (a floating-point native has no type to name)";

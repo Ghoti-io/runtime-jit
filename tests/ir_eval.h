@@ -25,6 +25,10 @@
 
 namespace ireval {
 
+/* The exit the evaluator reports for a partial operation reached with operands its guards
+ * should have kept out: no compiled run has it. */
+constexpr uint32_t kPartialFault = 0xBAD0;
+
 struct Result {
   uint32_t exit = 99;
   std::vector<uint64_t> out;
@@ -47,6 +51,65 @@ inline uint64_t call_native(uint64_t address, const uint64_t * a, size_t n) {
 
 inline uint64_t operand(const std::vector<uint64_t> & regs, const GRJIT_Operand & o) {
   return o.kind == GRJIT_OPERAND_VREG ? regs[o.vreg] : static_cast<uint64_t>(o.imm);
+}
+
+/* ---- The integer operations (numeric-operations.md), written to be wrong differently from the
+ * backend: no builtins, no instruction a compiler would turn into the backend's own, and the
+ * width carried in a plain number. An i32 is the low 32 bits of a word and every result of
+ * width 32 is cut to them, so the invariant the backend keeps (zero-extended) is stated here
+ * by construction. */
+
+inline uint64_t cut(unsigned width, uint64_t v) { return width == 32 ? (v & 0xFFFFFFFFu) : v; }
+
+inline int64_t sext(unsigned width, uint64_t v) {
+  if (width == 32) {
+    uint64_t low = v & 0xFFFFFFFFu;
+    return static_cast<int64_t>(low >= 0x80000000u ? low | 0xFFFFFFFF00000000u : low);
+  }
+  return static_cast<int64_t>(v);
+}
+
+inline uint64_t count_leading_zeros(unsigned width, uint64_t v) {
+  v = cut(width, v);
+  uint64_t n = 0;
+  for (int bit = static_cast<int>(width) - 1; bit >= 0 && ((v >> bit) & 1) == 0; bit--) {
+    n++;
+  }
+  return n;
+}
+
+inline uint64_t count_trailing_zeros(unsigned width, uint64_t v) {
+  v = cut(width, v);
+  uint64_t n = 0;
+  for (unsigned bit = 0; bit < width && ((v >> bit) & 1) == 0; bit++) {
+    n++;
+  }
+  return n;
+}
+
+inline uint64_t population(unsigned width, uint64_t v) {
+  uint64_t n = 0;
+  for (unsigned bit = 0; bit < width; bit++) {
+    n += (v >> bit) & 1;
+  }
+  return n;
+}
+
+inline uint64_t rotate_left(unsigned width, uint64_t v, uint64_t count) {
+  v = cut(width, v);
+  unsigned k = static_cast<unsigned>(count % width);
+  if (k == 0) {
+    return v;
+  }
+  return cut(width, (v << k) | (v >> (width - k)));
+}
+
+inline uint64_t sign_extend_from(unsigned from, unsigned width, uint64_t v) {
+  uint64_t low = from == 64 ? v : (v & ((uint64_t{1} << from) - 1));
+  if ((low >> (from - 1)) & 1) {
+    low |= from == 64 ? 0 : ~uint64_t{0} << from;
+  }
+  return cut(width, low);
 }
 
 inline bool compare(GRJIT_Cmp c, uint64_t a, uint64_t b) {
@@ -95,8 +158,12 @@ inline Result eval(const GRJIT_Function * f, void * ctx, GRJIT_EntryHook hook,
     }
   }
   std::vector<uint64_t> regs(grjit_function_vreg_count(f), 0);
+  std::vector<unsigned> width(regs.size(), 64);
+  for (size_t v = 0; v < regs.size(); v++) {
+    width[v] = grjit_function_vreg_type(f, static_cast<GRJIT_VReg>(v)) == GRJIT_TYPE_I32 ? 32 : 64;
+  }
   for (size_t i = 0; i < grjit_function_param_count(f); i++) {
-    regs[i] = i < args.size() ? args[i] : 0;
+    regs[i] = cut(width[i], i < args.size() ? args[i] : 0);
   }
   GRJIT_BlockId block = 0;
   size_t steps = 0;
@@ -113,24 +180,80 @@ inline Result eval(const GRJIT_Function * f, void * ctx, GRJIT_EntryHook hook,
       }
       uint64_t a = op.a.kind == GRJIT_OPERAND_NONE ? 0 : operand(regs, op.a);
       uint64_t b = op.b.kind == GRJIT_OPERAND_NONE ? 0 : operand(regs, op.b);
+      const unsigned w = op.dst != GRJIT_NO_VREG ? width[op.dst] : 64;
       switch (op.kind) {
-        case GRJIT_OP_CONST: regs[op.dst] = a; break;
-        case GRJIT_OP_MOVE: regs[op.dst] = a; break;
+        case GRJIT_OP_CONST: regs[op.dst] = cut(w, a); break;
+        case GRJIT_OP_MOVE: regs[op.dst] = cut(w, a); break;
         case GRJIT_OP_BITCAST: regs[op.dst] = a; break;
-        case GRJIT_OP_ADD: regs[op.dst] = a + b; break;
-        case GRJIT_OP_SUB: regs[op.dst] = a - b; break;
-        case GRJIT_OP_MUL: regs[op.dst] = a * b; break;
-        case GRJIT_OP_AND: regs[op.dst] = a & b; break;
-        case GRJIT_OP_OR: regs[op.dst] = a | b; break;
-        case GRJIT_OP_XOR: regs[op.dst] = a ^ b; break;
-        case GRJIT_OP_SHL: regs[op.dst] = a << (b & 63); break;
-        case GRJIT_OP_SHR: regs[op.dst] = a >> (b & 63); break;
+        case GRJIT_OP_ADD: regs[op.dst] = cut(w, a + b); break;
+        case GRJIT_OP_SUB: regs[op.dst] = cut(w, a - b); break;
+        case GRJIT_OP_MUL: regs[op.dst] = cut(w, a * b); break;
+        case GRJIT_OP_AND: regs[op.dst] = cut(w, a & b); break;
+        case GRJIT_OP_OR: regs[op.dst] = cut(w, a | b); break;
+        case GRJIT_OP_XOR: regs[op.dst] = cut(w, a ^ b); break;
+        case GRJIT_OP_SHL: regs[op.dst] = cut(w, cut(w, a) << (b % w)); break;
+        case GRJIT_OP_SHR: regs[op.dst] = cut(w, cut(w, a) >> (b % w)); break;
         case GRJIT_OP_SAR:
-          regs[op.dst] = static_cast<uint64_t>(static_cast<int64_t>(a) >> (b & 63));
+          regs[op.dst] = cut(w, static_cast<uint64_t>(sext(w, a) >> (b % w)));
           break;
-        case GRJIT_OP_NEG: regs[op.dst] = 0 - a; break;
-        case GRJIT_OP_NOT: regs[op.dst] = ~a; break;
-        case GRJIT_OP_CMP: regs[op.dst] = compare(op.cmp, a, b) ? 1 : 0; break;
+        case GRJIT_OP_NEG: regs[op.dst] = cut(w, 0 - a); break;
+        case GRJIT_OP_NOT: regs[op.dst] = cut(w, ~a); break;
+        case GRJIT_OP_CLZ: regs[op.dst] = count_leading_zeros(w, a); break;
+        case GRJIT_OP_CTZ: regs[op.dst] = count_trailing_zeros(w, a); break;
+        case GRJIT_OP_POPCNT: regs[op.dst] = population(w, a); break;
+        case GRJIT_OP_ROTL: regs[op.dst] = rotate_left(w, a, b); break;
+        case GRJIT_OP_ROTR: regs[op.dst] = rotate_left(w, a, w - (b % w)); break;
+        case GRJIT_OP_EXT8_S: regs[op.dst] = sign_extend_from(8, w, a); break;
+        case GRJIT_OP_EXT16_S: regs[op.dst] = sign_extend_from(16, w, a); break;
+        case GRJIT_OP_EXT32_S: regs[op.dst] = sign_extend_from(32, 64, a); break;
+        case GRJIT_OP_WRAP: regs[op.dst] = cut(32, a); break;
+        case GRJIT_OP_EXTEND_S: regs[op.dst] = sign_extend_from(32, 64, a); break;
+        case GRJIT_OP_EXTEND_U: regs[op.dst] = cut(32, a); break;
+        case GRJIT_OP_DIV_S:
+        case GRJIT_OP_DIV_U:
+        case GRJIT_OP_REM_S:
+        case GRJIT_OP_REM_U: {
+          const uint64_t ua = cut(w, a), ub = cut(w, b);
+          const int64_t sa = sext(w, a), sb = sext(w, b);
+          const int64_t min = w == 32 ? INT32_MIN : INT64_MIN;
+          const bool is_signed = op.kind == GRJIT_OP_DIV_S || op.kind == GRJIT_OP_REM_S;
+          if (ub == 0 || (op.kind == GRJIT_OP_DIV_S && sa == min && sb == -1)) {
+            /* A partial operation reached with the operands its guards keep out: the
+             * program is wrong, not the operation. Reported as an exit no run has. */
+            r.exit = kPartialFault;
+            return r;
+          }
+          uint64_t v;
+          if (op.kind == GRJIT_OP_DIV_U) {
+            v = ua / ub;
+          } else if (op.kind == GRJIT_OP_REM_U) {
+            v = ua % ub;
+          } else if (op.kind == GRJIT_OP_DIV_S) {
+            v = static_cast<uint64_t>(sa / sb);
+          } else {
+            v = sb == -1 ? 0 : static_cast<uint64_t>(sa % sb);
+          }
+          (void)is_signed;
+          regs[op.dst] = cut(w, v);
+          break;
+        }
+        case GRJIT_OP_CMP: {
+          /* A comparison of 32-bit registers compares their low 32 bits; the signed ones
+           * read them as signed. */
+          const bool narrow = (op.a.kind == GRJIT_OPERAND_VREG && width[op.a.vreg] == 32) ||
+                              (op.b.kind == GRJIT_OPERAND_VREG && width[op.b.vreg] == 32);
+          if (narrow) {
+            regs[op.dst] = compare(op.cmp, static_cast<uint64_t>(sext(32, a)),
+                               static_cast<uint64_t>(sext(32, b)))
+                               ? 1 : 0;
+            if (op.cmp >= GRJIT_CMP_ULT) {
+              regs[op.dst] = compare(op.cmp, cut(32, a), cut(32, b)) ? 1 : 0;
+            }
+          } else {
+            regs[op.dst] = compare(op.cmp, a, b) ? 1 : 0;
+          }
+          break;
+        }
         case GRJIT_OP_LOAD:
         case GRJIT_OP_LOAD_S: {
           uint64_t v = 0;
@@ -151,7 +274,7 @@ inline Result eval(const GRJIT_Function * f, void * ctx, GRJIT_EntryHook hook,
           }
           uint64_t v = call_native(op.address, argv, op.arg_count);
           if (op.dst != GRJIT_NO_VREG) {
-            regs[op.dst] = v;
+            regs[op.dst] = cut(width[op.dst], v);
           }
           break;
         }

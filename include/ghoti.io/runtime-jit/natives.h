@@ -131,8 +131,10 @@ typedef struct GRJIT_NativeResult {
  *  engine, whose native then opens a `REENTRY` record. */
 #define GRJIT_NATIVE_REENTERS UINT32_C(2)
 
-/** @brief ::GRJIT_NativeDesc::result: the native has no result. */
-#define GRJIT_NATIVE_NO_RESULT GRJIT_TYPE_COUNT
+/** @brief ::GRJIT_NativeDesc::result: the native has no result. Its value is 3, as it
+ *  was when it was ::GRJIT_TYPE_COUNT; the type added after it (::GRJIT_TYPE_I32) did
+ *  not move it. A native takes and returns only `I64`, `REF` and `PTR`. */
+#define GRJIT_NATIVE_NO_RESULT GRJIT_TYPE_RESERVED_NO_RESULT
 
 /**
  * @brief What the engine says about a native, once, when it registers it.

@@ -95,6 +95,23 @@ void grjit_limits_resolve(const GRJIT_Limits * in, GRJIT_Limits * out);
 const GRJIT_Allocator * grjit_allocator_or_default(
     const GRJIT_Allocator * allocator);
 
+/** Whether `t` is a type a register can have: the value 3 is the native-result
+ *  sentinel and is no type, and ::GRJIT_TYPE_COUNT and above are none. */
+static inline bool grjit_type_valid(GRJIT_Type t) {
+  return t == GRJIT_TYPE_I64 || t == GRJIT_TYPE_REF || t == GRJIT_TYPE_PTR ||
+         t == GRJIT_TYPE_I32;
+}
+
+/** Whether the function has anything the arm64 and Win64 emitters do not yet
+ *  emit: a register of type `I32`, or one of the integer operations added for
+ *  numeric-operations.md (story 5 of spec-runtime-float replaces the refusal). */
+bool grjit_function_needs_int_ext(const GRJIT_Function * function);
+
+/** Whether an operation is one of the integer operations added after `CALL_NATIVE`. */
+static inline bool grjit_op_is_int_ext(GRJIT_OpKind kind) {
+  return kind >= GRJIT_OP_CLZ && kind < GRJIT_OP_COUNT;
+}
+
 /** Whether an operation ends a block. */
 bool grjit_op_is_terminator(GRJIT_OpKind kind);
 

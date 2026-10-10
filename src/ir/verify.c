@@ -33,6 +33,7 @@
 
 #include "../backend/liveness_internal.h"
 
+#include <inttypes.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -71,6 +72,63 @@ static bool width_ok(uint32_t w) {
   return w == 8 || w == 16 || w == 32 || w == 64;
 }
 
+/* The width of the integer operations (ir.h): the destination's type decides. */
+static bool is_i32(GRJIT_Type t) {
+  return t == GRJIT_TYPE_I32;
+}
+
+/* An immediate read as an `I32` is its low 32 bits, and must say them in one of the
+ * two spellings of a 32-bit pattern, signed or unsigned. */
+static bool imm32_ok(int64_t imm) {
+  return imm >= INT32_MIN && imm <= (int64_t)UINT32_MAX;
+}
+
+/* An operand of an integer operation of width `want` (`I32` or `I64`): a register of
+ * that type (a `PTR` also counts as 64 bits, as it always has), or an immediate. */
+static GRJIT_Result check_int_operand(Verify * v, const char * what,
+    const GRJIT_Operand * o, GRJIT_Type want, GRJIT_BlockId block, size_t index) {
+  if (o->kind == GRJIT_OPERAND_IMM) {
+    if (want == GRJIT_TYPE_I32 && !imm32_ok(o->imm)) {
+      return refuse(v, GRJIT_ERR_INVALID,
+          "block b%u op %zu: %s immediate does not fit 32 bits", block, index, what);
+    }
+    return GRJIT_OK;
+  }
+  if (o->kind != GRJIT_OPERAND_VREG) {
+    return refuse(v, GRJIT_ERR_INVALID,
+        "block b%u op %zu: %s operand is missing", block, index, what);
+  }
+  if (!vreg_ok(v, o->vreg)) {
+    return refuse(v, GRJIT_ERR_INVALID,
+        "block b%u op %zu: %s names v%u, which the function does not have",
+        block, index, what, o->vreg);
+  }
+  GRJIT_Type t = type_of(v, o->vreg);
+  if (want == GRJIT_TYPE_I32 ? t != GRJIT_TYPE_I32 : !int_like(t)) {
+    return refuse(v, GRJIT_ERR_INVALID,
+        "block b%u op %zu: %s v%u has the wrong type for this operation (an i32 "
+        "operation takes i32 operands, an i64 one i64 operands)",
+        block, index, what, o->vreg);
+  }
+  return GRJIT_OK;
+}
+
+/* The destination of an integer operation: a register that exists, of type `I32` or
+ * `I64`. A `PTR` destination keeps working for the operations that always had it. */
+static GRJIT_Result check_int_dst(Verify * v, const GRJIT_Op * op, bool allow_ptr,
+    GRJIT_BlockId block, size_t index) {
+  if (!vreg_ok(v, op->dst)) {
+    return refuse(v, GRJIT_ERR_INVALID,
+        "block b%u op %zu: destination v%u does not exist", block, index, op->dst);
+  }
+  GRJIT_Type t = type_of(v, op->dst);
+  if (t != GRJIT_TYPE_I32 && t != GRJIT_TYPE_I64 && !(allow_ptr && t == GRJIT_TYPE_PTR)) {
+    return refuse(v, GRJIT_ERR_INVALID,
+        "block b%u op %zu: destination v%u has the wrong type", block, index, op->dst);
+  }
+  return GRJIT_OK;
+}
+
 /* An operand that must be a register or an immediate of a type `ok` accepts.
  * An absent operand is never acceptable here. */
 static GRJIT_Result check_operand(Verify * v, const char * what,
@@ -94,6 +152,16 @@ static GRJIT_Result check_operand(Verify * v, const char * what,
         block, index, what, o->vreg);
   }
   return GRJIT_OK;
+}
+
+/* A condition (a guard's, a branch's): any integer register, either width. */
+static GRJIT_Result check_condition(Verify * v, const GRJIT_Operand * o,
+    GRJIT_BlockId block, size_t index) {
+  if (o->kind == GRJIT_OPERAND_VREG && vreg_ok(v, o->vreg) &&
+      type_of(v, o->vreg) == GRJIT_TYPE_I32) {
+    return GRJIT_OK;
+  }
+  return check_operand(v, "condition", o, false, block, index);
 }
 
 static GRJIT_Result check_dst(Verify * v, const GRJIT_Op * op,
@@ -166,8 +234,27 @@ static GRJIT_Result check_op(
         return refuse(v, GRJIT_ERR_INVALID,
             "block b%u op %zu: const needs an immediate", block, index);
       }
-      return check_dst(v, op, false, block, index);
+      if ((r = check_dst(v, op, false, block, index)) != GRJIT_OK) {
+        return r;
+      }
+      if (is_i32(type_of(v, op->dst)) && !imm32_ok(op->a.imm)) {
+        return refuse(v, GRJIT_ERR_INVALID,
+            "block b%u op %zu: const %" PRId64 " does not fit an i32", block, index,
+            op->a.imm);
+      }
+      return GRJIT_OK;
     case GRJIT_OP_MOVE:
+      if (vreg_ok(v, op->dst) &&
+          (is_i32(type_of(v, op->dst)) ||
+              (op->a.kind == GRJIT_OPERAND_VREG && is_i32(type_of(v, op->a.vreg))))) {
+        /* An i32 moves only into an i32, and only an i32 or a 32-bit immediate. */
+        if (!is_i32(type_of(v, op->dst))) {
+          return refuse(v, GRJIT_ERR_INVALID,
+              "block b%u op %zu: move from v%u to v%u changes the type", block, index,
+              op->a.vreg, op->dst);
+        }
+        return check_int_operand(v, "source", &op->a, GRJIT_TYPE_I32, block, index);
+      }
       if ((r = check_operand(v, "source", &op->a, true, block, index)) !=
               GRJIT_OK ||
           (r = check_dst(v, op, false, block, index)) != GRJIT_OK) {
@@ -193,6 +280,12 @@ static GRJIT_Result check_op(
           (r = check_dst(v, op, false, block, index)) != GRJIT_OK) {
         return r;
       }
+      if (is_i32(type_of(v, op->dst))) {
+        return refuse(v, GRJIT_ERR_INVALID,
+            "block b%u op %zu: a bitcast cannot make an i32 (it would not be "
+            "zero-extended); use wrap",
+            block, index);
+      }
       return GRJIT_OK;
     case GRJIT_OP_ADD:
     case GRJIT_OP_SUB:
@@ -203,6 +296,13 @@ static GRJIT_Result check_op(
     case GRJIT_OP_SHL:
     case GRJIT_OP_SHR:
     case GRJIT_OP_SAR:
+      if (vreg_ok(v, op->dst) && is_i32(type_of(v, op->dst))) {
+        if ((r = check_int_operand(v, "left", &op->a, GRJIT_TYPE_I32, block, index)) !=
+            GRJIT_OK) {
+          return r;
+        }
+        return check_int_operand(v, "right", &op->b, GRJIT_TYPE_I32, block, index);
+      }
       if ((r = check_operand(v, "left", &op->a, false, block, index)) !=
               GRJIT_OK ||
           (r = check_operand(v, "right", &op->b, false, block, index)) !=
@@ -212,17 +312,82 @@ static GRJIT_Result check_op(
       return check_dst(v, op, true, block, index);
     case GRJIT_OP_NEG:
     case GRJIT_OP_NOT:
+      if (vreg_ok(v, op->dst) && is_i32(type_of(v, op->dst))) {
+        return check_int_operand(v, "operand", &op->a, GRJIT_TYPE_I32, block, index);
+      }
       if ((r = check_operand(v, "operand", &op->a, false, block, index)) !=
           GRJIT_OK) {
         return r;
       }
       return check_dst(v, op, true, block, index);
+    case GRJIT_OP_CLZ:
+    case GRJIT_OP_CTZ:
+    case GRJIT_OP_POPCNT:
+    case GRJIT_OP_EXT8_S:
+    case GRJIT_OP_EXT16_S:
+    case GRJIT_OP_EXT32_S:
+      /* The width is the destination's; the operand has it too. `i64.extend32_s`
+       * has no 32-bit form (a 32-bit value is already one word of 32 bits). */
+      if ((r = check_int_dst(v, op, false, block, index)) != GRJIT_OK) {
+        return r;
+      }
+      if (op->kind == GRJIT_OP_EXT32_S && is_i32(type_of(v, op->dst))) {
+        return refuse(v, GRJIT_ERR_INVALID,
+            "block b%u op %zu: ext32_s is an i64 operation", block, index);
+      }
+      return check_int_operand(v, "operand", &op->a, type_of(v, op->dst), block, index);
+    case GRJIT_OP_ROTL:
+    case GRJIT_OP_ROTR:
+    case GRJIT_OP_DIV_S:
+    case GRJIT_OP_DIV_U:
+    case GRJIT_OP_REM_S:
+    case GRJIT_OP_REM_U:
+      if ((r = check_int_dst(v, op, false, block, index)) != GRJIT_OK ||
+          (r = check_int_operand(v, "left", &op->a, type_of(v, op->dst), block, index)) !=
+              GRJIT_OK) {
+        return r;
+      }
+      /* The guards of a division are judged by check_partial, after the types. */
+      return check_int_operand(v, "right", &op->b, type_of(v, op->dst), block, index);
+    case GRJIT_OP_WRAP:
+      if ((r = check_int_dst(v, op, false, block, index)) != GRJIT_OK) {
+        return r;
+      }
+      if (!is_i32(type_of(v, op->dst))) {
+        return refuse(v, GRJIT_ERR_INVALID,
+            "block b%u op %zu: wrap makes an i32", block, index);
+      }
+      return check_int_operand(v, "operand", &op->a, GRJIT_TYPE_I64, block, index);
+    case GRJIT_OP_EXTEND_S:
+    case GRJIT_OP_EXTEND_U:
+      if ((r = check_int_dst(v, op, false, block, index)) != GRJIT_OK) {
+        return r;
+      }
+      if (type_of(v, op->dst) != GRJIT_TYPE_I64) {
+        return refuse(v, GRJIT_ERR_INVALID,
+            "block b%u op %zu: extend makes an i64", block, index);
+      }
+      return check_int_operand(v, "operand", &op->a, GRJIT_TYPE_I32, block, index);
     case GRJIT_OP_CMP: {
       if ((unsigned)op->cmp >= (unsigned)GRJIT_CMP_COUNT) {
         return refuse(v, GRJIT_ERR_INVALID,
             "block b%u op %zu: unknown comparison", block, index);
       }
       bool ref_ok = op->cmp == GRJIT_CMP_EQ || op->cmp == GRJIT_CMP_NE;
+      const bool wide32 =
+          (op->a.kind == GRJIT_OPERAND_VREG && is_i32(type_of(v, op->a.vreg))) ||
+          (op->b.kind == GRJIT_OPERAND_VREG && is_i32(type_of(v, op->b.vreg)));
+      if (wide32) {
+        /* A 32-bit comparison: both register operands are i32, the result 0 or 1 in
+         * an i32 or an i64. */
+        if ((r = check_int_operand(v, "left", &op->a, GRJIT_TYPE_I32, block, index)) !=
+                GRJIT_OK ||
+            (r = check_int_operand(v, "right", &op->b, GRJIT_TYPE_I32, block, index)) !=
+                GRJIT_OK) {
+          return r;
+        }
+        return check_int_dst(v, op, false, block, index);
+      }
       if ((r = check_operand(v, "left", &op->a, ref_ok, block, index)) !=
               GRJIT_OK ||
           (r = check_operand(v, "right", &op->b, ref_ok, block, index)) !=
@@ -230,9 +395,9 @@ static GRJIT_Result check_op(
           (r = check_dst(v, op, false, block, index)) != GRJIT_OK) {
         return r;
       }
-      if (type_of(v, op->dst) != GRJIT_TYPE_I64) {
+      if (type_of(v, op->dst) != GRJIT_TYPE_I64 && !is_i32(type_of(v, op->dst))) {
         return refuse(v, GRJIT_ERR_INVALID,
-            "block b%u op %zu: a comparison produces an i64", block, index);
+            "block b%u op %zu: a comparison produces an i64 or an i32", block, index);
       }
       if (op->a.kind == GRJIT_OPERAND_VREG &&
           op->b.kind == GRJIT_OPERAND_VREG &&
@@ -268,9 +433,23 @@ static GRJIT_Result check_op(
               "stores into the heap go through the engine's helper",
               block, index);
         }
+        if (op->b.kind == GRJIT_OPERAND_VREG && vreg_ok(v, op->b.vreg) &&
+            is_i32(type_of(v, op->b.vreg))) {
+          return GRJIT_OK; /* the low width bits of an i32 */
+        }
         return check_operand(v, "stored value", &op->b, false, block, index);
       }
-      return check_dst(v, op, false, block, index);
+      if ((r = check_dst(v, op, false, block, index)) != GRJIT_OK) {
+        return r;
+      }
+      if (is_i32(type_of(v, op->dst)) && (op->kind == GRJIT_OP_LOAD_S || op->width == 64)) {
+        return refuse(v, GRJIT_ERR_INVALID,
+            "block b%u op %zu: an i32 register takes a zero-extending load of at "
+            "most 32 bits (a sign-extending or 64-bit load would leave its upper "
+            "half non-zero)",
+            block, index);
+      }
+      return GRJIT_OK;
     }
     case GRJIT_OP_CALL: {
       size_t max_args = v->limits.max_call_arguments < GRJIT_BACKEND_MAX_ARGS
@@ -497,8 +676,7 @@ static GRJIT_Result check_op(
       }
       return check_state(v, op, block, index);
     case GRJIT_OP_GUARD:
-      if ((r = check_operand(v, "condition", &op->a, false, block, index)) !=
-          GRJIT_OK) {
+      if ((r = check_condition(v, &op->a, block, index)) != GRJIT_OK) {
         return r;
       }
       return check_state(v, op, block, index);
@@ -510,8 +688,7 @@ static GRJIT_Result check_op(
       }
       return GRJIT_OK;
     case GRJIT_OP_BR_IF:
-      if ((r = check_operand(v, "condition", &op->a, false, block, index)) !=
-          GRJIT_OK) {
+      if ((r = check_condition(v, &op->a, block, index)) != GRJIT_OK) {
         return r;
       }
       if (op->target >= v->f->block_count ||
@@ -558,7 +735,7 @@ static GRJIT_Result check_structure(Verify * v) {
   }
   for (size_t r = 0; r < f->vreg_count; r++) {
     const GRJIT_VRegInfo * info = &f->vregs[r];
-    if ((unsigned)info->type >= (unsigned)GRJIT_TYPE_COUNT) {
+    if (!grjit_type_valid(info->type)) {
       return refuse(v, GRJIT_ERR_INVALID, "v%zu has an unknown type", r);
     }
     if (!info->derived) {
@@ -756,6 +933,290 @@ static GRJIT_Result check_derived(Verify * v) {
   return r;
 }
 
+
+/* ---- The guards of the partial operations ------------------------------------------------
+ *
+ * A division or a remainder faults in x86 hardware on a zero divisor, and `idiv` also on
+ * `MIN / -1`, and is a trap in WebAssembly. The operation never traps by itself (the IR has
+ * no operation that traps or has undefined behaviour in hardware): the frontend puts the
+ * guards in front of it as ordinary IR, and this pass refuses a division with no guard.
+ *
+ * The rule is about one basic block, read in order. A fact is recorded when a `GUARD` passes
+ * and holds until a register it is about is assigned again:
+ *
+ *   non-zero(d)     the guard's operand is `d`, or a `CMP NE d, #0` / `CMP UGT d, #0` /
+ *                   `CMP ULT #0, d` of it, which was not changed between the comparison and
+ *                   the guard;
+ *   no-overflow(a, b)  the guard's operand is a `CMP EQ t, #0` of `t = AND(e1, e2)` with
+ *                   `e1 = CMP EQ a, #MIN` and `e2 = CMP EQ b, #-1`, or `OR(n1, n2)` with
+ *                   `n1 = CMP NE a, #MIN` and `n2 = CMP NE b, #-1` (the two in either order);
+ *   not-MIN(a)      for a constant divisor -1: a `CMP NE a, #MIN`.
+ *
+ * A fact is a *tick* (the position of the guard in the run of operations), and "assigned
+ * again" is a later tick of definition, so one comparison answers it. A constant divisor is
+ * judged as it stands: zero is refused, and a constant that is not -1 cannot overflow. */
+
+typedef struct Partial {
+  uint64_t * tick;       /* per register: the tick of its latest definition anywhere */
+  const GRJIT_Op ** def; /* per register: the operation of that definition */
+  uint64_t * nonzero;    /* per register: the tick of the guard that proved it non-zero */
+  uint64_t * no_ovf;     /* per divisor: the tick of the guard that proved `a / b` cannot overflow */
+  GRJIT_VReg * ovf_a;    /* ... and the dividend it was about */
+  uint64_t * not_min;    /* per dividend: the tick of a guard that proved it is not MIN */
+  uint64_t now;
+  uint64_t block_start;
+} Partial;
+
+static bool is_partial_op(GRJIT_OpKind k) {
+  return k == GRJIT_OP_DIV_S || k == GRJIT_OP_DIV_U || k == GRJIT_OP_REM_S ||
+         k == GRJIT_OP_REM_U;
+}
+
+static bool imm_is(const GRJIT_Operand * o, GRJIT_Type width, int64_t sixty_four,
+    uint32_t thirty_two) {
+  if (o->kind != GRJIT_OPERAND_IMM) {
+    return false;
+  }
+  return width == GRJIT_TYPE_I32 ? (uint32_t)o->imm == thirty_two && imm32_ok(o->imm)
+                                 : o->imm == sixty_four;
+}
+
+static bool imm_zero(const GRJIT_Operand * o, GRJIT_Type w) { return imm_is(o, w, 0, 0); }
+static bool imm_min(const GRJIT_Operand * o, GRJIT_Type w) {
+  return imm_is(o, w, INT64_MIN, UINT32_C(0x80000000));
+}
+static bool imm_neg1(const GRJIT_Operand * o, GRJIT_Type w) {
+  return imm_is(o, w, -1, UINT32_C(0xFFFFFFFF));
+}
+
+/* The register `x` was defined in this block and not again after `tick`. */
+static bool defined_here(const Partial * p, GRJIT_VReg x) {
+  return p->tick[x] >= p->block_start && p->def[x] != NULL;
+}
+
+static bool vreg_operand(const GRJIT_Operand * o) { return o->kind == GRJIT_OPERAND_VREG; }
+
+/* `cmp` is a `CMP` of the shape `x cmp #value` (or its mirror) in which `x` is a register
+ * not changed since the comparison was made at `at`; answers `x`, or NO_VREG. */
+static GRJIT_VReg cmp_reg_against(const Verify * v, const Partial * p, const GRJIT_Op * cmp,
+    uint64_t at, bool (*imm_ok)(const GRJIT_Operand *, GRJIT_Type), bool mirror_ok,
+    GRJIT_Cmp want, GRJIT_Cmp mirror) {
+  const GRJIT_Operand * x = NULL;
+  const GRJIT_Operand * k = NULL;
+  if (cmp->cmp == want && vreg_operand(&cmp->a)) {
+    x = &cmp->a;
+    k = &cmp->b;
+  } else if (mirror_ok && cmp->cmp == mirror && vreg_operand(&cmp->b)) {
+    x = &cmp->b;
+    k = &cmp->a;
+  } else {
+    return GRJIT_NO_VREG;
+  }
+  if (!vreg_ok(v, x->vreg) || !imm_ok(k, type_of(v, x->vreg)) || p->tick[x->vreg] >= at) {
+    return GRJIT_NO_VREG;
+  }
+  return x->vreg;
+}
+
+/* `e` is a register defined in this block, before `before`, by `CMP cmp r, #imm_ok` whose
+ * register is unchanged since: answers `r`. */
+static GRJIT_VReg flag_of(const Verify * v, const Partial * p, GRJIT_VReg e, uint64_t before,
+    GRJIT_Cmp cmp, bool (*imm_ok)(const GRJIT_Operand *, GRJIT_Type)) {
+  if (!vreg_ok(v, e) || !defined_here(p, e) || p->tick[e] >= before ||
+      p->def[e]->kind != GRJIT_OP_CMP) {
+    return GRJIT_NO_VREG;
+  }
+  return cmp_reg_against(v, p, p->def[e], p->tick[e], imm_ok, false, cmp, cmp);
+}
+
+/* The two registers of `join` (an AND or an OR defined here before `before`) are flags of
+ * `cmp_a r_a, #imm_a` and `cmp_b r_b, #imm_b` in either order: answers both registers. */
+static bool joined_flags(const Verify * v, const Partial * p, const GRJIT_Op * join,
+    uint64_t join_tick, GRJIT_Cmp cmp, GRJIT_VReg * a, GRJIT_VReg * b) {
+  if (!vreg_operand(&join->a) || !vreg_operand(&join->b)) {
+    return false;
+  }
+  for (int swap = 0; swap < 2; swap++) {
+    GRJIT_VReg e1 = swap ? join->b.vreg : join->a.vreg;
+    GRJIT_VReg e2 = swap ? join->a.vreg : join->b.vreg;
+    GRJIT_VReg ra = flag_of(v, p, e1, join_tick, cmp, imm_min);
+    GRJIT_VReg rb = flag_of(v, p, e2, join_tick, cmp, imm_neg1);
+    if (ra != GRJIT_NO_VREG && rb != GRJIT_NO_VREG) {
+      *a = ra;
+      *b = rb;
+      return true;
+    }
+  }
+  return false;
+}
+
+static void record_guard(const Verify * v, Partial * p, const GRJIT_Operand * cond) {
+  if (!vreg_operand(cond) || !vreg_ok(v, cond->vreg)) {
+    return;
+  }
+  const GRJIT_VReg c = cond->vreg;
+  const uint64_t now = p->now;
+  p->nonzero[c] = now; /* the guard passed: its operand is not zero */
+  if (!defined_here(p, c)) {
+    return;
+  }
+  const GRJIT_Op * m = p->def[c];
+  const uint64_t at = p->tick[c];
+  GRJIT_VReg a = GRJIT_NO_VREG, b = GRJIT_NO_VREG;
+  switch (m->kind) {
+    case GRJIT_OP_CMP: {
+      GRJIT_VReg x = cmp_reg_against(v, p, m, at, imm_zero, true, GRJIT_CMP_NE, GRJIT_CMP_NE);
+      if (x == GRJIT_NO_VREG) {
+        x = cmp_reg_against(v, p, m, at, imm_zero, true, GRJIT_CMP_UGT, GRJIT_CMP_ULT);
+      }
+      if (x != GRJIT_NO_VREG) {
+        p->nonzero[x] = now;
+        return;
+      }
+      x = cmp_reg_against(v, p, m, at, imm_min, false, GRJIT_CMP_NE, GRJIT_CMP_NE);
+      if (x != GRJIT_NO_VREG) {
+        p->not_min[x] = now;
+        return;
+      }
+      /* AND shape: c = CMP EQ t, #0 with t = AND(CMP EQ a, #MIN; CMP EQ b, #-1). */
+      GRJIT_VReg t = cmp_reg_against(v, p, m, at, imm_zero, true, GRJIT_CMP_EQ, GRJIT_CMP_EQ);
+      if (t != GRJIT_NO_VREG && defined_here(p, t) && p->def[t]->kind == GRJIT_OP_AND &&
+          joined_flags(v, p, p->def[t], p->tick[t], GRJIT_CMP_EQ, &a, &b)) {
+        p->no_ovf[b] = now;
+        p->ovf_a[b] = a;
+      }
+      return;
+    }
+    case GRJIT_OP_OR:
+      /* OR shape: c = OR(CMP NE a, #MIN; CMP NE b, #-1). */
+      if (joined_flags(v, p, m, at, GRJIT_CMP_NE, &a, &b)) {
+        p->no_ovf[b] = now;
+        p->ovf_a[b] = a;
+      }
+      return;
+    default:
+      return;
+  }
+}
+
+static bool fresh(const Partial * p, uint64_t proof, GRJIT_VReg x) {
+  return proof != 0 && proof >= p->block_start && proof > p->tick[x];
+}
+
+static GRJIT_Result check_one_partial(Verify * v, const Partial * p, const GRJIT_Op * op,
+    GRJIT_BlockId block, size_t index) {
+  const GRJIT_Type w = type_of(v, op->dst);
+  const char * name = op->kind == GRJIT_OP_DIV_S   ? "div_s"
+                      : op->kind == GRJIT_OP_DIV_U ? "div_u"
+                      : op->kind == GRJIT_OP_REM_S ? "rem_s"
+                                                   : "rem_u";
+  if (op->b.kind == GRJIT_OPERAND_IMM) {
+    if (imm_zero(&op->b, w)) {
+      return refuse(v, GRJIT_ERR_INVALID,
+          "block b%u op %zu: %s by the constant zero (a trap, to be written as one)", block,
+          index, name);
+    }
+  } else if (!fresh(p, p->nonzero[op->b.vreg], op->b.vreg)) {
+    return refuse(v, GRJIT_ERR_INVALID,
+        "block b%u op %zu: %s needs, earlier in the same block and with v%u not assigned in "
+        "between, a guard that the divisor v%u is not zero (a GUARD of it, or of a CMP NE or "
+        "UGT of it with #0)",
+        block, index, name, op->b.vreg, op->b.vreg);
+  }
+  if (op->kind != GRJIT_OP_DIV_S) {
+    return GRJIT_OK;
+  }
+  /* Signed division also overflows: MIN / -1. */
+  bool ok;
+  if (op->b.kind == GRJIT_OPERAND_IMM) {
+    if (!imm_neg1(&op->b, w)) {
+      ok = true;
+    } else if (op->a.kind == GRJIT_OPERAND_IMM) {
+      ok = !imm_min(&op->a, w);
+    } else {
+      ok = fresh(p, p->not_min[op->a.vreg], op->a.vreg);
+    }
+  } else if (op->a.kind == GRJIT_OPERAND_IMM) {
+    ok = !imm_min(&op->a, w); /* a constant dividend other than MIN cannot overflow */
+  } else {
+    const GRJIT_VReg b = op->b.vreg;
+    ok = p->ovf_a[b] == op->a.vreg && fresh(p, p->no_ovf[b], b) &&
+         fresh(p, p->no_ovf[b], op->a.vreg);
+  }
+  if (!ok) {
+    return refuse(v, GRJIT_ERR_INVALID,
+        "block b%u op %zu: div_s needs, earlier in the same block and with its operands not "
+        "assigned in between, a guard that the dividend is not MIN or the divisor is not -1 "
+        "(a CMP EQ a, #MIN and a CMP EQ b, #-1 joined by AND and tested EQ #0, or the two "
+        "CMP NE joined by OR)",
+        block, index);
+  }
+  return GRJIT_OK;
+}
+
+static GRJIT_Result check_partial(Verify * v) {
+  const GRJIT_Function * f = v->f;
+  bool any = false;
+  for (size_t b = 0; b < f->block_count && !any; b++) {
+    for (size_t i = 0; i < f->blocks[b].count; i++) {
+      if (is_partial_op(f->blocks[b].ops[i].kind)) {
+        any = true;
+        break;
+      }
+    }
+  }
+  if (!any) {
+    return GRJIT_OK;
+  }
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 38
+  /* Planted defect 38 (tests only): the verifier does not require the guards of a
+   * partial operation. The negative tests and the Wasm harness must catch it. */
+  return GRJIT_OK;
+#endif
+  const GRJIT_Allocator * a = f->allocator;
+  const size_t n = f->vreg_count;
+  Partial p;
+  memset(&p, 0, sizeof p);
+  uint64_t * words = a->calloc_fn(a->ctx, n == 0 ? 1 : n, 4 * sizeof *words);
+  const GRJIT_Op ** defs = a->calloc_fn(a->ctx, n == 0 ? 1 : n, sizeof *defs);
+  GRJIT_VReg * dividends = a->calloc_fn(a->ctx, n == 0 ? 1 : n, sizeof *dividends);
+  if (words == NULL || defs == NULL || dividends == NULL) {
+    a->free_fn(a->ctx, words);
+    a->free_fn(a->ctx, defs);
+    a->free_fn(a->ctx, dividends);
+    return GRJIT_ERR_OOM;
+  }
+  p.tick = words;
+  p.nonzero = words + n;
+  p.no_ovf = words + 2 * n;
+  p.not_min = words + 3 * n;
+  p.def = defs;
+  p.ovf_a = dividends;
+  GRJIT_Result result = GRJIT_OK;
+  for (size_t b = 0; b < f->block_count && result == GRJIT_OK; b++) {
+    const GRJIT_BlockInfo * blk = &f->blocks[b];
+    p.block_start = ++p.now;
+    for (size_t i = 0; i < blk->count && result == GRJIT_OK; i++) {
+      const GRJIT_Op * op = &blk->ops[i];
+      p.now++;
+      if (is_partial_op(op->kind)) {
+        result = check_one_partial(v, &p, op, (GRJIT_BlockId)b, i);
+      } else if (op->kind == GRJIT_OP_GUARD) {
+        record_guard(v, &p, &op->a);
+      }
+      GRJIT_VReg d = grjit_op_def(op);
+      if (d != GRJIT_NO_VREG && d < n) {
+        p.tick[d] = p.now;
+        p.def[d] = op;
+      }
+    }
+  }
+  a->free_fn(a->ctx, words);
+  a->free_fn(a->ctx, defs);
+  a->free_fn(a->ctx, dividends);
+  return result;
+}
+
 GRJIT_Result grjit_function_verify(const GRJIT_Function * function,
     const GRJIT_Limits * limits, char * reason, size_t reason_size) {
   if (function == NULL) {
@@ -788,6 +1249,10 @@ GRJIT_Result grjit_function_verify(const GRJIT_Function * function,
     return r;
   }
   r = check_assigned(&v);
+  if (r != GRJIT_OK) {
+    return r;
+  }
+  r = check_partial(&v);
   if (r != GRJIT_OK) {
     return r;
   }

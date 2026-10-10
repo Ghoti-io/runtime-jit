@@ -98,7 +98,8 @@ GRJIT_API GRJIT_Result grjit_builder_finish(
  * Parameters are the first registers, so this is refused with
  * ::GRJIT_ERR_INVALID once any other register exists.
  *
- * @param type ::GRJIT_TYPE_I64, ::GRJIT_TYPE_REF or ::GRJIT_TYPE_PTR.
+ * @param type ::GRJIT_TYPE_I64, ::GRJIT_TYPE_I32, ::GRJIT_TYPE_REF or
+ *   ::GRJIT_TYPE_PTR. An `I32` parameter arrives as the low 32 bits of its word.
  * @param out_vreg Receives the register, only on success.
  * @return ::GRJIT_OK, ::GRJIT_ERR_INVALID, ::GRJIT_ERR_LIMIT or
  *   ::GRJIT_ERR_OOM.
@@ -209,7 +210,12 @@ GRJIT_API GRJIT_Result grjit_builder_bitcast(
     GRJIT_Builder * builder, GRJIT_VReg dst, GRJIT_VReg src);
 
 /**
- * @brief `dst = a op b` for ADD, SUB, MUL, AND, OR, XOR, SHL, SHR and SAR.
+ * @brief `dst = a op b` for ADD, SUB, MUL, AND, OR, XOR, SHL, SHR, SAR, ROTL,
+ *   ROTR, DIV_S, DIV_U, REM_S and REM_U.
+ *
+ * The width is the destination's (ir.h). The four divisions are *partial*: build
+ * the guards in front of them with ::grjit_builder_guard, or the verifier
+ * refuses the function. The builder adds nothing of its own.
  *
  * @return ::GRJIT_ERR_INVALID for another kind.
  */
@@ -217,7 +223,8 @@ GRJIT_API GRJIT_Result grjit_builder_binary(GRJIT_Builder * builder,
     GRJIT_OpKind kind, GRJIT_VReg dst, GRJIT_Operand a, GRJIT_Operand b);
 
 /**
- * @brief `dst = op a` for NEG and NOT.
+ * @brief `dst = op a` for NEG, NOT, CLZ, CTZ, POPCNT, EXT8_S, EXT16_S, EXT32_S,
+ *   WRAP, EXTEND_S and EXTEND_U.
  *
  * @return ::GRJIT_ERR_INVALID for another kind.
  */

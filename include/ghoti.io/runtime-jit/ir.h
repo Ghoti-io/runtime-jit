@@ -35,6 +35,12 @@
  * must do with it:
  *
  * - ::GRJIT_TYPE_I64: plain bits. Never in a stack map.
+ * - ::GRJIT_TYPE_I32: a 32-bit integer, **zero-extended in its 64-bit word at
+ *   all times**: the upper 32 bits are 0 after every operation that produces
+ *   one, on entry as a parameter (the entry masks it) and in a call result, so
+ *   an entry word, a `RET` and a helper's argument stay `uint64_t` words with no
+ *   undefined half. Never in a stack map; a frame state names it with the
+ *   representation `GRCORE_REPR_I32`.
  * - ::GRJIT_TYPE_REF: an engine value word, which may be a reference. In a
  *   stack map it has slot kind `VALUE`.
  * - ::GRJIT_TYPE_PTR: a raw non-GC word (an address in the native heap, a
@@ -42,15 +48,29 @@
  *   declared with ::grjit_builder_derived and recorded as a (slot, base slot,
  *   delta) triple.
  *
- * There is no floating point and there are no 32-bit or 8-bit values: memory
- * access has widths 8, 16, 32 and 64 bits, a narrow load zero-extends
- * (`LOAD`) or sign-extends (`LOAD_S`) into the 64-bit register, and a narrow
- * store writes the low bits.
+ * There is no floating point: memory access has widths 8, 16, 32 and 64 bits,
+ * a narrow load zero-extends (`LOAD`) or sign-extends (`LOAD_S`) into the 64-bit
+ * register (an `I32` register takes a zero-extending load of at most 32 bits),
+ * and a narrow store writes the low bits.
  *
- * Arithmetic wraps modulo 2^64. A shift takes its count modulo 64, as x86-64
- * does, and the evaluator in the tests does the same. `CMP` produces an `I64`
- * that is 0 or 1; `LT`, `LE`, `GT` and `GE` are signed, `ULT`, `ULE`, `UGT`
- * and `UGE` unsigned.
+ * **Integer width.** The width of an arithmetic operation is the type of its
+ * destination: an `I32` destination makes it a 32-bit operation on `I32`
+ * operands (an immediate is read as its low 32 bits, and must lie in
+ * `[INT32_MIN, UINT32_MAX]`), an `I64` destination a 64-bit operation. The two
+ * widths never mix: `WRAP`, `EXTEND_S` and `EXTEND_U` convert. Arithmetic wraps
+ * modulo 2^32 or 2^64. A shift or a rotate takes its count modulo the width (32
+ * or 64), as WebAssembly does and as x86-64's instructions of that width do, and
+ * the evaluator in the tests does the same. `CMP` produces 0 or 1 in an `I64` or
+ * an `I32` register (the width of the comparison is that of its register
+ * operands); `LT`, `LE`, `GT` and `GE` are signed, `ULT`, `ULE`, `UGT` and `UGE`
+ * unsigned. `eqz` is `CMP EQ x, #0`.
+ *
+ * **Partial operations.** `DIV_S`, `DIV_U`, `REM_S` and `REM_U` are partial: a
+ * zero divisor, and `MIN / -1` in `DIV_S`, are traps in WebAssembly and faults
+ * in x86 hardware. The operation itself never traps: the frontend puts the
+ * guards in front of it as ordinary IR (a `GUARD`, which fires when its operand
+ * is 0), and the verifier rejects the operation when they are not there (see
+ * ::GRJIT_OP_DIV_S). `REM_S` of `MIN % -1` is 0 and needs no guard.
  *
  * A `STORE` of a `REF` into a GC object is not expressible: stores into the
  * heap go through an engine-supplied helper `CALL` (the engine's `gc_store`),
@@ -116,6 +136,10 @@ typedef enum GRJIT_Type {
   GRJIT_TYPE_I64,  ///< Plain 64-bit bits.
   GRJIT_TYPE_REF,  ///< An engine value word that may be a reference.
   GRJIT_TYPE_PTR,  ///< A raw, non-GC word.
+  /** Never a type: the value 3 is ::GRJIT_NATIVE_NO_RESULT's, and stays so, so
+   *  that no constant a client compiled against moves when a type is added. */
+  GRJIT_TYPE_RESERVED_NO_RESULT,
+  GRJIT_TYPE_I32,  ///< A 32-bit integer, zero-extended in its word.
   GRJIT_TYPE_COUNT ///< Not a type; closes the enum.
 } GRJIT_Type;
 
@@ -172,9 +196,9 @@ typedef enum GRJIT_OpKind {
   GRJIT_OP_AND,    ///< `dst = a & b`.
   GRJIT_OP_OR,     ///< `dst = a | b`.
   GRJIT_OP_XOR,    ///< `dst = a ^ b`.
-  GRJIT_OP_SHL,    ///< `dst = a << (b mod 64)`.
-  GRJIT_OP_SHR,    ///< `dst = a >> (b mod 64)`, logical.
-  GRJIT_OP_SAR,    ///< `dst = a >> (b mod 64)`, arithmetic.
+  GRJIT_OP_SHL,    ///< `dst = a << (b mod width)`; the width is 64, or 32 for an `I32`.
+  GRJIT_OP_SHR,    ///< `dst = a >> (b mod width)`, logical.
+  GRJIT_OP_SAR,    ///< `dst = a >> (b mod width)`, arithmetic.
   GRJIT_OP_NEG,    ///< `dst = -a`.
   GRJIT_OP_NOT,    ///< `dst = ~a`.
   GRJIT_OP_CMP,    ///< `dst = (a cmp b) ? 1 : 0`.
@@ -208,6 +232,31 @@ typedef enum GRJIT_OpKind {
                       ///< natives.h) with `args`, in a callable function: a GC
                       ///< point with the frame state `state`, and, for a native
                       ///< with a status, `exit_state`, the state after the call.
+  /* The integer operations of numeric-operations.md (spec-runtime-float). All are
+   * built with ::grjit_builder_binary or ::grjit_builder_unary; the width is the
+   * destination's. They are appended, so no value above moved. */
+  GRJIT_OP_CLZ,    ///< `dst = ` the leading zero bits of `a`; the width for 0.
+  GRJIT_OP_CTZ,    ///< `dst = ` the trailing zero bits of `a`; the width for 0.
+  GRJIT_OP_POPCNT, ///< `dst = ` the number of set bits of `a`.
+  GRJIT_OP_ROTL,   ///< `dst = a` rotated left by `b mod width`.
+  GRJIT_OP_ROTR,   ///< `dst = a` rotated right by `b mod width`.
+  GRJIT_OP_EXT8_S, ///< `dst = ` the low 8 bits of `a`, sign-extended to the width.
+  GRJIT_OP_EXT16_S, ///< The same for the low 16 bits.
+  GRJIT_OP_EXT32_S, ///< The same for the low 32 bits; `I64` only.
+  GRJIT_OP_DIV_S,  ///< `dst = a / b`, signed, truncating. **Partial**: needs, earlier
+                   ///< in the same block, a `GUARD` whose operand is `b` itself or a
+                   ///< `CMP NE b, #0` (or `UGT b, #0`) of it, with `b` not assigned in
+                   ///< between; and a guard that `a == MIN && b == -1` is false (a `CMP
+                   ///< EQ a, #MIN` and a `CMP EQ b, #-1` joined by `AND`, tested for
+                   ///< `EQ #0`, or the same two `CMP NE` joined by `OR`), with neither
+                   ///< assigned in between. A constant divisor is judged as one.
+  GRJIT_OP_DIV_U,  ///< `dst = a / b`, unsigned. **Partial**: needs the divisor guard.
+  GRJIT_OP_REM_S,  ///< `dst = a % b`, signed, with the sign of `a`; `MIN % -1` is 0.
+                   ///< **Partial**: needs the divisor guard, and not the overflow one.
+  GRJIT_OP_REM_U,  ///< `dst = a % b`, unsigned. **Partial**: needs the divisor guard.
+  GRJIT_OP_WRAP,   ///< `dst = a mod 2^32`: `I64` to `I32` (`i32.wrap_i64`).
+  GRJIT_OP_EXTEND_S, ///< `dst = a` sign-extended: `I32` to `I64` (`i64.extend_i32_s`).
+  GRJIT_OP_EXTEND_U, ///< `dst = a` zero-extended: `I32` to `I64` (`i64.extend_i32_u`).
   GRJIT_OP_COUNT   ///< Not an operation; closes the enum.
 } GRJIT_OpKind;
 

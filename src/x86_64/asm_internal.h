@@ -75,6 +75,12 @@ typedef enum GRJIT_AluOp {
   GRJIT_ALU_SUB = 0x29, GRJIT_ALU_XOR = 0x31, GRJIT_ALU_CMP = 0x39
 } GRJIT_AluOp;
 
+/** The shifts and rotates, by their ModRM extension in `D1`/`D3`/`C1`. */
+typedef enum GRJIT_ShiftOp {
+  GRJIT_SHIFT_ROL = 0, GRJIT_SHIFT_ROR = 1, GRJIT_SHIFT_SHL = 4,
+  GRJIT_SHIFT_SHR = 5, GRJIT_SHIFT_SAR = 7
+} GRJIT_ShiftOp;
+
 /** What went wrong, if anything. */
 typedef enum GRJIT_AsmStatus {
   GRJIT_ASM_OK,
@@ -169,6 +175,38 @@ void grjit_asm_shl_cl(GRJIT_Asm * a, GRJIT_Reg r);
 void grjit_asm_shr_cl(GRJIT_Asm * a, GRJIT_Reg r);
 void grjit_asm_sar_cl(GRJIT_Asm * a, GRJIT_Reg r);
 void grjit_asm_test_rr(GRJIT_Asm * a, GRJIT_Reg x, GRJIT_Reg y);
+
+/* The forms the integer operations of numeric-operations.md need (spec-runtime-float).
+ * The 32-bit forms are real 32-bit instructions: the hardware masks a shift count to
+ * five bits, and the upper half of the destination is cleared. */
+/** `op r32, r32` (the 32-bit twin of ::grjit_asm_alu_rr). */
+void grjit_asm_alu32_rr(GRJIT_Asm * a, GRJIT_AluOp op, GRJIT_Reg dst, GRJIT_Reg src);
+/** `imul r32, r32`. */
+void grjit_asm_imul32_rr(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg src);
+/** `neg r32` and `not r32`. */
+void grjit_asm_neg32(GRJIT_Asm * a, GRJIT_Reg r);
+void grjit_asm_not32(GRJIT_Asm * a, GRJIT_Reg r);
+/** A shift or rotate of `r` by `cl`, 64 bits when `wide` and 32 otherwise. */
+void grjit_asm_shift_cl(GRJIT_Asm * a, GRJIT_ShiftOp op, GRJIT_Reg r, bool wide);
+/** The same by an immediate count. */
+void grjit_asm_shift_ri(GRJIT_Asm * a, GRJIT_ShiftOp op, GRJIT_Reg r, uint8_t count, bool wide);
+/** `movsx`/`movsxd` of the low 8, 16 or 32 bits of `src` into `dst`, 64 bits when `wide`
+ *  (32 bits is `movsxd` and only exists wide). */
+void grjit_asm_movsx(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg src, unsigned from_bits, bool wide);
+/** `bsr` and `bsf`: the index of the highest and lowest set bit of `src`; ZF is set, and
+ *  `dst` unspecified, when `src` is zero. */
+void grjit_asm_bsr(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg src, bool wide);
+void grjit_asm_bsf(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg src, bool wide);
+/** `cmovcc dst, src`. */
+void grjit_asm_cmov(GRJIT_Asm * a, GRJIT_Cond cond, GRJIT_Reg dst, GRJIT_Reg src, bool wide);
+/** `cdq` and `cqo`: sign-extend `eax` into `edx`, `rax` into `rdx`. */
+void grjit_asm_cdq(GRJIT_Asm * a);
+void grjit_asm_cqo(GRJIT_Asm * a);
+/** `div r` and `idiv r` (`edx:eax` or `rdx:rax` over `r`): raise #DE in hardware on a zero
+ *  divisor, and `idiv` on an overflowing quotient. Only guarded code reaches them. */
+void grjit_asm_div(GRJIT_Asm * a, GRJIT_Reg r, bool is_signed, bool wide);
+/** `cmp r32, imm8` (sign-extended). */
+void grjit_asm_cmp_ri32(GRJIT_Asm * a, GRJIT_Reg r, int8_t imm);
 void grjit_asm_setcc(GRJIT_Asm * a, GRJIT_Cond cond, GRJIT_Reg r);
 /** `movzx r32, r8`, which clears the upper half of the 64-bit register. */
 void grjit_asm_movzx_r8(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg src);

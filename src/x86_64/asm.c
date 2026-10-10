@@ -323,6 +323,116 @@ void grjit_asm_sar_cl(GRJIT_Asm * a, GRJIT_Reg r) {
   group3(a, 0xD3, 7, r);
 }
 
+static void group3w(GRJIT_Asm * a, bool w, uint8_t opcode, int ext, GRJIT_Reg r) {
+  note(a, r);
+  rex(a, w, 0, r, false);
+  byte(a, opcode);
+  modrm_rr(a, ext, r);
+}
+
+void grjit_asm_alu32_rr(GRJIT_Asm * a, GRJIT_AluOp op, GRJIT_Reg dst, GRJIT_Reg src) {
+  note(a, dst);
+  note(a, src);
+  rex(a, false, src, dst, false);
+  byte(a, (uint8_t)op);
+  modrm_rr(a, src, dst);
+}
+
+void grjit_asm_imul32_rr(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg src) {
+  note(a, dst);
+  note(a, src);
+  rex(a, false, dst, src, false);
+  byte(a, 0x0F);
+  byte(a, 0xAF);
+  modrm_rr(a, dst, src);
+}
+
+void grjit_asm_neg32(GRJIT_Asm * a, GRJIT_Reg r) {
+  group3w(a, false, 0xF7, 3, r);
+}
+
+void grjit_asm_not32(GRJIT_Asm * a, GRJIT_Reg r) {
+  group3w(a, false, 0xF7, 2, r);
+}
+
+void grjit_asm_shift_cl(GRJIT_Asm * a, GRJIT_ShiftOp op, GRJIT_Reg r, bool wide) {
+  group3w(a, wide, 0xD3, (int)op, r);
+}
+
+void grjit_asm_shift_ri(GRJIT_Asm * a, GRJIT_ShiftOp op, GRJIT_Reg r, uint8_t count, bool wide) {
+  group3w(a, wide, 0xC1, (int)op, r);
+  byte(a, count);
+}
+
+void grjit_asm_movsx(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg src, unsigned from_bits, bool wide) {
+  note(a, dst);
+  note(a, src);
+  if (from_bits == 32) {
+    /* movsxd r64, r/m32; there is no 32-to-32 form. */
+    rex(a, true, dst, src, false);
+    byte(a, 0x63);
+  } else {
+    rex(a, wide, dst, src, from_bits == 8 && src >= 4 && src < 8);
+    byte(a, 0x0F);
+    byte(a, from_bits == 8 ? 0xBE : 0xBF);
+  }
+  modrm_rr(a, dst, src);
+}
+
+void grjit_asm_bsr(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg src, bool wide) {
+  note(a, dst);
+  note(a, src);
+  rex(a, wide, dst, src, false);
+  byte(a, 0x0F);
+  byte(a, 0xBD);
+  modrm_rr(a, dst, src);
+}
+
+void grjit_asm_bsf(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg src, bool wide) {
+  note(a, dst);
+  note(a, src);
+  rex(a, wide, dst, src, false);
+  byte(a, 0x0F);
+  byte(a, 0xBC);
+  modrm_rr(a, dst, src);
+}
+
+void grjit_asm_cmov(GRJIT_Asm * a, GRJIT_Cond cond, GRJIT_Reg dst, GRJIT_Reg src, bool wide) {
+  note(a, dst);
+  note(a, src);
+  rex(a, wide, dst, src, false);
+  byte(a, 0x0F);
+  byte(a, (uint8_t)(0x40 + cond));
+  modrm_rr(a, dst, src);
+}
+
+void grjit_asm_cdq(GRJIT_Asm * a) {
+  note(a, GRJIT_RAX);
+  note(a, GRJIT_RDX);
+  byte(a, 0x99);
+}
+
+void grjit_asm_cqo(GRJIT_Asm * a) {
+  note(a, GRJIT_RAX);
+  note(a, GRJIT_RDX);
+  byte(a, 0x48);
+  byte(a, 0x99);
+}
+
+void grjit_asm_div(GRJIT_Asm * a, GRJIT_Reg r, bool is_signed, bool wide) {
+  note(a, GRJIT_RAX);
+  note(a, GRJIT_RDX);
+  group3w(a, wide, 0xF7, is_signed ? 7 : 6, r);
+}
+
+void grjit_asm_cmp_ri32(GRJIT_Asm * a, GRJIT_Reg r, int8_t imm) {
+  note(a, r);
+  rex(a, false, 0, r, false);
+  byte(a, 0x83);
+  modrm_rr(a, 7, r);
+  byte(a, (uint8_t)imm);
+}
+
 void grjit_asm_test_rr(GRJIT_Asm * a, GRJIT_Reg x, GRJIT_Reg y) {
   note(a, x);
   note(a, y);

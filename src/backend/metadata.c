@@ -45,7 +45,8 @@ static GRCORE_CodeLocation slot_location(GRJIT_VReg v, GRJIT_Type type) {
   l.kind = GRCORE_LOC_FRAME_SLOT;
   l.slot_kind = type == GRJIT_TYPE_REF ? GRCORE_SLOT_VALUE : GRCORE_SLOT_RAW;
   l.value = grjit_emit_slot(v);
-  l.representation = GRCORE_REPR_BITS;
+  /* An i32 is zero-extended in its word; the engine reads it as 32 bits (AD-27). */
+  l.representation = type == GRJIT_TYPE_I32 ? GRCORE_REPR_I32 : GRCORE_REPR_BITS;
   return l;
 }
 

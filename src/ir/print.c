@@ -62,6 +62,9 @@ static const char * type_name(GRJIT_Type t) {
       return "ref";
     case GRJIT_TYPE_PTR:
       return "ptr";
+    case GRJIT_TYPE_I32:
+      return "i32";
+    case GRJIT_TYPE_RESERVED_NO_RESULT:
     case GRJIT_TYPE_COUNT:
       break;
   }
@@ -73,7 +76,8 @@ static const char * op_name(GRJIT_OpKind k) {
       "and", "or", "xor", "shl", "shr", "sar", "neg", "not", "cmp", "load",
       "load_s", "store", "call", "poll", "guard", "br", "br_if", "ret",
       "bitcast", "call_slot", "call_ptr", "tail_call_slot", "tail_call_ptr",
-      "call_native"};
+      "call_native", "clz", "ctz", "popcnt", "rotl", "rotr", "ext8_s", "ext16_s",
+      "ext32_s", "div_s", "div_u", "rem_s", "rem_u", "wrap", "extend_s", "extend_u"};
   _Static_assert(sizeof names / sizeof names[0] == (size_t)GRJIT_OP_COUNT,
       "one name for every operation");
   return (unsigned)k < (unsigned)GRJIT_OP_COUNT ? names[k] : "?";
@@ -152,6 +156,15 @@ static void put_op(Out * o, const GRJIT_Function * f, const GRJIT_Op * op) {
     case GRJIT_OP_BITCAST:
     case GRJIT_OP_NEG:
     case GRJIT_OP_NOT:
+    case GRJIT_OP_CLZ:
+    case GRJIT_OP_CTZ:
+    case GRJIT_OP_POPCNT:
+    case GRJIT_OP_EXT8_S:
+    case GRJIT_OP_EXT16_S:
+    case GRJIT_OP_EXT32_S:
+    case GRJIT_OP_WRAP:
+    case GRJIT_OP_EXTEND_S:
+    case GRJIT_OP_EXTEND_U:
       put(o, "%s ", op_name(op->kind));
       put_operand(o, &op->a);
       break;

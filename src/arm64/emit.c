@@ -720,6 +720,26 @@ static void emit_op(GRJIT_A64Emit * e, const GRJIT_Op * op, size_t block) {
     case GRJIT_OP_CALL_NATIVE:
       emit_native_call(e, op);
       break;
+    case GRJIT_OP_CLZ:
+    case GRJIT_OP_CTZ:
+    case GRJIT_OP_POPCNT:
+    case GRJIT_OP_EXT8_S:
+    case GRJIT_OP_EXT16_S:
+    case GRJIT_OP_EXT32_S:
+    case GRJIT_OP_WRAP:
+    case GRJIT_OP_EXTEND_S:
+    case GRJIT_OP_EXTEND_U:
+    case GRJIT_OP_ROTL:
+    case GRJIT_OP_ROTR:
+    case GRJIT_OP_DIV_S:
+    case GRJIT_OP_DIV_U:
+    case GRJIT_OP_REM_S:
+    case GRJIT_OP_REM_U:
+      /* Not yet (story 5 of spec-runtime-float); the function-wide check in
+       * grjit_a64_emit_function refuses first, and this arm keeps the refusal in force
+       * if that check is ever narrowed. */
+      e->c.error = GRJIT_ERR_UNSUPPORTED;
+      break;
     case GRJIT_OP_COUNT:
       e->c.error = GRJIT_ERR_INTERNAL;
       break;
@@ -994,6 +1014,13 @@ GRJIT_Result grjit_a64_emit_function(const GRJIT_Function * f,
     const GRJIT_Allocator * allocator, size_t max_code_bytes,
     GRJIT_EntryHook hook, uint32_t request_offset, uint32_t frame_bytes,
     const GRJIT_LiveSites * live, GRJIT_A64Emit * e) {
+  if (grjit_function_needs_int_ext(f)) {
+    /* The i32 type and the integer operations of numeric-operations.md are emitted for
+     * x86-64 SysV; story 5 of spec-runtime-float brings them to arm64. Until then the
+     * backend refuses the function by name, instead of emitting a 64-bit operation for a
+     * 32-bit one. `e` is the caller's zeroed record, which the free function accepts. */
+    return GRJIT_ERR_UNSUPPORTED;
+  }
   memset(e, 0, sizeof *e);
   grjit_emit_common_init(&e->c, f, GRJIT_ARM64_INTERNAL_REG_ARGS, allocator, hook,
       request_offset, frame_bytes, live);
