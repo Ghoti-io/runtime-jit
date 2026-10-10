@@ -601,6 +601,31 @@ TEST(CpuRecord, AMaskOfReservedBitsChangesNothingAndAFullMaskIsV1) {
       0);
 }
 
+TEST(CpuRecord, ATargetWithNoFeatureArmAcceptsAnyMaskAndRecordsNothing) {
+  // An integer-only function has no operation with a feature arm, so on every backend (x86-64 SysV and Win64,
+  // arm64) the mask is accepted, changes nothing, and the record is empty. On arm64 nothing is detected either.
+  GRJIT_REQUIRE_BACKEND();
+  JitWorld w;
+  floatfx::FloatOp op = floatfx::build_any_op("i64.add");
+  Fn f(op.function);
+  Code plain(f.f, w, 0), all(f.f, w, GRJIT_FEATURES_ALL), junk(f.f, w, 0xFFFFFFFFu);
+  ASSERT_EQ(plain.result, GRJIT_OK);
+  ASSERT_EQ(all.result, GRJIT_OK);
+  ASSERT_EQ(junk.result, GRJIT_OK);
+  EXPECT_EQ(grjit_code_features(plain.code), GRJIT_FEATURES_NONE);
+  EXPECT_EQ(grjit_code_features(all.code), GRJIT_FEATURES_NONE);
+  EXPECT_EQ(grjit_code_features(junk.code), GRJIT_FEATURES_NONE);
+  ASSERT_EQ(grjit_code_size(plain.code), grjit_code_size(all.code));
+  EXPECT_EQ(std::memcmp(grjit_code_address(plain.code), grjit_code_address(all.code), grjit_code_size(all.code)), 0)
+      << "the mask changes no byte of a function with no feature arm";
+  EXPECT_TRUE(grjit_code_usable_with(plain.code, GRJIT_FEATURES_NONE)) << "code that needs nothing runs anywhere";
+  EXPECT_EQ(grjit_features_effective(GRJIT_FEATURES_ALL), GRJIT_FEATURES_NONE);
+#if defined(__aarch64__)
+  EXPECT_EQ(grjit_features_detected(), GRJIT_FEATURES_NONE) << "arm64 needs no optional feature";
+  EXPECT_EQ(grjit_features_effective(0), GRJIT_FEATURES_NONE);
+#endif
+}
+
 TEST(CpuReuse, CodeRunsWhereItsRecordedSetIsASubsetOfTheRunningOneAndNowhereElse) {
   CPU_ONLY_ON_X86_64_LINUX();
   GRJIT_REQUIRE_FEATURE(GRJIT_FEATURE_LZCNT);
