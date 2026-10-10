@@ -594,7 +594,7 @@ TEST(Differential, GeneratedIntegerProgramsRunTheSameCompiledAndEvaluated) {
     }
     }
   }
-  // Run counts (of 3000 x 6 x the masks = 18000 runs per mask) and static counts (over the 3000 generated programs).
+  // Run counts (each of the 3000 programs is run with 6 argument sets under each mask, so 18000 runs per mask, summed over the masks) and static counts (over the 3000 generated programs).
   std::printf("integer differential: per run: %zu returned, %zu guard exits; static, summed over the operations of the 3000 programs: "
               "%zu divisions, %zu with a constant divisor, %zu with a constant dividend, %zu i32 "
               "operations with a negative immediate; and %zu of the programs have more than one block\n",

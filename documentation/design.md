@@ -2078,7 +2078,7 @@ empty set and `x86_64-v1+sse4.1+popcnt+lzcnt+bmi1` for the full one, always in b
 `GRJIT_FEATURES_STAMP_MAX` bytes always suffice. `grjit_features_from_stamp` is its inverse and fails
 closed: an unknown name, a repeated one, one out of order, a wrong prefix or trailing junk is
 `GRJIT_ERR_INVALID`, so a stamp from a build with a feature this one lacks is refused and the code
-regenerated. On arm64 the prefix is `arm64-v8` and no feature name is accepted. **No code cache and no
+regenerated. On arm64 the prefix is `arm64-v8` and no feature name is accepted; a target that is neither x86-64 nor aarch64 uses `generic-v0`. **No code cache and no
 cache stamp exists today** (`code.h`: a cache arrives with tier-up; lang-tang's `jit.c` cache is
 in-process and unstamped): this story ships the feature component of the stamp and the reuse predicate,
 tested, and not the cache that consumes them.
@@ -2100,7 +2100,7 @@ tested, and not the cache that consumes them.
   sweeps twice (what the host has, and `ALL` masked), and read the arm off the record. The generated
   integer and float programs of `testDifferential` run under every subset. `testWast` runs each of the
   ten Wasm files under the detected set and again with `ALL` masked, requires the counts of the two
-  arms to be equal (they are story 3's: `f32` 2,500 ...), requires the detected run to have compiled
+  arms to be equal (they are story 3's counts, e.g. 2,500 passed assertions in each of `f32` and `f64`), requires the detected run to have compiled
   the feature-arm functions each file holds (`i32` 3, `i64` 3, `f32` 4, `f64` 4, `float_misc` 8)
   with the recorded set non-empty, and the masked run to have compiled none.
 - *Fallback-only plants, caught on a host that has the features.* The existing plants in a sequence

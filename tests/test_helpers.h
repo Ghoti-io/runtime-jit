@@ -16,7 +16,9 @@
 #include <ghoti.io/runtime-core/runtime-core.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
@@ -380,15 +382,48 @@ inline std::string print(const GRJIT_Function * f) {
  * environment variable; the test fixtures do: GRJIT_TEST_DISABLE_FEATURES=all (or a number) runs a whole
  * suite on the v1 sequences of a host that has the features (spec-runtime-float, story 4). Unset means
  * nothing is disabled, which is what a zero-initialised GRJIT_CompileOptions means. */
-inline GRJIT_Features default_disabled_features() {
-  const char * v = std::getenv("GRJIT_TEST_DISABLE_FEATURES");
-  if (v == nullptr || *v == '\0' || std::strcmp(v, "none") == 0) {
-    return GRJIT_FEATURES_NONE;
+/* Parses the value of GRJIT_TEST_DISABLE_FEATURES: exactly `all`, exactly `none`, or a number that is
+ * consumed whole (decimal, 0x hex or 0 octal, no sign, no space). Anything else is refused, because a typo
+ * (`al`, `ALL`) that parsed to 0 would make a "masked" suite silently run the native arm. */
+inline bool parse_disabled_features(const char * v, GRJIT_Features * out) {
+  if (v == nullptr) {
+    return false;
+  }
+  if (std::strcmp(v, "none") == 0) {
+    *out = GRJIT_FEATURES_NONE;
+    return true;
   }
   if (std::strcmp(v, "all") == 0) {
-    return GRJIT_FEATURES_ALL;
+    *out = GRJIT_FEATURES_ALL;
+    return true;
   }
-  return static_cast<GRJIT_Features>(std::strtoul(v, nullptr, 0));
+  if (*v < '0' || *v > '9') {
+    return false;
+  }
+  char * end = nullptr;
+  errno = 0;
+  const unsigned long n = std::strtoul(v, &end, 0);
+  if (errno != 0 || *end != '\0' || n > 0xFFFFFFFFul) {
+    return false;
+  }
+  *out = static_cast<GRJIT_Features>(n);
+  return true;
+}
+
+/* Unset means nothing is disabled. A value that is set and is not valid aborts the test program with a message. */
+inline GRJIT_Features default_disabled_features() {
+  const char * v = std::getenv("GRJIT_TEST_DISABLE_FEATURES");
+  if (v == nullptr) {
+    return GRJIT_FEATURES_NONE;
+  }
+  GRJIT_Features f = GRJIT_FEATURES_NONE;
+  if (!parse_disabled_features(v, &f)) {
+    std::fprintf(stderr,
+        "GRJIT_TEST_DISABLE_FEATURES='%s' is not `all`, `none` or a number: refusing to run a suite on a mask "
+        "nobody meant\n", v);
+    std::abort();
+  }
+  return f;
 }
 
 /* Compiled code the test owns, with a call wrapper. */

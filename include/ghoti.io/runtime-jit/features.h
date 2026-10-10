@@ -117,11 +117,13 @@ GRJIT_API bool grjit_features_subset(GRJIT_Features a, GRJIT_Features b);
  * `x86_64-v1+sse4.1+popcnt+lzcnt+bmi1`: always in bit order, lowercase,
  * `+`-joined, NUL-terminated. On a target whose detected set is empty the
  * prefix is the target's own (`arm64-v8` on arm64) and no feature name is
- * accepted. ::GRJIT_FEATURES_STAMP_MAX bytes always suffice.
+ * accepted; a target that is neither x86-64 nor aarch64 uses the prefix `generic-v0`.
+ * ::GRJIT_FEATURES_STAMP_MAX bytes always suffice.
  *
  * @param features The set. A bit above ::GRJIT_FEATURES_ALL, or any bit on a
  *   target that has none, is ::GRJIT_ERR_INVALID.
- * @param buf Receives the text. Nothing is written to it unless it is whole.
+ * @param buf Receives the text. It is written whole or not at all, except that on
+ *   ::GRJIT_ERR_LIMIT with a non-NULL `buf` and a `size` above zero `buf[0]` is set to NUL.
  * @param size Its size in bytes.
  * @return ::GRJIT_OK; ::GRJIT_ERR_LIMIT if `buf` is too small (and, when `size`
  *   is not zero, `buf[0]` is set to NUL so nothing partial is mistaken for a

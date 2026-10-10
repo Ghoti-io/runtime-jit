@@ -339,7 +339,6 @@ TEST(CpuStamp, AMalformedStampFailsClosed) {
 }
 
 TEST(CpuStamp, AShortBufferIsRefusedWithNothingPartialAndAReservedBitIsInvalid) {
-  const GRJIT_Features full = GRJIT_FEATURES_ALL;
   const std::string text = stamp_of(GRJIT_FEATURES_NONE);
   char buf[GRJIT_FEATURES_STAMP_MAX];
   std::memset(buf, 'x', sizeof buf);
@@ -354,7 +353,6 @@ TEST(CpuStamp, AShortBufferIsRefusedWithNothingPartialAndAReservedBitIsInvalid) 
   EXPECT_EQ(grjit_features_stamp(GRJIT_FEATURES_NONE, buf, 0), GRJIT_ERR_LIMIT);
   EXPECT_EQ(buf[0], 'x');
   EXPECT_EQ(grjit_features_stamp(GRJIT_FEATURES_NONE, nullptr, 0), GRJIT_ERR_LIMIT);
-  (void)full;
   EXPECT_EQ(grjit_features_stamp(0x10, buf, sizeof buf), GRJIT_ERR_INVALID);
   EXPECT_EQ(grjit_features_stamp(0x80000000u, buf, sizeof buf), GRJIT_ERR_INVALID);
 #if defined(__x86_64__)
@@ -634,6 +632,70 @@ TEST(CpuRecord, ATargetWithNoFeatureArmAcceptsAnyMaskAndRecordsNothing) {
 #endif
 }
 
+TEST(CpuReuse, TheSubsetRuleHoldsForRecordedSetsBuiltByHandOnAnyHost) {
+  // The code objects here are never compiled or run: only their recorded set matters to the predicate, so the
+  // rule (and planted defect 61, the reversed predicate) is tested on a host with or without LZCNT, and on arm64.
+  GRJIT_Code needs_lzcnt{}, needs_nothing{}, needs_both{};
+  needs_lzcnt.features_used = GRJIT_FEATURE_LZCNT;
+  needs_both.features_used = GRJIT_FEATURE_LZCNT | GRJIT_FEATURE_BMI1;
+  struct Case {
+    const char * what;
+    const GRJIT_Code * code;
+    GRJIT_Features running;
+    bool usable;
+  };
+  const Case cases[] = {
+      {"U={LZCNT} in {LZCNT,BMI1}", &needs_lzcnt, GRJIT_FEATURE_LZCNT | GRJIT_FEATURE_BMI1, true},
+      {"U={LZCNT} in {LZCNT}", &needs_lzcnt, GRJIT_FEATURE_LZCNT, true},
+      {"U={LZCNT} in {}", &needs_lzcnt, GRJIT_FEATURES_NONE, false},
+      {"U={LZCNT} in {POPCNT}", &needs_lzcnt, GRJIT_FEATURE_POPCNT, false},
+      {"U={LZCNT,BMI1} in {LZCNT}", &needs_both, GRJIT_FEATURE_LZCNT, false},
+      {"U={LZCNT,BMI1} in all", &needs_both, GRJIT_FEATURES_ALL, true},
+      {"U={} in {}", &needs_nothing, GRJIT_FEATURES_NONE, true},
+      {"U={} in {POPCNT}", &needs_nothing, GRJIT_FEATURE_POPCNT, true},
+  };
+  for (const Case & c : cases) {
+    EXPECT_EQ(grjit_code_usable_with(c.code, c.running), c.usable) << c.what;
+  }
+  for (GRJIT_Features r = 0; r <= GRJIT_FEATURES_ALL; r++) {
+    EXPECT_EQ(grjit_code_usable_with(&needs_both, r), (needs_both.features_used & ~r) == 0) << r;
+    EXPECT_TRUE(grjit_code_usable_with(&needs_nothing, r)) << r;
+  }
+  EXPECT_FALSE(grjit_code_usable_with(nullptr, GRJIT_FEATURES_ALL));
+  EXPECT_EQ(grjit_code_features(&needs_both), GRJIT_FEATURE_LZCNT | GRJIT_FEATURE_BMI1);
+}
+
+TEST(CpuFixture, TheMaskVariableOfTheFixturesIsParsedStrictlyAndATypoAbortsTheProgram) {
+  GRJIT_Features f = 0x77;
+  EXPECT_TRUE(parse_disabled_features("all", &f));
+  EXPECT_EQ(f, GRJIT_FEATURES_ALL);
+  EXPECT_TRUE(parse_disabled_features("none", &f));
+  EXPECT_EQ(f, GRJIT_FEATURES_NONE);
+  EXPECT_TRUE(parse_disabled_features("5", &f));
+  EXPECT_EQ(f, 5u);
+  EXPECT_TRUE(parse_disabled_features("0x0F", &f));
+  EXPECT_EQ(f, 15u);
+  for (const char * bad : {"al", "ALL", "None", "", " ", "-1", "1x", "0xZ", "all ", " 3", "4294967296", "true"}) {
+    f = 0x77;
+    EXPECT_FALSE(parse_disabled_features(bad, &f)) << "'" << bad << "'";
+    EXPECT_EQ(f, 0x77u) << "nothing is written on a refusal";
+  }
+  EXPECT_FALSE(parse_disabled_features(nullptr, &f));
+#ifndef _WIN32
+  // The reader of the variable aborts with a message instead of running the native arm. A fork without exec
+  // ("fast"), so that it works wherever the binary cannot be executed again (qemu-user).
+  const std::string saved_style = ::testing::FLAGS_gtest_death_test_style;
+  ::testing::FLAGS_gtest_death_test_style = "fast";
+  EXPECT_DEATH(
+      {
+        setenv("GRJIT_TEST_DISABLE_FEATURES", "al", 1);
+        (void)default_disabled_features();
+      },
+      "is not `all`, `none` or a number");
+  ::testing::FLAGS_gtest_death_test_style = saved_style;
+#endif
+}
+
 TEST(CpuReuse, CodeRunsWhereItsRecordedSetIsASubsetOfTheRunningOneAndNowhereElse) {
   CPU_ONLY_ON_X86_64_LINUX();
   GRJIT_REQUIRE_FEATURE(GRJIT_FEATURE_LZCNT);
@@ -684,8 +746,6 @@ struct Worked {
   uint64_t arg;
   uint64_t want;
 };
-
-#define F64(x) 0x##x##ull
 
 std::vector<Worked> worked_integers() {
   return {
@@ -762,8 +822,6 @@ std::vector<Worked> worked_floats() {
   };
   return w;
 }
-
-#undef F64
 
 void expect_worked(const std::vector<Worked> & table, JitWorld & w, const std::vector<GRJIT_Features> & masks,
     size_t * ran) {
@@ -1009,7 +1067,9 @@ TEST(CpuModel, AnArmForcedOntoACpuRunsAsTheInstructionTheCpuHasAndALackingOneRun
     if (tz == "tzcnt") {
       EXPECT_EQ(got, 32u) << "tzcnt of zero is the width";
     } else {
-      EXPECT_NE(got, 32u) << "bsf of zero leaves its destination alone: not the width";
+      // Not a documented guarantee: Intel leaves the destination of bsf undefined for a zero source (AMD documents
+      // it unchanged). This is what qemu 10.0.13 was measured to do under the models, and all that is asserted.
+      EXPECT_NE(got, 32u) << "bsf of zero left a value that is not the width (measured under qemu, not guaranteed)";
     }
     Mapped v1(w, f.f, GRJIT_FEATURES_NONE);
     EXPECT_EQ(v1.call(w.ctx, 0), 32u) << "the v1 sequence is right on every CPU";
