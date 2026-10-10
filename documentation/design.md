@@ -1550,8 +1550,10 @@ ways to get this wrong (40 and 41).
 
 `clz`, `ctz` and `popcnt` are the x86-64-v1 sequences: `bsr`/`bsf` with the zero case handled by
 a `cmov` of a constant chosen so that `bsr(x) ^ (width - 1)` gives the width, and the parallel
-bit count. The LZCNT, BMI1 and POPCNT forms and the feature mask are the CPU-feature story's;
-these stay as the fallback it needs, and are run on every host.
+bit count. They are the fallback of the LZCNT, BMI1 and POPCNT forms (below, "CPU features"):
+a compile that has the feature emits `lzcnt`, `tzcnt` or `popcnt` instead, and these are
+emitted unchanged, byte for byte, by every other compile. They are run on every x86-64 host,
+through a mask that switches the feature off.
 
 **Guards are ordinary IR; the operation never traps.** `DIV_S`, `DIV_U`, `REM_S` and `REM_U` are
 partial: a zero divisor, and `MIN / -1` in `DIV_S`, are traps in Wasm and `#DE` in the hardware.
@@ -1756,9 +1758,10 @@ get right, each with a test, an evaluator case and a suite assertion that shows 
   a compare mask ANDed with 1.0 (no branch), and `ceil` ends by setting the sign bit of `x`, because
   `-1 + 1` is `+0` and `ceil(-0.999)` is `-0`. A value at or above 2^52 in magnitude is an integer
   already and an infinity is unchanged: the result is `x`. A NaN (the compare is unordered) gets the
-  quiet bit by an `add` of itself, which keeps its sign and payload. Story 4 adds the SSE4.1
-  `roundss`/`roundsd` arm; these stay as its fallback, so they are a separate function
-  (`emit_float_round`). Planted defect 52 rounds halves away from zero.
+  quiet bit by an `add` of itself, which keeps its sign and payload. A compile that has SSE4.1
+  emits one `roundss`/`roundsd` instead (below, "CPU features"); these are the fallback, so they are
+  a separate function (`emit_float_round`) whose bytes did not change. Planted defect 52 rounds
+  halves away from zero, and a host with SSE4.1 sees it only through a mask that switches SSE4.1 off.
 - *Comparison.* `ucomis*` sets ZF, PF and CF together for an unordered pair, so `EQ` is `sete` joined
   with `setnp`, `NE` is `setne` joined with `setp`, and `LT`/`LE` are `GT`/`GE` with the operands
   swapped: the unordered case then fails the `above` test by itself. Planted defects 43 (no test of
@@ -1959,8 +1962,191 @@ it kills the test with a signal. The arm64 and Win64 plant lists are untouched.
 **Known limits.** The verifier recognises the range guard in the shapes above and in the same block; a
 frontend that computes it another way gets a reason. A conversion's source is a register, never an
 immediate. A float immediate as a call argument is a typed operand kind. Natives take no float. Float
-operations are emitted for x86-64 SysV only; the SSE4.1 arm of the four roundings and the CPU-feature
-mask are story 4, Win64 and arm64 are story 5.
+operations are emitted for x86-64 SysV only (Win64 and arm64 are story 5); the SSE4.1 arm of the four
+roundings and the CPU-feature mask are in the next section.
+
+## CPU features: detection, the mask, the arms and the record (spec-runtime-float, story 4)
+
+Everything emitted before this story is x86-64-v1 (SSE2). Four optional features give faster
+forms of operations that are already emitted, and only those: **SSE4.1** for `roundss`/`roundsd`
+(`ceil`, `floor`, `trunc`, `nearest`, in place of the ten-instruction SSE2 sequence), **POPCNT** for
+`popcnt` (in place of the parallel count), **LZCNT** for `clz` (in place of `bsr`, a `cmov` and an
+`xor`) and **BMI1** for `tzcnt` (in place of `bsf` and a `cmov`). BMI1 is used for `tzcnt` and nothing
+else: `andn` has no site, because `copysign` and `abs` combine registers with immediate masks, and
+SSE4.1 is used for the four roundings and nothing else, because the `min`, `max` and `copysign`
+sequences gain nothing from `blendv` without a register allocator. AVX, AVX2, FMA, BMI2 and SSE4.2 are
+not used and not detected.
+
+**The hazard that shapes the tests.** `lzcnt` and `tzcnt` do not fault on a CPU without LZCNT or
+BMI1: `F3 0F BD` is `lzcnt` where it exists and `bsr` where it does not, and `F3 0F BC` is `tzcnt` or
+`bsf`. `bsr` of `0x10` is 4 where `lzcnt` is 59. So a detection mistake gives wrong answers, not a
+crash, and a host that has the features can never see it. Two consequences: the interpretation of the
+CPUID words is a pure function (`grjit_features_from_cpuid`) whose every rule is a row of a table
+(`testCpu_features`), and detection is also run under qemu CPU models that lack each feature.
+
+### Detection
+
+`grjit_features_detected()` is the host's set. On x86-64 (every OS, Win64 included) it is read from
+CPUID once and cached in one atomic word: a racing first call computes the same word and stores it
+again, nothing else is written afterwards, and there is no lock and no allocation. On any other target
+it is empty. The rules, each a row of the decoder table:
+
+- SSE4.1 is leaf 1 ECX bit 19 and POPCNT is leaf 1 ECX bit 23.
+- LZCNT is leaf `0x80000001` ECX bit 5 and **never** leaf 1 ECX bit 5, which is VMX; it needs
+  `max_ext >= 0x80000001`.
+- BMI1 is leaf 7 subleaf 0 EBX bit 3 and only if `max_basic >= 7`: below that the leaf-7 word is not
+  defined, whatever it holds. The assembly reads leaf 7 and the extended leaves unconditionally and the
+  decoder ignores what is not defined, so that the rule is exercised on a real CPU and not only by the
+  table.
+- No feature is inferred from another: POPCNT is not taken from SSE4.2 or from LZCNT.
+
+*Rejected: `__builtin_cpu_supports`.* Its answer is whatever the compiler's runtime initialiser decided,
+from a decoder this library cannot put a table in front of, with names and rules of the compiler's
+choosing; the two traps above are exactly the rules that must be ours to read and test. *Rejected:
+`getauxval`, `/proc/cpuinfo` and the environment*: they are the operating system's vocabulary (`abm` for
+LZCNT), Linux only, and a second source of truth beside the instruction. The
+test suite reads `/proc/cpuinfo` as an oracle of the CPUID path on a native Linux x86-64 host, and
+nowhere else.
+
+### The mask
+
+`GRJIT_CompileOptions` gains a last field, `disabled_features`. It is a *disable set*: zero means
+nothing is disabled, so a zero-initialised options struct (the tests' `o{}`, lang-tang's `{0}`) compiles
+with every feature the host has. The effective set of a compile is
+`grjit_features_effective(disabled) = detected & ~disabled & ALL`: there is no way to name a feature the
+CPU lacks, so no mask value, however wrong, can enable one. `GRJIT_FEATURES_ALL` as a mask is "every
+optional feature off", which is the v1 code, and on a target whose detected set is empty the field is
+accepted and changes nothing. Bits above `ALL` are reserved and ignored. The library never reads an
+environment variable; the test fixtures read `GRJIT_TEST_DISABLE_FEATURES` (`all`, `none` or a number)
+to run a whole suite on the v1 sequences of a host that has the features.
+
+*Rejected: an allow set* (the spine's "ANDed with a mask" spelled literally): every zero-initialised
+options struct, 30 call sites, would mean "v1 only", silently losing the feature arms and leaving the
+detected arm unexercised in every existing test, and a wrong allow set could name a feature the CPU
+lacks. The field is the engine's context option reaching a compile; `runtime-jit` has no context type,
+so an engine fills it when it compiles, and wiring lang-tang's option is later work.
+
+### The arms, and the record
+
+The emitter takes the effective set as an input (`grjit_emit_for_features`; `grjit_emit_for` calls it
+with the detected set) and chooses each arm from that set and from nothing else, so a test can emit the
+SSE4.1 bytes on a host that lacks SSE4.1 and compare them with a pin, and can only *run* them where
+the host has it. `take_feature` in `emit.c` is the one place an arm is decided, and it records the
+feature in `features_used` as it takes it.
+
+| Operation | With the feature | Otherwise |
+| --- | --- | --- |
+| `clz` | `lzcnt` (zero gives the width in the instruction: no `cmov`) | `bsr`, `cmov`, `xor`, as before |
+| `ctz` | `tzcnt` | `bsf`, `cmov`, as before |
+| `popcnt` | `popcnt` | the parallel count, as before |
+| `ceil` `floor` `trunc` `nearest` | `roundss`/`roundsd`, immediate `0x0A`, `0x09`, `0x0B`, `0x08` | `emit_float_round`, as before |
+
+The rounding immediate is the mode in bits 0 and 1 (nearest-even, down, up, toward zero) with bit 3
+set, so no precision exception is raised. The instruction is IEEE `roundToIntegral`: the sign of a zero
+result kept (`ceil(-0.5)` is `-0`), ties to even, an infinity and a value at or above 2^52 (2^23)
+unchanged, a NaN quiet with its sign and payload kept, and an `F32` result stored by the existing
+`movd`, which writes a zero-extended word. The assembler functions `lzcnt`, `tzcnt` and `popcnt` are
+three functions with no prefix parameter and are pinned against `as` and `objdump` output; the
+hazard is a missing `F3`, so none can be called without one.
+
+**The recorded set is what the code needs, not what was permitted.** `GRJIT_Emitted` and `GRJIT_Code`
+record `features_used`: the features whose arm was actually emitted. It is a subset of the effective
+set; it is empty for a function with no `clz`, `ctz`, `popcnt` or rounding and for every function
+compiled with every feature disabled. **Reuse is by subset, exactly:** code recorded as needing `U` may
+run in a context whose effective set is `R` if and only if `U` is a subset of `R`
+(`grjit_code_usable_with`). It does not require `U == R`: code that used nothing runs anywhere, and
+code that needs LZCNT runs neither under a mask that disabled it nor on a host without it.
+*Rejected: recording the permitted set.* It would make code that used nothing refuse to run in a smaller
+context and defeat the sharing the record exists for; a cache that wants the fastest code for a context
+is free to prefer an exact match, and the predicate does not demand one. *Rejected: a check of the
+recorded set on the call path.* The entry stays the raw entry; the decision is made once per lookup, by
+whatever hands code out, not on every call. *Rejected: per-function runtime dispatch* (both arms in the
+code, a branch on a stored flag): it makes the record meaningless and costs a load and a branch on every
+operation to avoid a decision that is made once per compile. *Rejected: VEX-encoded forms* (`vroundsd`
+and friends): they would raise the required feature to AVX for no gain in a baseline with no register
+allocator.
+
+Example: a function with a `clz` and a `ceil`, compiled on a host with every feature and a mask of
+`{LZCNT}`, records `{SSE4.1}`; it runs in a context whose effective set is `{SSE4.1}` or `{SSE4.1,
+POPCNT}`, and not in `{LZCNT}` or `{}`.
+
+### The stamp, and what does not exist yet
+
+`grjit_features_stamp` writes the text the spine's cache stamp carries for a set: `x86_64-v1` for the
+empty set and `x86_64-v1+sse4.1+popcnt+lzcnt+bmi1` for the full one, always in bit order, lowercase,
+`+`-joined, NUL-terminated; a short buffer is `GRJIT_ERR_LIMIT` with `buf[0]` set to NUL, and
+`GRJIT_FEATURES_STAMP_MAX` bytes always suffice. `grjit_features_from_stamp` is its inverse and fails
+closed: an unknown name, a repeated one, one out of order, a wrong prefix or trailing junk is
+`GRJIT_ERR_INVALID`, so a stamp from a build with a feature this one lacks is refused and the code
+regenerated. On arm64 the prefix is `arm64-v8` and no feature name is accepted. **No code cache and no
+cache stamp exists today** (`code.h`: a cache arrives with tier-up; lang-tang's `jit.c` cache is
+in-process and unstamped): this story ships the feature component of the stamp and the reuse predicate,
+tested, and not the cache that consumes them.
+
+### What is shown, and where
+
+- *Both arms of every operation, shown to have run.* Never "the SSE2 path ran because the mask was
+  set": the recorded set (`grjit_code_features`) and the emitted bytes are read off the code.
+  `tests/cpu_pins.h` pins the whole function bytes of the 14 operations (`clz`, `ctz`, `popcnt` at two
+  widths and the four roundings at two widths) for the v1 arm and the feature arm; the v1 bytes are
+  `7bf1b55`'s own output for the same functions, taken by building that commit, and the feature
+  arms were read back with `objdump`. `CpuArms` checks all 16 feature sets for each operation (and
+  with the reserved bits of the mask set): the arm is the feature's exactly when its feature is in
+  the set and the record says so.
+- *The answers.* Every feature-dependent operation is run under every subset of the host's detected
+  set (16 on a host with all four), over integer and float boundary values, and compared with the
+  evaluator and with every other mask's result by bits, any two NaNs equal; an `F32` or `I32` result
+  has its upper half zero. `testInt_ir` and `testFloat_ir` run their worked answers and boundary
+  sweeps twice (what the host has, and `ALL` masked), and read the arm off the record. The generated
+  integer and float programs of `testDifferential` run under every subset. `testWast` runs each of the
+  ten Wasm files under the detected set and again with `ALL` masked, requires the counts of the two
+  arms to be equal (they are story 3's: `f32` 2,500 ...), requires the detected run to have compiled
+  the feature-arm functions each file holds (`i32` 3, `i64` 3, `f32` 4, `f64` 4, `float_misc` 8)
+  with the recorded set non-empty, and the masked run to have compiled none.
+- *Fallback-only plants, caught on a host that has the features.* The existing plants in a sequence
+  only the fallback runs: 52 (`nearest` rounds halves away from zero). Added: 66 (a wrong constant in
+  the v1 `popcnt`) and 67 (the zero case of the v1 `clz`). Each is caught by the tests that run the
+  masked arm explicitly (`FloatRun`/`IntRun` worked answers, `CpuRun.TheV1Arm...`, `testWast`'s masked
+  run, `testDifferential`'s `ALL` mask). The rest of 56 to 68: 56 LZCNT read from VMX's bit and 57
+  leaf 7 read without its maximum (the decoder table); 58 the mask ignored and 59 the mask applied
+  without the detected set (the mask tests and the masked suite run); 60 the recorded set always
+  empty and 61 the reuse predicate reversed; 62 an arm chosen from the detected set and 63 the feature
+  arm never taken (the arm pins); 64 `lzcnt` without its `F3`, which is `bsr` (the assembler pin);
+  65 `roundsd`'s floor and ceil immediates swapped; 68 the stamp in the wrong order. 56 and 59 are
+  also run under qemu (`tools/x86-cpu-plants.txt`), so each is seen to fail in two places.
+- *qemu CPU models.* `suite/tools/xarch/jit-x86-cpu.sh` runs `testCpu_features` under
+  `qemu-x86_64 -cpu <model>`, in the xarch image, against an expected set per model and an
+  independent CPUID probe (`suite/tools/xarch/x86-cpu-probe.c`), with the control that a model
+  that lacks LZCNT runs a forced `lzcnt` arm as `bsr` (`clz(0x10)` is 4, not 59). Measured with
+  qemu 10.0.13 on 2026-10-10 (the figures of this section were taken on an Intel Core 7 150U, GCC 14.2):
+
+  | model | sse4.1 | popcnt | bmi1 | lzcnt (CPUID) | `lzcnt` ran as | `tzcnt` ran as | `popcnt`, `roundsd` |
+  | --- | --- | --- | --- | --- | --- | --- | --- |
+  | `max` | 1 | 1 | 1 | 1 | lzcnt | tzcnt | run, run |
+  | `qemu64` | 0 | 0 | 0 | 0 | bsr | bsf | SIGILL, SIGILL |
+  | `Nehalem` | 1 | 1 | 0 | 0 | bsr | bsf | run, run |
+  | `Haswell,-sse4.1` | 0 | 1 | 1 | 1 | lzcnt | tzcnt | run, SIGILL |
+  | `Haswell,-popcnt` | 1 | 0 | 1 | 1 | lzcnt | tzcnt | SIGILL, run |
+  | `Haswell,-bmi1,-bmi2` | 1 | 1 | 0 | 1 | **bsr** | tzcnt | run, run |
+  | `Haswell,-abm` | 1 | 1 | 1 | 0 | lzcnt | **bsf** | run, run |
+
+  (The sixth row is `Haswell,-bmi1` with BMI2 also removed: under plain `Haswell,-bmi1` no program of the
+  image starts, because the CPU then says AVX2 and BMI2 and no BMI1 and glibc's AVX2 string functions use
+  BMI1 instructions, so even `--gtest_list_tests` dies with SIGILL in the dynamic loader.
+  The probe measured the same instruction behaviour with BMI2 removed.)
+
+  The last two rows are a qemu quirk: removing BMI1 makes `lzcnt` run as `bsr` while its CPUID bit
+  stays set, and removing ABM (the LZCNT bit) makes `tzcnt` run as `bsf` while the BMI1 bit stays set,
+  so qemu's instruction gating is crossed relative to the CPUID bits. Detection is still checked
+  against the bits there, and the forced-arm control against the measured behaviour, but running
+  compiled code is asserted only where every set bit has its instruction; the gate derives that from
+  the probe and requires it to equal its table, which is data about qemu and not about us. The bit
+  for VMX is clear in every model (TCG does not offer it), so plant 56 is caught under qemu by a model
+  that has LZCNT losing it, rather than by one that has VMX gaining it.
+
+What is not here: feature arms on Win64 and arm64 (the shared emitter under its Win64 flag and the
+arm64 emitter refuse the integer-extension and float operations by name, as before, and are given no
+feature), a code cache, and wiring the mask to lang-tang's context option.
 
 ## Gates
 
@@ -2045,8 +2231,10 @@ interpreter).
   register allocator, any pass, SSA, inlining, unboxing, SIMD, 8-bit values. (32-bit integers,
   the integer divide and floating point on x86-64 SysV are here: above.)
 - **The integer and float operations on arm64 and Win64**: refused by name until story 5 of the
-  float spec; and the LZCNT, BMI1, POPCNT and SSE4.1 forms (`roundss` for the four roundings
-  among them) and the feature mask, which are story 4's.
+  float spec. (The CPU features are x86-64 SysV's only; arm64 needs none, and Win64 will be given them
+  with its float operations.)
+- **A code cache.** The feature set a piece of code needs is recorded with it and a stamp text and a
+  reuse predicate exist, but nothing consumes them: the cache arrives with tier-up (below).
 - **An in-JIT pause.** A poll's non-zero answer ends the function; see above.
 - **The AD-21 prologue check as more than a hook.**
 - **A fuzzer**, for the reason above.

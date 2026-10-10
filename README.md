@@ -66,6 +66,25 @@ directory does not matter, and `GRJIT_WASM_SUITE_DIR` names another directory th
 runs through the IR. Counts at that tag: `i32.wast` 374 passed, 85 excluded (the
 `assert_invalid` and `assert_malformed` it cannot run), 0 failed; `i64.wast` 384, 31, 0.
 
+## CPU features
+
+On x86-64 the code is x86-64-v1 (SSE2), and uses SSE4.1 (`roundss`/`roundsd` for `ceil`,
+`floor`, `trunc` and `nearest`), POPCNT, LZCNT and BMI1 (`tzcnt`) where the CPU has them. They
+are detected from CPUID (`grjit_features_detected`), and `GRJIT_CompileOptions.disabled_features`
+switches any of them off for one compile: zero disables nothing, `GRJIT_FEATURES_ALL` gives the
+v1 sequences, and no mask can enable a feature the CPU lacks (`features.h`). The library reads
+no environment variable. `grjit_code_features` says which features the compiled code actually
+needs, and `grjit_code_usable_with(code, running)` says whether it may run where the running
+context's effective set is `running`: exactly when the recorded set is a subset of it.
+`grjit_features_stamp` writes the text a code-cache stamp carries for a set (`x86_64-v1`,
+`x86_64-v1+sse4.1+popcnt+lzcnt+bmi1`); **no code cache exists yet**, so the stamp and the
+predicate are the contract it will use, not a feature anything consumes today. A CPU without
+LZCNT or BMI1 runs `lzcnt` and `tzcnt` as `bsr` and `bsf` instead of faulting, which is why
+detection is a pure decoder over the CPUID words with a test for each rule, and is also run under
+qemu CPU models (`suite/tools/xarch/jit-x86-cpu.sh` in the workspace). arm64 needs none of
+this, and the Win64 flavour is given no feature. `documentation/design.md` has the decisions and
+what was rejected.
+
 ## The float operations
 
 `F32` and `F64` are the IEEE binary32 and binary64 types, held as their **bits** in the 64-bit
