@@ -1,7 +1,9 @@
 #!/bin/sh
 #
-# Fetch the WebAssembly spec suite's integer test files, which the harness in
-# tests/unit/test_wast.cpp runs the integer IR against.
+# Fetch the WebAssembly spec suite's scalar numeric test files (the integer files i32 and i64 and
+# the eight float and conversion files), which the harness in tests/unit/test_wast.cpp runs the
+# IR against. Each digest was also checked against the git blob id the GitHub contents API gives
+# for the pinned commit (2026-10-10).
 #
 # The suite is not committed here: it is somebody else's corpus, reproducible from a commit and a
 # URL, and a copy in this repository would be a snapshot that quietly stops being the thing every
@@ -36,6 +38,14 @@ base="https://raw.githubusercontent.com/WebAssembly/spec/$commit"
 files="
 test/core/i32.wast
 test/core/i64.wast
+test/core/f32.wast
+test/core/f64.wast
+test/core/f32_cmp.wast
+test/core/f64_cmp.wast
+test/core/f32_bitwise.wast
+test/core/f64_bitwise.wast
+test/core/conversions.wast
+test/core/float_misc.wast
 test/LICENSE
 "
 
