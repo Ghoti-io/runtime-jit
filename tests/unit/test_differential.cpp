@@ -15,6 +15,8 @@
 
 #include "test_helpers.h"
 
+#include "../int_fixture.h"
+
 #include "../ir_eval.h"
 #include "../a64_sim.h"
 #include "../ir_gen.h"
@@ -232,6 +234,256 @@ TEST(Differential, GeneratedFunctionsRunTheSameCompiledAndEvaluated) {
 TEST(Differential, GeneratedFunctionsRunTheSameWhenArm64CodeIsSimulatedAndEvaluated) {
   JitWorld w;
   run_differential<SimTarget>(w);
+}
+
+/* ---- Generated integer programs (spec-runtime-float, story 2) --------------------------------
+ *
+ * The same comparison for the i32 type and the integer operations of numeric-operations.md: a
+ * random straight-line program over i32 and i64 registers - arithmetic, shifts and rotates (any
+ * count), comparisons, bit counting, sign extension, wrap and extend, and the four divisions with
+ * the guards a frontend writes (the divisor's, and for div_s the overflow one in either shape) -
+ * whose operands come from the boundary values (0, 1, -1, MIN, MAX, the widths and one either
+ * side, alternating bit patterns) or from earlier results, folded into one result at the end so
+ * that every register is observed. A guard that fires is an exit with the frame state it names,
+ * which the evaluator reconstructs. It does not use the generators of ir_gen.h, whose draw order
+ * every pin depends on. */
+
+namespace {
+
+struct IntGen {
+  std::mt19937_64 rng;
+  explicit IntGen(uint64_t seed) : rng(seed) {}
+  uint64_t pick(uint64_t n) { return rng() % n; }
+
+  static const std::vector<uint64_t> & edges(bool narrow) {
+    static const std::vector<uint64_t> e32 = {0, 1, 2, 3, 7, 8, 15, 16, 31, 32, 33, 63, 64, 65,
+        0x7F, 0x80, 0xFF, 0x7FFF, 0x8000, 0xFFFF, 0x7FFFFFFE, 0x7FFFFFFF, 0x80000000u,
+        0x80000001u, 0xFFFFFF80u, 0xFFFF8000u, 0xFFFFFFFEu, 0xFFFFFFFFu, 0x55555555u,
+        0xAAAAAAAAu};
+    static const std::vector<uint64_t> e64 = [] {
+      std::vector<uint64_t> v = e32;
+      for (uint64_t x : std::vector<uint64_t>{0x100000000ull, 0x7FFFFFFFFFFFFFFEull,
+               0x7FFFFFFFFFFFFFFFull, 0x8000000000000000ull, 0x8000000000000001ull,
+               0xFFFFFFFF80000000ull, 0xFFFFFFFFFFFFFF80ull, 0xFFFFFFFFFFFFFFFEull,
+               0xFFFFFFFFFFFFFFFFull, 0x5555555555555555ull, 0xAAAAAAAAAAAAAAAAull}) {
+        v.push_back(x);
+      }
+      return v;
+    }();
+    return narrow ? e32 : e64;
+  }
+  uint64_t edge(bool narrow) {
+    const auto & e = edges(narrow);
+    return e[pick(e.size())];
+  }
+};
+
+/* An immediate operand: any 64-bit pattern for an i64, a 32-bit pattern for an i32. */
+int64_t imm_for(IntGen & g, bool narrow) {
+  uint64_t v = g.edge(narrow);
+  return narrow ? static_cast<int64_t>(v) : static_cast<int64_t>(v);
+}
+
+struct IntProgram {
+  GRJIT_Function * f = nullptr;
+  size_t params = 0;
+};
+
+IntProgram generate_int_program(IntGen & g) {
+  B b("ints", 2);
+  std::vector<GRJIT_VReg> p32, p64;     // every i32 / i64 register assigned so far
+  const size_t n32 = 3, n64 = 3;
+  for (size_t i = 0; i < n32; i++) p32.push_back(b.param(GRJIT_TYPE_I32));
+  for (size_t i = 0; i < n64; i++) p64.push_back(b.param(GRJIT_TYPE_I64));
+  b.at(b.block());
+  uint64_t site = 0;
+  auto operand = [&](bool narrow) -> GRJIT_Operand {
+    auto & pool = narrow ? p32 : p64;
+    return g.pick(4) == 0 ? I(imm_for(g, narrow)) : V(pool[g.pick(pool.size())]);
+  };
+  auto reg_of = [&](bool narrow) { return (narrow ? p32 : p64)[g.pick((narrow ? p32 : p64).size())]; };
+  auto fresh = [&](bool narrow) {
+    GRJIT_VReg r = b.reg(narrow ? GRJIT_TYPE_I32 : GRJIT_TYPE_I64);
+    return r;
+  };
+  auto state = [&]() {
+    return std::vector<GRJIT_FrameSlot>{grjit_frame_slot_vreg(reg_of(g.pick(2) == 0)),
+        grjit_frame_slot_vreg(reg_of(g.pick(2) == 0))};
+  };
+  static const GRJIT_OpKind binary[] = {GRJIT_OP_ADD, GRJIT_OP_SUB, GRJIT_OP_MUL, GRJIT_OP_AND,
+      GRJIT_OP_OR, GRJIT_OP_XOR, GRJIT_OP_SHL, GRJIT_OP_SHR, GRJIT_OP_SAR, GRJIT_OP_ROTL,
+      GRJIT_OP_ROTR};
+  static const GRJIT_OpKind unary[] = {GRJIT_OP_NEG, GRJIT_OP_NOT, GRJIT_OP_CLZ, GRJIT_OP_CTZ,
+      GRJIT_OP_POPCNT, GRJIT_OP_EXT8_S, GRJIT_OP_EXT16_S};
+  static const GRJIT_OpKind divisions[] = {GRJIT_OP_DIV_S, GRJIT_OP_DIV_U, GRJIT_OP_REM_S,
+      GRJIT_OP_REM_U};
+  const size_t steps = 8 + g.pick(24);
+  for (size_t step = 0; step < steps; step++) {
+    const bool narrow = g.pick(2) == 0;
+    const GRJIT_Type T = narrow ? GRJIT_TYPE_I32 : GRJIT_TYPE_I64;
+    auto & pool = narrow ? p32 : p64;
+    switch (g.pick(8)) {
+      case 0:
+      case 1: {
+        GRJIT_VReg d = fresh(narrow);
+        b.bin(binary[g.pick(sizeof binary / sizeof binary[0])], d, operand(narrow), operand(narrow));
+        pool.push_back(d);
+        break;
+      }
+      case 2: {
+        GRJIT_VReg d = fresh(narrow);
+        GRJIT_OpKind k = unary[g.pick(sizeof unary / sizeof unary[0])];
+        b.un(k, d, V(reg_of(narrow)));
+        pool.push_back(d);
+        break;
+      }
+      case 3: {
+        // A comparison, into an i32 or an i64 register, of either width of operand.
+        const bool result32 = g.pick(2) == 0;
+        GRJIT_VReg d = fresh(result32);
+        b.cmp(static_cast<GRJIT_Cmp>(g.pick(GRJIT_CMP_COUNT)), d, V(reg_of(narrow)), operand(narrow));
+        (result32 ? p32 : p64).push_back(d);
+        break;
+      }
+      case 4: {
+        // The conversions.
+        if (g.pick(2) == 0) {
+          GRJIT_VReg d = fresh(true);
+          b.un(GRJIT_OP_WRAP, d, V(reg_of(false)));
+          p32.push_back(d);
+        } else {
+          GRJIT_VReg d = fresh(false);
+          GRJIT_OpKind k = g.pick(3) == 0 ? GRJIT_OP_EXTEND_U : GRJIT_OP_EXTEND_S;
+          b.un(k, d, V(reg_of(true)));
+          p64.push_back(d);
+        }
+        break;
+      }
+      case 5: {
+        GRJIT_VReg d = fresh(false);
+        b.un(GRJIT_OP_EXT32_S, d, V(reg_of(false)));
+        p64.push_back(d);
+        break;
+      }
+      default: {
+        // A division, with the guards a frontend writes. Half the divisors are made non-zero
+        // first, so the program goes on after most of its divisions.
+        GRJIT_OpKind k = divisions[g.pick(4)];
+        GRJIT_VReg a = reg_of(narrow);
+        GRJIT_VReg y = reg_of(narrow);
+        if (g.pick(2) == 0) {
+          GRJIT_VReg safe = fresh(narrow);
+          b.bin(GRJIT_OP_OR, safe, V(y), I(1));
+          y = safe;
+          pool.push_back(safe);
+        }
+        const int64_t min = narrow ? INT32_MIN : INT64_MIN;
+        GRJIT_VReg c = b.reg(T);
+        switch (g.pick(3)) {
+          case 0: b.cmp(GRJIT_CMP_NE, c, V(y), I(0)); b.guard(V(c), {7, ++site}, state()); break;
+          case 1: b.guard(V(y), {7, ++site}, state()); break;
+          default: b.cmp(GRJIT_CMP_UGT, c, V(y), I(0)); b.guard(V(c), {7, ++site}, state()); break;
+        }
+        if (k == GRJIT_OP_DIV_S) {
+          if (g.pick(2) == 0) {
+            GRJIT_VReg e1 = b.reg(T), e2 = b.reg(T), t = b.reg(T), fine = b.reg(T);
+            b.cmp(GRJIT_CMP_EQ, e1, V(a), I(min));
+            b.cmp(GRJIT_CMP_EQ, e2, V(y), I(-1));
+            b.bin(GRJIT_OP_AND, t, V(e1), V(e2));
+            b.cmp(GRJIT_CMP_EQ, fine, V(t), I(0));
+            b.guard(V(fine), {7, ++site}, state());
+          } else {
+            GRJIT_VReg n1 = b.reg(T), n2 = b.reg(T), fine = b.reg(T);
+            b.cmp(GRJIT_CMP_NE, n1, V(a), I(min));
+            b.cmp(GRJIT_CMP_NE, n2, V(y), I(-1));
+            b.bin(GRJIT_OP_OR, fine, V(n1), V(n2));
+            b.guard(V(fine), {7, ++site}, state());
+          }
+        }
+        GRJIT_VReg d = fresh(narrow);
+        b.bin(k, d, V(a), V(y));
+        pool.push_back(d);
+        break;
+      }
+    }
+  }
+  // Fold every register into one result: i32s are extended and mixed in, so that each is seen.
+  GRJIT_VReg acc = b.reg(GRJIT_TYPE_I64);
+  b.cnst(acc, 0);
+  for (GRJIT_VReg r : p64) {
+    b.bin(GRJIT_OP_ROTL, acc, V(acc), I(5));
+    b.bin(GRJIT_OP_XOR, acc, V(acc), V(r));
+  }
+  for (GRJIT_VReg r : p32) {
+    GRJIT_VReg w = b.reg(GRJIT_TYPE_I64);
+    b.un(GRJIT_OP_EXTEND_U, w, V(r));
+    b.bin(GRJIT_OP_ROTL, acc, V(acc), I(7));
+    b.bin(GRJIT_OP_XOR, acc, V(acc), V(w));
+  }
+  b.ret(V(acc));
+  IntProgram prog;
+  prog.params = n32 + n64;
+  prog.f = b.finish();
+  return prog;
+}
+
+} // namespace
+
+TEST(Differential, GeneratedIntegerProgramsRunTheSameCompiledAndEvaluated) {
+#if defined(__x86_64__) && defined(__linux__)
+  GRJIT_REQUIRE_BACKEND();
+#else
+  GTEST_SKIP() << "the integer operations are emitted for x86-64 SysV only; the arm64 and Win64 refusals are tested in testInt_ir";
+#endif
+  JitWorld w;
+  size_t returned = 0, deopted = 0, divisions = 0;
+  for (uint64_t seed = 1; seed <= 3000; seed++) {
+    IntGen g(seed * 0x9E3779B97F4A7C15ull);
+    IntProgram prog = generate_int_program(g);
+    Fn f(prog.f);
+    char why[256] = {0};
+    ASSERT_EQ(grjit_function_verify(f, nullptr, why, sizeof why), GRJIT_OK)
+        << describe(f, seed, std::string("the generator made a function the verifier refuses: ") + why);
+    for (size_t blk = 0; blk < grjit_function_block_count(f); blk++) {
+      size_t n = 0;
+      const GRJIT_Op * ops = grjit_function_block_ops(f, static_cast<GRJIT_BlockId>(blk), &n);
+      for (size_t i = 0; i < n; i++) {
+        divisions += ops[i].kind >= GRJIT_OP_DIV_S && ops[i].kind <= GRJIT_OP_REM_U;
+      }
+    }
+    Compiled c(f, w.pages());
+    ASSERT_TRUE(c) << describe(f, seed, grjit_result_string(c.result));
+    for (int run = 0; run < 6; run++) {
+      std::vector<uint64_t> args;
+      for (size_t i = 0; i < prog.params; i++) {
+        args.push_back(IntGen::edges(i < 3).at(g.pick(IntGen::edges(i < 3).size())));
+      }
+      auto compiled = intfx::run(c.code, w.ctx, args);
+      ASSERT_EQ(compiled.fault, 0) << describe(f, seed, "the compiled code faulted in hardware");
+      ireval::Result eval = ireval::eval(f, w.ctx, nullptr, args);
+      ASSERT_EQ(compiled.exit, eval.exit) << describe(f, seed, "different exits");
+      if (compiled.exit == GRJIT_EXIT_RETURNED) {
+        ASSERT_EQ(compiled.out[0], eval.out[0]) << describe(f, seed, "different results");
+        returned++;
+      } else {
+        ASSERT_EQ(compiled.exit, uint32_t{GRJIT_EXIT_DEOPT});
+        const size_t slots = grjit_function_interp_slot_count(f);
+        for (size_t i = 0; i < slots; i++) {
+          ASSERT_EQ(compiled.out[i], eval.out[i]) << describe(f, seed, "different frame state slot");
+        }
+        const GRCORE_CodeSite * site = grcore_codemeta_find(
+            grjit_code_meta(c.code), static_cast<uint32_t>(compiled.out[slots]));
+        ASSERT_NE(site, nullptr);
+        ASSERT_EQ(site->identity.offset, eval.guard_identity.offset) << describe(f, seed, "different guard");
+        deopted++;
+      }
+    }
+  }
+  std::printf("integer differential: 3000 programs x 6 runs, %zu returned, %zu guard exits, %zu divisions\n",
+      returned, deopted, divisions);
+  EXPECT_GT(returned, 3000u);
+  EXPECT_GT(deopted, 500u);
+  EXPECT_GT(divisions, 3000u);
 }
 
 GRJIT_TEST_MAIN()
