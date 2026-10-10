@@ -30,7 +30,6 @@
 #include "../../src/code/code_internal.h"
 
 #include <cctype>
-#include <cerrno>
 #include <cinttypes>
 #include <cstdlib>
 #include <cstdio>
@@ -321,7 +320,6 @@ bool parse_float(const std::string & text, unsigned bits, bool allow_class, uint
   }
   const char * begin = t.c_str();
   char * end = nullptr;
-  errno = 0; // an out-of-range result (a subnormal, a zero, an infinity) is still the correctly rounded value
   if (bits == 32) {
     float f = std::strtof(begin, &end);
     if (end == begin || *end != '\0') {

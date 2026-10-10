@@ -86,10 +86,6 @@ static bool imm32_ok(int64_t imm) {
 
 /* ---- Floats (spec-runtime-float, story 3) ------------------------------------------------- */
 
-static bool is_float(GRJIT_Type t) {
-  return t == GRJIT_TYPE_F32 || t == GRJIT_TYPE_F64;
-}
-
 /* An `F32` immediate is a 32-bit pattern; unlike an `I32` one it has no second spelling. */
 static bool f32imm_ok(int64_t imm) {
   return imm >= 0 && imm <= (int64_t)UINT32_MAX;
@@ -346,11 +342,11 @@ static GRJIT_Result check_op(
       return GRJIT_OK;
     case GRJIT_OP_MOVE:
       if (vreg_ok(v, op->dst) &&
-          (is_float(type_of(v, op->dst)) ||
+          (grjit_type_is_float(type_of(v, op->dst)) ||
               (op->a.kind == GRJIT_OPERAND_VREG && vreg_ok(v, op->a.vreg) &&
-                  is_float(type_of(v, op->a.vreg))))) {
+                  grjit_type_is_float(type_of(v, op->a.vreg))))) {
         /* A float moves only into a float of its own type. */
-        if (!is_float(type_of(v, op->dst))) {
+        if (!grjit_type_is_float(type_of(v, op->dst))) {
           return refuse(v, GRJIT_ERR_INVALID,
               "block b%u op %zu: move from float v%u to v%u changes the type", block, index,
               op->a.vreg, op->dst);
@@ -399,7 +395,7 @@ static GRJIT_Result check_op(
             "zero-extended); use wrap",
             block, index);
       }
-      if (is_float(type_of(v, op->dst))) {
+      if (grjit_type_is_float(type_of(v, op->dst))) {
         return refuse(v, GRJIT_ERR_INVALID,
             "block b%u op %zu: a bitcast cannot make a float; use reinterpret", block, index);
       }
@@ -492,8 +488,8 @@ static GRJIT_Result check_op(
       }
       bool ref_ok = op->cmp == GRJIT_CMP_EQ || op->cmp == GRJIT_CMP_NE;
       const bool float_cmp =
-          (op->a.kind == GRJIT_OPERAND_VREG && is_float(type_of(v, op->a.vreg))) ||
-          (op->b.kind == GRJIT_OPERAND_VREG && is_float(type_of(v, op->b.vreg)));
+          (op->a.kind == GRJIT_OPERAND_VREG && grjit_type_is_float(type_of(v, op->a.vreg))) ||
+          (op->b.kind == GRJIT_OPERAND_VREG && grjit_type_is_float(type_of(v, op->b.vreg)));
       if (float_cmp) {
         /* A float comparison: both register operands are floats of one type (the other
          * operand may be an immediate, which is that type's bit pattern), the ordered
@@ -503,7 +499,7 @@ static GRJIT_Result check_op(
               "block b%u op %zu: the unsigned conditions do not exist on floats", block, index);
         }
         const GRJIT_Operand * reg = op->a.kind == GRJIT_OPERAND_VREG &&
-                                            is_float(type_of(v, op->a.vreg))
+                                            grjit_type_is_float(type_of(v, op->a.vreg))
                                         ? &op->a
                                         : &op->b;
         const GRJIT_Type want = type_of(v, reg->vreg);
@@ -567,7 +563,7 @@ static GRJIT_Result check_op(
             "block b%u op %zu: destination v%u does not exist", block, index, op->dst);
       }
       const GRJIT_Type t = type_of(v, op->dst);
-      if (!is_float(t)) {
+      if (!grjit_type_is_float(t)) {
         return refuse(v, GRJIT_ERR_INVALID,
             "block b%u op %zu: a float operation writes an f32 or an f64", block, index);
       }
@@ -581,7 +577,7 @@ static GRJIT_Result check_op(
     }
     case GRJIT_OP_CONVERT_S:
     case GRJIT_OP_CONVERT_U:
-      if (!vreg_ok(v, op->dst) || !is_float(type_of(v, op->dst))) {
+      if (!vreg_ok(v, op->dst) || !grjit_type_is_float(type_of(v, op->dst))) {
         return refuse(v, GRJIT_ERR_INVALID,
             "block b%u op %zu: convert makes an f32 or an f64", block, index);
       }
@@ -647,7 +643,7 @@ static GRJIT_Result check_op(
       }
       if (op->kind == GRJIT_OP_STORE) {
         if (op->b.kind == GRJIT_OPERAND_VREG && vreg_ok(v, op->b.vreg) &&
-            is_float(type_of(v, op->b.vreg))) {
+            grjit_type_is_float(type_of(v, op->b.vreg))) {
           /* A float is stored as its bits: exactly its own width. */
           if (op->width != (type_of(v, op->b.vreg) == GRJIT_TYPE_F32 ? 32u : 64u)) {
             return refuse(v, GRJIT_ERR_INVALID,
@@ -673,7 +669,7 @@ static GRJIT_Result check_op(
       if ((r = check_dst(v, op, false, block, index)) != GRJIT_OK) {
         return r;
       }
-      if (is_float(type_of(v, op->dst)) &&
+      if (grjit_type_is_float(type_of(v, op->dst)) &&
           (op->kind == GRJIT_OP_LOAD_S ||
               op->width != (type_of(v, op->dst) == GRJIT_TYPE_F32 ? 32u : 64u))) {
         return refuse(v, GRJIT_ERR_INVALID,
@@ -1289,15 +1285,22 @@ static bool joined_flags(const Verify * v, const Partial * p, const GRJIT_Op * j
  * `x >= k` is a lower bound, `x < k` or `x <= k` an upper one, and the mirrored spellings
  * (`k < x`) are the same. The register must not have been assigned since the compare at `at`.
  * A NaN bound, an equality and a compare of anything else are not bounds. */
+/* An immediate in a float position: plain bits, or a typed float immediate (checked against the
+ * register's width by check_float_operand). */
+static bool float_imm_operand(const GRJIT_Operand * o) {
+  return o->kind == GRJIT_OPERAND_IMM || o->kind == GRJIT_OPERAND_F32_IMM ||
+         o->kind == GRJIT_OPERAND_F64_IMM;
+}
+
 static bool float_bound(const Verify * v, const Partial * p, const GRJIT_Op * m, uint64_t at,
     GRJIT_VReg * x, bool * lower, double * k, bool * open) {
   GRJIT_Cmp c = m->cmp;
   const GRJIT_Operand * r;
   const GRJIT_Operand * im;
-  if (vreg_operand(&m->a) && m->b.kind == GRJIT_OPERAND_IMM) {
+  if (vreg_operand(&m->a) && float_imm_operand(&m->b)) {
     r = &m->a;
     im = &m->b;
-  } else if (vreg_operand(&m->b) && m->a.kind == GRJIT_OPERAND_IMM) {
+  } else if (vreg_operand(&m->b) && float_imm_operand(&m->a)) {
     r = &m->b;
     im = &m->a;
     c = c == GRJIT_CMP_LT ? GRJIT_CMP_GT
@@ -1307,7 +1310,7 @@ static bool float_bound(const Verify * v, const Partial * p, const GRJIT_Op * m,
   } else {
     return false;
   }
-  if (!vreg_ok(v, r->vreg) || !is_float(type_of(v, r->vreg)) || p->tick[r->vreg] >= at) {
+  if (!vreg_ok(v, r->vreg) || !grjit_type_is_float(type_of(v, r->vreg)) || p->tick[r->vreg] >= at) {
     return false;
   }
   double val;

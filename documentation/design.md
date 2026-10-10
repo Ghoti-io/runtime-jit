@@ -1780,7 +1780,11 @@ get right, each with a test, an evaluator case and a suite assertion that shows 
 - *`DEMOTE` and `PROMOTE`* are `cvtsd2ss` and `cvtss2sd`; a signalling NaN comes out quiet. `FSQRT` of
   a negative is the hardware's default NaN, which is canonical.
 - *MXCSR.* Compiled code assumes the default (round to nearest, exceptions masked, no flush to zero,
-  no denormals-are-zero) and never writes it; a subnormal operand and result survive (the suite and a
+  no denormals-are-zero) and never writes it. The rounding sequences (`nearest` and the others)
+  depend on round-to-nearest, so **a helper called from compiled code must restore MXCSR before it
+  returns**, and a test checks the rounding-control bits as well as FTZ/DAZ (mask `0xE040`). Variadic
+  helpers, which need `al` set to the number of vector registers used, are unsupported: the emitter
+  does not set it. A subnormal operand and result survive (the suite and a
   unit test hold them). There is no x87 instruction and no `long double`, and the library and every
   float test are built with `-ffp-contract=off` (`check-fp-contract` keeps it on every flag set). A
   unit test whose result differs fused and unfused holds it: `a*b+c` built as two IR operations is
@@ -1835,7 +1839,7 @@ each of the eight; planted defect 44 removes the rule.
 
 **Floats through helper calls (SysV).** An argument of a `CALL` may be an `F32` or `F64` register or a
 **typed float immediate** (`grjit_operand_f32_imm`, `grjit_operand_f64_imm`: new operand kinds, since a
-plain immediate has no class to pass it by, and are accepted as call and tail-call arguments only), and
+plain immediate has no class to pass it by; they are required there and also accepted wherever a float operation takes an immediate of its own width: the operands of the float operations, `MOVE` into a float, a float `CMP` and the bounds of a truncation guard), and
 its result may be one. Classification is SysV's: the integer-class arguments take `rdi rsi rdx rcx r8 r9` in order among themselves,
 the float-class ones `xmm0` to `xmm7` in order among themselves, so `(i64, f64, i64, f32)` is `rdi,
 xmm0, rsi, xmm1`. An `F32` is passed in the low 32 bits of its register (`movss`, or `movd` from an
@@ -1861,7 +1865,7 @@ map: all tested.
 
 **Other backends.** The arm64 emitter and the Win64 flavour refuse a function that has an `F32` or
 `F64` register, a typed float immediate or any of the new operations with `GRJIT_ERR_UNSUPPORTED`
-before anything is emitted (`grjit_function_needs_int_ext`, which already refused the integer
+before anything is emitted (`grjit_function_needs_numeric_ext`, which already refused the integer
 extensions, now covers floats), and each has an explicit case for every new operation. Story 5 of the
 float spec replaces the refusals (and adds the callee-saved FP register sentinel there).
 

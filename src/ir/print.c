@@ -134,7 +134,7 @@ static void put_float_operand(Out * o, const GRJIT_Operand * a) {
 
 static bool vreg_is_float(const GRJIT_Function * f, const GRJIT_Operand * a) {
   return a->kind == GRJIT_OPERAND_VREG && a->vreg < f->vreg_count &&
-         (f->vregs[a->vreg].type == GRJIT_TYPE_F32 || f->vregs[a->vreg].type == GRJIT_TYPE_F64);
+         grjit_type_is_float(f->vregs[a->vreg].type);
 }
 
 static GRJIT_Type type_of_operand(const GRJIT_Function * f, const GRJIT_Operand * a) {
@@ -219,7 +219,7 @@ static void put_op(Out * o, const GRJIT_Function * f, const GRJIT_Op * op) {
   switch (op->kind) {
     case GRJIT_OP_CONST:
       if (def != GRJIT_NO_VREG && def < f->vreg_count &&
-          (f->vregs[def].type == GRJIT_TYPE_F32 || f->vregs[def].type == GRJIT_TYPE_F64)) {
+          grjit_type_is_float(f->vregs[def].type)) {
         put(o, "const 0x%" PRIx64, (uint64_t)op->a.imm);
       } else {
         put(o, "const %" PRId64, op->a.imm);
@@ -277,7 +277,7 @@ static void put_op(Out * o, const GRJIT_Function * f, const GRJIT_Op * op) {
     case GRJIT_OP_EXTEND_U:
       put(o, "%s ", op_name(op->kind));
       if (op->kind == GRJIT_OP_MOVE && def != GRJIT_NO_VREG && def < f->vreg_count &&
-          (f->vregs[def].type == GRJIT_TYPE_F32 || f->vregs[def].type == GRJIT_TYPE_F64)) {
+          grjit_type_is_float(f->vregs[def].type)) {
         put_float_operand(o, &op->a);
       } else {
         put_operand(o, &op->a);

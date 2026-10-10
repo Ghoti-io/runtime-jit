@@ -1690,7 +1690,7 @@ TEST(FloatRun, TheOperationsAreRoundedOneAtATimeAndSubnormalsSurviveUnderTheDefa
 #if defined(__SSE__)
   // The compiled code assumes the default MXCSR and never writes it.
   const unsigned before = _mm_getcsr();
-  EXPECT_EQ(before & 0x8040u, 0u) << "the host runs the tests with flush-to-zero and denormals-are-zero off";
+  EXPECT_EQ(before & 0xE040u, 0u) << "the host runs the tests with round-to-nearest, flush-to-zero and denormals-are-zero off";
   Built b;
   ASSERT_EQ(compile(&b, "f64.mul", w), GRJIT_OK);
   Outcome o = run(b.code, w.ctx, {0x0010000000000000ull, B64(0.5)});
@@ -2537,6 +2537,77 @@ TEST(FloatRefusal, SysVEmitsEveryFloatInstructionAndANativeCompileIsRefusedByNam
       EXPECT_FALSE(c);
     }
   }
+}
+
+/* A typed float immediate is accepted wherever a float operation takes an immediate of its own width:
+ * on either side of FADD and of a float CMP, as the source of a MOVE, and as the bounds of a truncation
+ * guard. The code and the evaluator agree, and a typed immediate of the other width is refused. */
+TEST(FloatRun, ATypedFloatImmediateWorksOnEitherSideOfAnOperationAMoveAndATruncationGuard) {
+  FLOAT_ONLY_ON_X86_64();
+  JitWorld w;
+  for (bool dbl : {false, true}) {
+    SCOPED_TRACE(dbl);
+    const GRJIT_Type T = dbl ? GRJIT_TYPE_F64 : GRJIT_TYPE_F32;
+    auto typed = [&](double v) {
+      return dbl ? grjit_operand_f64_imm(B64(v)) : grjit_operand_f32_imm(static_cast<uint32_t>(B32(static_cast<float>(v))));
+    };
+    auto bits = [&](double v) { return dbl ? B64(v) : uint64_t{B32(static_cast<float>(v))}; };
+    for (int side = 0; side < 2; side++) {
+      B b("typed", 0);
+      GRJIT_VReg x = b.param(T), s = b.reg(T), m = b.reg(T), c = b.reg(GRJIT_TYPE_I32),
+             r = b.reg(dbl ? GRJIT_TYPE_I64 : GRJIT_TYPE_I32);
+      b.at(b.block());
+      b.bin(GRJIT_OP_FADD, s, side == 0 ? typed(1.5) : V(x), side == 0 ? V(x) : typed(1.5));
+      b.mov(m, typed(2.5));
+      b.cmp(GRJIT_CMP_LT, c, side == 0 ? typed(2.0) : V(s), side == 0 ? V(s) : typed(2.0));
+      GRJIT_VReg sum = b.reg(T);
+      b.bin(GRJIT_OP_FADD, sum, V(s), V(m));
+      b.un(GRJIT_OP_REINTERPRET, r, V(sum));
+      GRJIT_VReg cw = c;
+      if (dbl) {
+        cw = b.reg(GRJIT_TYPE_I64);
+        b.un(GRJIT_OP_EXTEND_U, cw, V(c));
+      }
+      b.bin(GRJIT_OP_XOR, r, V(r), V(cw));
+      b.ret(V(r));
+      Fn f(b.finish());
+      char why[256] = {0};
+      ASSERT_EQ(grjit_function_verify(f, nullptr, why, sizeof why), GRJIT_OK) << why;
+      Compiled code(f, w.pages());
+      ASSERT_TRUE(code);
+      for (double v : {0.25, 0.5, -3.0, 100.0}) {
+        Outcome o = run(code.code, w.ctx, {bits(v)});
+        ireval::Result e = ireval::eval(f, w.ctx, nullptr, {bits(v)});
+        EXPECT_EQ(o.out[0], e.out[0]) << v;
+      }
+    }
+    // the other width is refused
+    B bad("bad", 0);
+    GRJIT_VReg x = bad.param(T), r = bad.reg(T);
+    bad.at(bad.block());
+    bad.bin(GRJIT_OP_FADD, r, V(x), dbl ? grjit_operand_f32_imm(0) : grjit_operand_f64_imm(0));
+    bad.ret(V(r));
+    Fn f(bad.finish());
+    EXPECT_NE(refused(f.f), "");
+  }
+  // The bounds of i32.trunc_f64_s written as typed immediates verify, and run.
+  B b("trunc", 0);
+  GRJIT_VReg x = b.param(GRJIT_TYPE_F64), l = b.reg(GRJIT_TYPE_I32), h = b.reg(GRJIT_TYPE_I32),
+             ok = b.reg(GRJIT_TYPE_I32), r = b.reg(GRJIT_TYPE_I32);
+  b.at(b.block());
+  b.cmp(GRJIT_CMP_GT, l, V(x), grjit_operand_f64_imm(B64(-2147483649.0)));
+  b.cmp(GRJIT_CMP_GT, h, grjit_operand_f64_imm(B64(2147483648.0)), V(x));
+  b.bin(GRJIT_OP_AND, ok, V(l), V(h));
+  b.guard(V(ok), {kTrapFunction, kSiteIntegerOverflow});
+  b.un(GRJIT_OP_TRUNC_S, r, V(x));
+  b.ret(V(r));
+  Fn f(b.finish());
+  char why[256] = {0};
+  ASSERT_EQ(grjit_function_verify(f, nullptr, why, sizeof why), GRJIT_OK) << why;
+  Compiled code(f, w.pages());
+  ASSERT_TRUE(code);
+  EXPECT_EQ(said(code.code, run(code.code, w.ctx, {B64(-2147483648.9)})), hex(0x80000000u));
+  EXPECT_EQ(said(code.code, run(code.code, w.ctx, {B64(2147483648.0)})), "trap: integer overflow");
 }
 
 GRJIT_TEST_MAIN()

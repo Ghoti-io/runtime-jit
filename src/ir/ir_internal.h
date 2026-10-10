@@ -122,10 +122,10 @@ static inline bool grjit_operand_is_float_imm(const GRJIT_Operand * o) {
  *  emit: a register of type `I32`, `F32` or `F64`, a typed float immediate, or one of
  *  the integer and float operations added for numeric-operations.md (story 5 of
  *  spec-runtime-float replaces the refusal). */
-bool grjit_function_needs_int_ext(const GRJIT_Function * function);
+bool grjit_function_needs_numeric_ext(const GRJIT_Function * function);
 
 /** Whether an operation is one of the integer or float operations added after `CALL_NATIVE`. */
-static inline bool grjit_op_is_int_ext(GRJIT_OpKind kind) {
+static inline bool grjit_op_is_numeric_ext(GRJIT_OpKind kind) {
   return kind >= GRJIT_OP_CLZ && kind < GRJIT_OP_COUNT;
 }
 

@@ -88,7 +88,8 @@
  *
  * **Helper calls with floats.** An argument of a `CALL` may be an `F32` or `F64` register,
  * or a typed float immediate (::GRJIT_OPERAND_F32_IMM, ::GRJIT_OPERAND_F64_IMM: an
- * immediate that is plain bits has no class to pass it by), and its result may be one.
+ * immediate that is plain bits has no class to pass it by; the typed kinds are also accepted
+ * as float operands generally, see there), and its result may be one.
  * x86-64 SysV classifies: the integer-class arguments take `rdi rsi rdx rcx r8 r9` in order
  * among themselves, the float ones `xmm0` to `xmm7` in order among themselves, so
  * `(i64, f64, i64, f32)` is `rdi, xmm0, rsi, xmm1`; an `F32` is in the low 32 bits of its
@@ -205,12 +206,15 @@ typedef enum GRJIT_OperandKind {
   GRJIT_OPERAND_NONE, ///< Absent (a `RET` with no value).
   GRJIT_OPERAND_VREG, ///< A register.
   GRJIT_OPERAND_IMM,  ///< A 64-bit immediate.
-  /** An `F32` immediate: `imm` is its bit pattern, in `[0, UINT32_MAX]`. Only in the
-   *  arguments of a call (`CALL`, `CALL_SLOT`, `CALL_PTR`, tail calls), where a plain
-   *  immediate has no class to pass it by. Elsewhere a float immediate is a plain
-   *  ::GRJIT_OPERAND_IMM of the operand's bits. */
+  /** An `F32` immediate: `imm` is its bit pattern, in `[0, UINT32_MAX]`. It is needed in the
+   *  arguments of a call (`CALL`, `CALL_SLOT`, `CALL_PTR`, tail calls), where a plain immediate
+   *  has no class to pass it by. It is also accepted wherever a float operation takes an
+   *  immediate (the operands of the float operations, `MOVE` into an `F32`, and a float `CMP`,
+   *  and as a bound in a `TRUNC` guard), where it must match the width of the operation; a plain
+   *  ::GRJIT_OPERAND_IMM of the operand's bits is accepted there too. It is refused by integer
+   *  operations, `CONST`, conversions and natives. */
   GRJIT_OPERAND_F32_IMM,
-  /** An `F64` immediate: `imm` is its bit pattern. The same restriction. */
+  /** An `F64` immediate: `imm` is its bit pattern. Accepted in the same places. */
   GRJIT_OPERAND_F64_IMM
 } GRJIT_OperandKind;
 

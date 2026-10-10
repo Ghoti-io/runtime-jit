@@ -234,7 +234,7 @@ static bool operand_is_float(const GRJIT_Emit * e, const GRJIT_Operand * o) {
     return false;
   }
   const GRJIT_Type t = e->c.f->vregs[o->vreg].type;
-  return t == GRJIT_TYPE_F32 || t == GRJIT_TYPE_F64;
+  return grjit_type_is_float(t);
 }
 
 static bool operand_is_double(const GRJIT_Emit * e, const GRJIT_Operand * o) {
@@ -250,7 +250,7 @@ static bool call_has_float(const GRJIT_Emit * e, const GRJIT_Op * op) {
   }
   if (op->dst != GRJIT_NO_VREG) {
     const GRJIT_Type t = e->c.f->vregs[op->dst].type;
-    return t == GRJIT_TYPE_F32 || t == GRJIT_TYPE_F64;
+    return grjit_type_is_float(t);
   }
   return false;
 }
@@ -337,7 +337,7 @@ static void emit_call(GRJIT_Emit * e, const GRJIT_Op * op) {
   }
   if (op->dst != GRJIT_NO_VREG) {
     const GRJIT_Type result = e->c.f->vregs[op->dst].type;
-    if (result == GRJIT_TYPE_F32 || result == GRJIT_TYPE_F64) {
+    if (grjit_type_is_float(result)) {
       /* A float comes back in xmm0: an f32 in its low 32 bits (whatever is above them is not
        * ours), an f64 in its 64. */
       grjit_asm_movd_rx(a, GRJIT_RAX, GRJIT_XMM0, result == GRJIT_TYPE_F64);
@@ -1054,10 +1054,6 @@ static void emit_cmp32(GRJIT_Emit * e, const GRJIT_Op * op) {
  * even), exceptions masked, no flush to zero. Nothing traps: a conversion that would is guarded in
  * the IR, and `cvtt*` returns the "integer indefinite" value in hardware, never a fault. */
 
-static bool type_is_float(GRJIT_Type t) {
-  return t == GRJIT_TYPE_F32 || t == GRJIT_TYPE_F64;
-}
-
 static bool reg_is_f64(const GRJIT_Emit * e, GRJIT_VReg v) {
   return e->c.f->vregs[v].type == GRJIT_TYPE_F64;
 }
@@ -1317,7 +1313,7 @@ static void emit_float_round(GRJIT_Emit * e, const GRJIT_Op * op, bool dbl) {
 static void emit_float_cmp(GRJIT_Emit * e, const GRJIT_Op * op) {
   GRJIT_Asm * a = &e->as;
   GRJIT_VReg witness = op->a.kind == GRJIT_OPERAND_VREG &&
-                               type_is_float(e->c.f->vregs[op->a.vreg].type)
+                               grjit_type_is_float(e->c.f->vregs[op->a.vreg].type)
                            ? op->a.vreg
                            : op->b.vreg;
   const bool dbl = reg_is_f64(e, witness);
@@ -2154,7 +2150,7 @@ GRJIT_Result grjit_emit_function(const GRJIT_Function * f,
     const GRJIT_Allocator * allocator, size_t max_code_bytes,
     GRJIT_EntryHook hook, uint32_t request_offset, uint32_t frame_bytes,
     bool win64, const GRJIT_LiveSites * live, GRJIT_Emit * e) {
-  if (win64 && grjit_function_needs_int_ext(f)) {
+  if (win64 && grjit_function_needs_numeric_ext(f)) {
     /* The i32 type and the integer operations of numeric-operations.md are emitted for
      * SysV; story 5 of spec-runtime-float brings them to Win64. Until then the flavour
      * refuses the function by name instead of emitting a 64-bit operation for a 32-bit

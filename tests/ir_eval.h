@@ -23,7 +23,7 @@
 #include <cstring>
 #include <vector>
 
-#if !defined(__FP_FAST_FMA) && defined(__FAST_MATH__)
+#if defined(__FAST_MATH__)
 #error "the evaluator and every float test are built without -ffast-math"
 #endif
 

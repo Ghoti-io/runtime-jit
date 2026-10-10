@@ -144,7 +144,7 @@ const GRJIT_Allocator * grjit_allocator_or_default(
   return allocator != NULL ? allocator : grjit_allocator_default();
 }
 
-bool grjit_function_needs_int_ext(const GRJIT_Function * function) {
+bool grjit_function_needs_numeric_ext(const GRJIT_Function * function) {
   for (size_t v = 0; v < function->vreg_count; v++) {
     if (function->vregs[v].type == GRJIT_TYPE_I32 || grjit_type_is_float(function->vregs[v].type)) {
       return true;
@@ -153,7 +153,7 @@ bool grjit_function_needs_int_ext(const GRJIT_Function * function) {
   for (size_t b = 0; b < function->block_count; b++) {
     for (size_t i = 0; i < function->blocks[b].count; i++) {
       const GRJIT_Op * op = &function->blocks[b].ops[i];
-      if (grjit_op_is_int_ext(op->kind) || grjit_operand_is_float_imm(&op->a) ||
+      if (grjit_op_is_numeric_ext(op->kind) || grjit_operand_is_float_imm(&op->a) ||
           grjit_operand_is_float_imm(&op->b)) {
         return true;
       }
