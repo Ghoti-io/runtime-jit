@@ -2128,12 +2128,14 @@ tested, and not the cache that consumes them.
   | `Haswell,-sse4.1` | 0 | 1 | 1 | 1 | lzcnt | tzcnt | run, SIGILL |
   | `Haswell,-popcnt` | 1 | 0 | 1 | 1 | lzcnt | tzcnt | SIGILL, run |
   | `Haswell,-bmi1,-bmi2` | 1 | 1 | 0 | 1 | **bsr** | tzcnt | run, run |
-  | `Haswell,-abm` | 1 | 1 | 1 | 0 | lzcnt | **bsf** | run, run |
+  | `Haswell,-abm,-bmi2` | 1 | 1 | 1 | 0 | lzcnt | **bsf** | run, run |
 
-  (The sixth row is `Haswell,-bmi1` with BMI2 also removed: under plain `Haswell,-bmi1` no program of the
-  image starts, because the CPU then says AVX2 and BMI2 and no BMI1 and glibc's AVX2 string functions use
-  BMI1 instructions, so even `--gtest_list_tests` dies with SIGILL in the dynamic loader.
-  The probe measured the same instruction behaviour with BMI2 removed.)
+  (The sixth and seventh rows are `Haswell,-bmi1` and `Haswell,-abm` with BMI2 also removed. Under the plain
+  models the image's glibc does not work, because the CPU says AVX2 and BMI2 together with a BMI1 that is
+  missing or a `tzcnt` that runs as `bsf`, and glibc's AVX2 string functions use BMI1 instructions: under
+  `Haswell,-bmi1` even `--gtest_list_tests` dies with SIGILL in the dynamic loader, and under `Haswell,-abm`
+  the program starts and gtest silently registers no test at all. The probe, which is too small to meet
+  either, measured the same instruction behaviour with and without BMI2 removed.)
 
   The last two rows are a qemu quirk: removing BMI1 makes `lzcnt` run as `bsr` while its CPUID bit
   stays set, and removing ABM (the LZCNT bit) makes `tzcnt` run as `bsf` while the BMI1 bit stays set,
