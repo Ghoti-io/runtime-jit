@@ -16,9 +16,10 @@
 # name ends in CFLAGS or CXXFLAGS and its value names a language standard
 # (-std=): that picks LIB_CFLAGS, ASAN_CXXFLAGS and the fuzz sets and leaves the
 # pkg-config ones (CUTIL_CFLAGS) alone. CFLAGS, CXXFLAGS and LIB_CFLAGS must
-# exist, so that a gate which finds nothing cannot pass. The last
-# -ffp-contract= on a line wins, as the compiler reads it, so that is the one
-# that has to be "off". -ffast-math is refused wherever it appears.
+# exist, so that a gate which finds nothing cannot pass. Every
+# -ffp-contract= must be "off" wherever it appears. -ffast-math, -Ofast and the flags
+# it turns on (unsafe, finite-only, associative and reciprocal math, no signed zeros)
+# are refused.
 #
 # Usage: check-fp-contract.sh [Makefile [directory]]
 #   defaults: ./Makefile, run in the Makefile's own directory. check-gates gives it
@@ -31,7 +32,10 @@ mk="${1:-Makefile}"
 case "$mk" in /*) ;; *) mk="$(pwd)/$mk" ;; esac
 dir="${2:-$(dirname "$mk")}"
 
-db="$(make -s -C "$dir" -f "$mk" -pn help 2>/dev/null)"
+# EXTRA_CFLAGS and EXTRA_CXXFLAGS are appended to the sets by the real build, from the
+# environment or the command line; they are handed on here so that the sets read are
+# the ones that build would compile with (an override there is a flag like any other).
+db="$(make -s -C "$dir" -f "$mk" EXTRA_CFLAGS="${EXTRA_CFLAGS-}" EXTRA_CXXFLAGS="${EXTRA_CXXFLAGS-}" -pn help 2>/dev/null)"
 if [ -z "$db" ]; then
   printf 'check-fp-contract: make printed no variable database for %s; this gate is measuring nothing\n' "$mk" >&2
   exit 1
@@ -50,11 +54,17 @@ printf '%s\n' "$db" | awk -v lib="$library" '
       last = ""
       n = split(line, w, /[ \t]+/)
       for (i = 1; i <= n; i++) {
-        if (w[i] ~ /^-ffp-contract=/) last = w[i]
-        if (w[i] == "-ffast-math" || w[i] == "-Ofast") fast[name] = w[i]
+        if (w[i] ~ /^-ffp-contract=/) {
+          last = w[i]
+          if (w[i] != "-ffp-contract=off") other[name] = w[i]
+        }
+        if (w[i] ~ /^(-ffast-math|-Ofast|-funsafe-math-optimizations|-ffinite-math-only|-fassociative-math|-freciprocal-math|-fno-signed-zeros)$/) fast[name] = w[i]
       }
-      if (last != "-ffp-contract=off") {
-        bad[name] = (last == "") ? "does not name -ffp-contract=off" : "ends with " last ", not -ffp-contract=off"
+      if (name in other) {
+        bad[name] = "uses " other[name] ", not -ffp-contract=off"
+      }
+      else if (last != "-ffp-contract=off") {
+        bad[name] = "does not name -ffp-contract=off"
       }
     }
   }
@@ -72,7 +82,7 @@ printf '%s\n' "$db" | awk -v lib="$library" '
       rc = 1
     }
     for (v in fast) {
-      printf "check-fp-contract: %s: %s uses %s, which makes guest floating point host-dependent\n", lib, v, fast[v] > "/dev/stderr"
+      printf "check-fp-contract: %s: %s uses %s, which lets the compiler change guest floating point\n", lib, v, fast[v] > "/dev/stderr"
       rc = 1
     }
     if (rc == 0) {
