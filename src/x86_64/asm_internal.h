@@ -221,6 +221,14 @@ void grjit_asm_movsx(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg src, unsigned from_
  *  `dst` unspecified, when `src` is zero. */
 void grjit_asm_bsr(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg src, bool wide);
 void grjit_asm_bsf(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg src, bool wide);
+/** `lzcnt`, `tzcnt` and `popcnt dst, src` (`F3 [REX] 0F BD / BC / B8 /r`), 64 bits when `wide`.
+ *  Three functions and no prefix parameter on purpose: without the `F3` the first two are `bsr`
+ *  and `bsf`, which a CPU without LZCNT or BMI1 runs these as (no fault, other answers). The
+ *  result is the operand width for a zero source (`lzcnt`, `tzcnt`); ZF/CF are not used. Emitted
+ *  only for a feature in the effective set (features.h). */
+void grjit_asm_lzcnt(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg src, bool wide);
+void grjit_asm_tzcnt(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg src, bool wide);
+void grjit_asm_popcnt(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg src, bool wide);
 /** `cmovcc dst, src`. */
 void grjit_asm_cmov(GRJIT_Asm * a, GRJIT_Cond cond, GRJIT_Reg dst, GRJIT_Reg src, bool wide);
 /** `cdq` and `cqo`: sign-extend `eax` into `edx`, `rax` into `rdx`. */
@@ -260,6 +268,12 @@ void grjit_asm_ucomis(GRJIT_Asm * a, GRJIT_Xmm x, GRJIT_Xmm y, bool dbl);
 /** `cmpss`/`cmpsd dst, src, pred`: all ones in the low 32 or 64 bits of `dst` if `pred` holds
  *  for `dst` and `src`, else all zeros. */
 void grjit_asm_cmps(GRJIT_Asm * a, GRJIT_SsePred pred, GRJIT_Xmm dst, GRJIT_Xmm src, bool dbl);
+/** `roundss`/`roundsd dst, src, imm` (SSE4.1, `66 0F 3A 0A/0B /r ib`): rounds the low 32 or 64 bits
+ *  of `src` as `imm` says (bits 0-1 the mode, bit 2 use MXCSR instead, bit 3 no precision
+ *  exception) and leaves the rest of `dst` as it was. Emitted only when SSE4.1 is in the
+ *  effective set. */
+void grjit_asm_roundss(GRJIT_Asm * a, GRJIT_Xmm dst, GRJIT_Xmm src, uint8_t imm);
+void grjit_asm_roundsd(GRJIT_Asm * a, GRJIT_Xmm dst, GRJIT_Xmm src, uint8_t imm);
 /** `cvtsi2ss`/`cvtsi2sd xmm, r32` or, when `wide_src`, `r64` (a signed integer). */
 void grjit_asm_cvtsi2s(GRJIT_Asm * a, GRJIT_Xmm dst, GRJIT_Reg src, bool dbl, bool wide_src);
 /** `cvttss2si`/`cvttsd2si r, xmm`: truncating, to 32 or, when `wide_dst`, 64 bits. An operand

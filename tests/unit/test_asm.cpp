@@ -130,6 +130,77 @@ std::vector<Case> cases() {
           {0x41, 0x0F, 0x97, 0xC1}, "seta r9b"},
       {"movzx eax, al", [](A a) { grjit_asm_movzx_r8(a, GRJIT_RAX, GRJIT_RAX); },
           {0x0F, 0xB6, 0xC0}, "movzx eax,al"},
+      // lzcnt, tzcnt, popcnt (F3 [REX] 0F BD / BC / B8) and roundss/roundsd (66 [REX] 0F 3A 0A / 0B ib), read
+      // against `as` and `objdump` (spec-runtime-float, story 4). The F3 is the point: without it the first
+      // two are bsr and bsf, which a CPU without LZCNT or BMI1 runs these as.
+      {"lzcnt eax, ecx", [](A a) { grjit_asm_lzcnt(a, GRJIT_RAX, GRJIT_RCX, false); },
+          {0xF3, 0x0F, 0xBD, 0xC1}, "lzcnt eax,ecx"},
+      {"lzcnt rax, rcx", [](A a) { grjit_asm_lzcnt(a, GRJIT_RAX, GRJIT_RCX, true); },
+          {0xF3, 0x48, 0x0F, 0xBD, 0xC1}, "lzcnt rax,rcx"},
+      {"lzcnt eax, eax", [](A a) { grjit_asm_lzcnt(a, GRJIT_RAX, GRJIT_RAX, false); },
+          {0xF3, 0x0F, 0xBD, 0xC0}, "lzcnt eax,eax"},
+      {"lzcnt rax, rax", [](A a) { grjit_asm_lzcnt(a, GRJIT_RAX, GRJIT_RAX, true); },
+          {0xF3, 0x48, 0x0F, 0xBD, 0xC0}, "lzcnt rax,rax"},
+      {"lzcnt rdx, rdx", [](A a) { grjit_asm_lzcnt(a, GRJIT_RDX, GRJIT_RDX, true); },
+          {0xF3, 0x48, 0x0F, 0xBD, 0xD2}, "lzcnt rdx,rdx"},
+      {"lzcnt r8d, r9d", [](A a) { grjit_asm_lzcnt(a, GRJIT_R8, GRJIT_R9, false); },
+          {0xF3, 0x45, 0x0F, 0xBD, 0xC1}, "lzcnt r8d,r9d"},
+      {"lzcnt r10, r11", [](A a) { grjit_asm_lzcnt(a, GRJIT_R10, GRJIT_R11, true); },
+          {0xF3, 0x4D, 0x0F, 0xBD, 0xD3}, "lzcnt r10,r11"},
+      {"lzcnt eax, r12d", [](A a) { grjit_asm_lzcnt(a, GRJIT_RAX, GRJIT_R12, false); },
+          {0xF3, 0x41, 0x0F, 0xBD, 0xC4}, "lzcnt eax,r12d"},
+      {"lzcnt r15, rax", [](A a) { grjit_asm_lzcnt(a, GRJIT_R15, GRJIT_RAX, true); },
+          {0xF3, 0x4C, 0x0F, 0xBD, 0xF8}, "lzcnt r15,rax"},
+      {"tzcnt eax, ecx", [](A a) { grjit_asm_tzcnt(a, GRJIT_RAX, GRJIT_RCX, false); },
+          {0xF3, 0x0F, 0xBC, 0xC1}, "tzcnt eax,ecx"},
+      {"tzcnt rax, rcx", [](A a) { grjit_asm_tzcnt(a, GRJIT_RAX, GRJIT_RCX, true); },
+          {0xF3, 0x48, 0x0F, 0xBC, 0xC1}, "tzcnt rax,rcx"},
+      {"tzcnt eax, eax", [](A a) { grjit_asm_tzcnt(a, GRJIT_RAX, GRJIT_RAX, false); },
+          {0xF3, 0x0F, 0xBC, 0xC0}, "tzcnt eax,eax"},
+      {"tzcnt rax, rax", [](A a) { grjit_asm_tzcnt(a, GRJIT_RAX, GRJIT_RAX, true); },
+          {0xF3, 0x48, 0x0F, 0xBC, 0xC0}, "tzcnt rax,rax"},
+      {"tzcnt r8d, r9d", [](A a) { grjit_asm_tzcnt(a, GRJIT_R8, GRJIT_R9, false); },
+          {0xF3, 0x45, 0x0F, 0xBC, 0xC1}, "tzcnt r8d,r9d"},
+      {"tzcnt r10, r11", [](A a) { grjit_asm_tzcnt(a, GRJIT_R10, GRJIT_R11, true); },
+          {0xF3, 0x4D, 0x0F, 0xBC, 0xD3}, "tzcnt r10,r11"},
+      {"tzcnt r15, rax", [](A a) { grjit_asm_tzcnt(a, GRJIT_R15, GRJIT_RAX, true); },
+          {0xF3, 0x4C, 0x0F, 0xBC, 0xF8}, "tzcnt r15,rax"},
+      {"popcnt eax, ecx", [](A a) { grjit_asm_popcnt(a, GRJIT_RAX, GRJIT_RCX, false); },
+          {0xF3, 0x0F, 0xB8, 0xC1}, "popcnt eax,ecx"},
+      {"popcnt rax, rcx", [](A a) { grjit_asm_popcnt(a, GRJIT_RAX, GRJIT_RCX, true); },
+          {0xF3, 0x48, 0x0F, 0xB8, 0xC1}, "popcnt rax,rcx"},
+      {"popcnt eax, eax", [](A a) { grjit_asm_popcnt(a, GRJIT_RAX, GRJIT_RAX, false); },
+          {0xF3, 0x0F, 0xB8, 0xC0}, "popcnt eax,eax"},
+      {"popcnt rax, rax", [](A a) { grjit_asm_popcnt(a, GRJIT_RAX, GRJIT_RAX, true); },
+          {0xF3, 0x48, 0x0F, 0xB8, 0xC0}, "popcnt rax,rax"},
+      {"popcnt r8d, r9d", [](A a) { grjit_asm_popcnt(a, GRJIT_R8, GRJIT_R9, false); },
+          {0xF3, 0x45, 0x0F, 0xB8, 0xC1}, "popcnt r8d,r9d"},
+      {"popcnt r10, r11", [](A a) { grjit_asm_popcnt(a, GRJIT_R10, GRJIT_R11, true); },
+          {0xF3, 0x4D, 0x0F, 0xB8, 0xD3}, "popcnt r10,r11"},
+      {"popcnt rax, r12", [](A a) { grjit_asm_popcnt(a, GRJIT_RAX, GRJIT_R12, true); },
+          {0xF3, 0x49, 0x0F, 0xB8, 0xC4}, "popcnt rax,r12"},
+      {"roundsd xmm0, xmm0, 0x8", [](A a) { grjit_asm_roundsd(a, GRJIT_XMM0, GRJIT_XMM0, 0x8); },
+          {0x66, 0x0F, 0x3A, 0x0B, 0xC0, 0x08}, "roundsd xmm0,xmm0,0x8"},
+      {"roundsd xmm0, xmm0, 0x9", [](A a) { grjit_asm_roundsd(a, GRJIT_XMM0, GRJIT_XMM0, 0x9); },
+          {0x66, 0x0F, 0x3A, 0x0B, 0xC0, 0x09}, "roundsd xmm0,xmm0,0x9"},
+      {"roundsd xmm0, xmm0, 0xa", [](A a) { grjit_asm_roundsd(a, GRJIT_XMM0, GRJIT_XMM0, 0xA); },
+          {0x66, 0x0F, 0x3A, 0x0B, 0xC0, 0x0A}, "roundsd xmm0,xmm0,0xa"},
+      {"roundsd xmm0, xmm0, 0xb", [](A a) { grjit_asm_roundsd(a, GRJIT_XMM0, GRJIT_XMM0, 0xB); },
+          {0x66, 0x0F, 0x3A, 0x0B, 0xC0, 0x0B}, "roundsd xmm0,xmm0,0xb"},
+      {"roundss xmm0, xmm0, 0x8", [](A a) { grjit_asm_roundss(a, GRJIT_XMM0, GRJIT_XMM0, 0x8); },
+          {0x66, 0x0F, 0x3A, 0x0A, 0xC0, 0x08}, "roundss xmm0,xmm0,0x8"},
+      {"roundss xmm0, xmm0, 0x9", [](A a) { grjit_asm_roundss(a, GRJIT_XMM0, GRJIT_XMM0, 0x9); },
+          {0x66, 0x0F, 0x3A, 0x0A, 0xC0, 0x09}, "roundss xmm0,xmm0,0x9"},
+      {"roundss xmm0, xmm0, 0xa", [](A a) { grjit_asm_roundss(a, GRJIT_XMM0, GRJIT_XMM0, 0xA); },
+          {0x66, 0x0F, 0x3A, 0x0A, 0xC0, 0x0A}, "roundss xmm0,xmm0,0xa"},
+      {"roundss xmm0, xmm0, 0xb", [](A a) { grjit_asm_roundss(a, GRJIT_XMM0, GRJIT_XMM0, 0xB); },
+          {0x66, 0x0F, 0x3A, 0x0A, 0xC0, 0x0B}, "roundss xmm0,xmm0,0xb"},
+      {"roundsd xmm1, xmm2, 0xa", [](A a) { grjit_asm_roundsd(a, GRJIT_XMM1, GRJIT_XMM2, 0xA); },
+          {0x66, 0x0F, 0x3A, 0x0B, 0xCA, 0x0A}, "roundsd xmm1,xmm2,0xa"},
+      {"roundss xmm7, xmm3, 0xb", [](A a) { grjit_asm_roundss(a, GRJIT_XMM7, GRJIT_XMM3, 0xB); },
+          {0x66, 0x0F, 0x3A, 0x0A, 0xFB, 0x0B}, "roundss xmm7,xmm3,0xb"},
+      {"roundsd xmm7, xmm7, 0x0", [](A a) { grjit_asm_roundsd(a, GRJIT_XMM7, GRJIT_XMM7, 0x0); },
+          {0x66, 0x0F, 0x3A, 0x0B, 0xFF, 0x00}, "roundsd xmm7,xmm7,0x0"},
       {"push rbp", [](A a) { grjit_asm_push(a, GRJIT_RBP); }, {0x55}, "push rbp"},
       {"push r12", [](A a) { grjit_asm_push(a, GRJIT_R12); }, {0x41, 0x54}, "push r12"},
       {"pop rbp", [](A a) { grjit_asm_pop(a, GRJIT_RBP); }, {0x5D}, "pop rbp"},
@@ -185,6 +256,45 @@ TEST(Asm, EveryInstructionEncodesToTheReferenceBytes) {
     EXPECT_EQ(grjit_asm_status(&as.a), GRJIT_ASM_OK) << c.name;
     EXPECT_EQ(as.bytes(), c.bytes) << c.name;
   }
+}
+
+TEST(Asm, LzcntAndTzcntAreTheBitScansWithTheMandatoryF3PrefixAndNothingElse) {
+  // On a CPU without LZCNT or BMI1 the F3 forms run as bsr and bsf: the hazard of story 4. The two
+  // assembler functions are separate and take no prefix, and their bytes are the scan's behind an F3.
+  for (bool wide : {false, true}) {
+    for (GRJIT_Reg dst : {GRJIT_RAX, GRJIT_R9}) {
+      for (GRJIT_Reg src : {GRJIT_RCX, GRJIT_R12}) {
+        Asm scan, count;
+        grjit_asm_bsr(&scan.a, dst, src, wide);
+        grjit_asm_lzcnt(&count.a, dst, src, wide);
+        std::vector<uint8_t> want = {0xF3};
+        for (uint8_t b : scan.bytes()) {
+          want.push_back(b);
+        }
+        EXPECT_EQ(count.bytes(), want) << "lzcnt is bsr behind F3 (wide " << wide << ")";
+        Asm scan2, count2;
+        grjit_asm_bsf(&scan2.a, dst, src, wide);
+        grjit_asm_tzcnt(&count2.a, dst, src, wide);
+        std::vector<uint8_t> want2 = {0xF3};
+        for (uint8_t b : scan2.bytes()) {
+          want2.push_back(b);
+        }
+        EXPECT_EQ(count2.bytes(), want2) << "tzcnt is bsf behind F3 (wide " << wide << ")";
+        Asm pop;
+        grjit_asm_popcnt(&pop.a, dst, src, wide);
+        EXPECT_EQ(pop.bytes().front(), 0xF3);
+        EXPECT_EQ(pop.bytes()[pop.bytes().size() - 3], 0x0F);
+        EXPECT_EQ(pop.bytes()[pop.bytes().size() - 2], 0xB8);
+      }
+    }
+  }
+}
+
+TEST(Asm, TheRoundingsCarryTheirImmediateLastAndTheirRegistersInModrm) {
+  Asm as;
+  grjit_asm_roundsd(&as.a, GRJIT_XMM5, GRJIT_XMM6, 0x0A);
+  grjit_asm_roundss(&as.a, GRJIT_XMM6, GRJIT_XMM5, 0x09);
+  EXPECT_EQ(as.bytes(), (std::vector<uint8_t>{0x66, 0x0F, 0x3A, 0x0B, 0xEE, 0x0A, 0x66, 0x0F, 0x3A, 0x0A, 0xF5, 0x09}));
 }
 
 TEST(Asm, TheSystemDisassemblerReadsTheSameInstructions) {

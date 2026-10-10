@@ -397,6 +397,37 @@ void grjit_asm_bsf(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg src, bool wide) {
   modrm_rr(a, dst, src);
 }
 
+/* `lzcnt`, `tzcnt` and `popcnt` are `F3 [REX] 0F BD / BC / B8 /r`. Without the F3 the first two are
+ * `bsr` and `bsf` and the third is a different instruction, and a CPU that lacks LZCNT or BMI1 runs
+ * the F3 forms as the bit scans instead of faulting: so each is a function of its own, with its own
+ * opcode and its mandatory prefix inside it, and no caller supplies a prefix. */
+static void f3_count(GRJIT_Asm * a, uint8_t opcode, GRJIT_Reg dst, GRJIT_Reg src, bool wide) {
+  note(a, dst);
+  note(a, src);
+  byte(a, 0xF3);
+  rex(a, wide, dst, src, false);
+  byte(a, 0x0F);
+  byte(a, opcode);
+  modrm_rr(a, dst, src);
+}
+
+void grjit_asm_lzcnt(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg src, bool wide) {
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 64
+  /* Planted defect 64 (tests only): `lzcnt` emitted without its F3 prefix, which is `bsr`. */
+  grjit_asm_bsr(a, dst, src, wide);
+#else
+  f3_count(a, 0xBD, dst, src, wide);
+#endif
+}
+
+void grjit_asm_tzcnt(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg src, bool wide) {
+  f3_count(a, 0xBC, dst, src, wide);
+}
+
+void grjit_asm_popcnt(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg src, bool wide) {
+  f3_count(a, 0xB8, dst, src, wide);
+}
+
 void grjit_asm_cmov(GRJIT_Asm * a, GRJIT_Cond cond, GRJIT_Reg dst, GRJIT_Reg src, bool wide) {
   note(a, dst);
   note(a, src);
@@ -521,6 +552,25 @@ void grjit_asm_sse_logic(GRJIT_Asm * a, GRJIT_SseLogic op, GRJIT_Xmm dst, GRJIT_
 
 void grjit_asm_ucomis(GRJIT_Asm * a, GRJIT_Xmm x, GRJIT_Xmm y, bool dbl) {
   sse_rr(a, dbl ? 0x66 : 0, false, 0x2E, x, y);
+}
+
+/* `roundss`/`roundsd xmm, xmm, imm8` (SSE4.1): `66 [REX] 0F 3A 0A/0B /r ib`. */
+static void sse_round(GRJIT_Asm * a, uint8_t opcode, GRJIT_Xmm dst, GRJIT_Xmm src, uint8_t imm) {
+  byte(a, 0x66);
+  rex(a, false, dst, src, false);
+  byte(a, 0x0F);
+  byte(a, 0x3A);
+  byte(a, opcode);
+  modrm_rr(a, dst, src);
+  byte(a, imm);
+}
+
+void grjit_asm_roundss(GRJIT_Asm * a, GRJIT_Xmm dst, GRJIT_Xmm src, uint8_t imm) {
+  sse_round(a, 0x0A, dst, src, imm);
+}
+
+void grjit_asm_roundsd(GRJIT_Asm * a, GRJIT_Xmm dst, GRJIT_Xmm src, uint8_t imm) {
+  sse_round(a, 0x0B, dst, src, imm);
 }
 
 void grjit_asm_cmps(GRJIT_Asm * a, GRJIT_SsePred pred, GRJIT_Xmm dst, GRJIT_Xmm src, bool dbl) {
