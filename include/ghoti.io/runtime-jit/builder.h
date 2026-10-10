@@ -191,7 +191,9 @@ GRJIT_API GRJIT_Result grjit_builder_set_poll_helper(
 
 /**
  * @brief `dst = imm`. For an `I32` destination `imm` must lie in `[INT32_MIN, UINT32_MAX]` (either
- *   spelling of a 32-bit pattern, which is stored zero-extended); the verifier refuses another.
+ *   spelling of a 32-bit pattern, which is stored zero-extended); the verifier refuses another. For
+ *   an `F64` destination `imm` is the bit pattern of the double; for an `F32` one it is the 32-bit
+ *   pattern of the float and must lie in `[0, UINT32_MAX]` (it has one spelling).
  */
 GRJIT_API GRJIT_Result grjit_builder_const(
     GRJIT_Builder * builder, GRJIT_VReg dst, int64_t imm);
@@ -199,7 +201,9 @@ GRJIT_API GRJIT_Result grjit_builder_const(
 /**
  * @brief `dst = src`. An `I32` moves only into an `I32`, from an `I32` register or a 32-bit
  *   immediate; no other pair of types changes (use ::grjit_builder_bitcast, or ::GRJIT_OP_WRAP and
- *   the extensions between `I32` and `I64`).
+ *   the extensions between `I32` and `I64`). The same for a float: an `F32` moves only into an `F32`,
+ *   an `F64` into an `F64`, from a register of the type or an immediate that is the bit pattern
+ *   (::GRJIT_OP_REINTERPRET changes between a float and an integer).
  */
 GRJIT_API GRJIT_Result grjit_builder_move(
     GRJIT_Builder * builder, GRJIT_VReg dst, GRJIT_Operand src);
@@ -214,14 +218,17 @@ GRJIT_API GRJIT_Result grjit_builder_move(
  * destination's type is what decides whether a stack map names it. Neither the source
  * nor the destination may be an `I32`: the source is refused (its word is a 32-bit value,
  * not bits of another type), and so is an `I32` destination, which would not be
- * zero-extended. Convert with ::GRJIT_OP_WRAP, ::GRJIT_OP_EXTEND_S or ::GRJIT_OP_EXTEND_U.
+ * zero-extended. Convert with ::GRJIT_OP_WRAP, ::GRJIT_OP_EXTEND_S or ::GRJIT_OP_EXTEND_U. A float is
+ * refused the same way, in either position: ::GRJIT_OP_REINTERPRET is the operation that gives its bits
+ * to an integer register and takes them back.
  */
 GRJIT_API GRJIT_Result grjit_builder_bitcast(
     GRJIT_Builder * builder, GRJIT_VReg dst, GRJIT_VReg src);
 
 /**
  * @brief `dst = a op b` for ADD, SUB, MUL, AND, OR, XOR, SHL, SHR, SAR, ROTL,
- *   ROTR, DIV_S, DIV_U, REM_S and REM_U.
+ *   ROTR, DIV_S, DIV_U, REM_S, REM_U, and the float operations FADD, FSUB, FMUL, FDIV, FMIN, FMAX and
+ *   FCOPYSIGN (float registers of the destination's type; an immediate is the operand's bit pattern).
  *
  * The width is the destination's (ir.h). The four divisions are *partial*: build
  * the guards in front of them with ::grjit_builder_guard, or the verifier
@@ -234,7 +241,11 @@ GRJIT_API GRJIT_Result grjit_builder_binary(GRJIT_Builder * builder,
 
 /**
  * @brief `dst = op a` for NEG, NOT, CLZ, CTZ, POPCNT, EXT8_S, EXT16_S, EXT32_S,
- *   WRAP, EXTEND_S and EXTEND_U.
+ *   WRAP, EXTEND_S, EXTEND_U, and the float operations FNEG, FABS, FSQRT, FCEIL, FFLOOR, FTRUNC,
+ *   FNEAREST, CONVERT_S, CONVERT_U, TRUNC_S, TRUNC_U, TRUNC_SAT_S, TRUNC_SAT_U, DEMOTE, PROMOTE and
+ *   REINTERPRET. The source of a conversion is a register. TRUNC_S and TRUNC_U are *partial*: build the
+ *   guards in front of them with ::grjit_builder_guard (a NaN guard `CMP EQ x, x` and a range guard, see
+ *   ::GRJIT_OP_TRUNC_S), or the verifier refuses the function. The builder adds nothing of its own.
  *
  * @return ::GRJIT_ERR_INVALID for another kind.
  */
@@ -248,7 +259,8 @@ GRJIT_API GRJIT_Result grjit_builder_unary(
  * immediate is read as its low 32 bits) compare as 32-bit numbers, the signed conditions
  * reading them as signed; otherwise it is 64 bits. `dst` is an `I64` or an `I32` register
  * (`i64.lt_s` answers an `i32` in WebAssembly). `eqz` is `EQ` against `#0`. An `I32` and an
- * `I64` operand are not compared.
+ * `I64` operand are not compared. Two float registers of one width (an immediate is its bit pattern)
+ * are compared with `EQ`, `NE`, `LT`, `LE`, `GT` or `GE` only, ordered: false for a NaN, except `NE`.
  */
 GRJIT_API GRJIT_Result grjit_builder_cmp(GRJIT_Builder * builder,
     GRJIT_Cmp cmp, GRJIT_VReg dst, GRJIT_Operand a, GRJIT_Operand b);
@@ -257,7 +269,8 @@ GRJIT_API GRJIT_Result grjit_builder_cmp(GRJIT_Builder * builder,
  * @brief `dst = load of width_bits at base + disp`, zero- or sign-extended.
  *
  * @param width_bits 8, 16, 32 or 64 (the verifier refuses others).
- * @param sign_extend True for `LOAD_S`. An `I32` destination takes a zero-extending load
+ * @param sign_extend True for `LOAD_S`. An `F32` destination takes a zero-extending load of exactly 32
+ *   bits and an `F64` one of exactly 64. An `I32` destination takes a zero-extending load
  *   of 8, 16 or 32 bits only (a sign-extending or 64-bit load would leave its upper half
  *   non-zero), and the verifier refuses the others.
  */
@@ -270,8 +283,13 @@ GRJIT_API GRJIT_Result grjit_builder_store(GRJIT_Builder * builder,
     GRJIT_VReg base, int32_t disp, uint32_t width_bits, GRJIT_Operand value);
 
 /**
- * @brief Calls the native helper at `address` with integer or pointer
- *   arguments.
+ * @brief Calls the native helper at `address` with integer, pointer or float
+ *   arguments (x86-64 SysV; the other backends refuse a float here).
+ *
+ * An argument is a register of any type or an immediate: a plain immediate is integer-class, and a
+ * float immediate is the typed ::grjit_operand_f32_imm or ::grjit_operand_f64_imm (a plain one has no
+ * class to pass it by). The integer-class arguments take the integer registers in order and the
+ * float ones `xmm0` to `xmm7` in order, among themselves; a float `dst` is taken from `xmm0`.
  *
  * A `GRJIT_CALL_NO_GC` call carries no frame state (`state_slots` is
  * ignored). A `GRJIT_CALL_GC_POINT` call is a site of kind `site_kind` and

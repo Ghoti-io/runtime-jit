@@ -66,6 +66,31 @@ directory does not matter, and `GRJIT_WASM_SUITE_DIR` names another directory th
 runs through the IR. Counts at that tag: `i32.wast` 374 passed, 85 excluded (the
 `assert_invalid` and `assert_malformed` it cannot run), 0 failed; `i64.wast` 384, 31, 0.
 
+## The float operations
+
+`F32` and `F64` are the IEEE binary32 and binary64 types, held as their **bits** in the 64-bit
+word (an `F32` zero-extended, as an `I32` is). The float table of WebAssembly is there: `FADD`,
+`FSUB`, `FMUL`, `FDIV`, `FMIN`, `FMAX`, `FCOPYSIGN` (binary), `FNEG`, `FABS`, `FSQRT`, `FCEIL`,
+`FFLOOR`, `FTRUNC`, `FNEAREST` (unary), `CONST`, `MOVE`, `LOAD` and `STORE` as bit moves, `CMP`
+over two float registers with the ordered conditions (`eq ne lt le gt ge`, false for a NaN except
+`ne`), and the conversions `CONVERT_S`/`CONVERT_U` (`f32/f64.convert_i32/i64_s/u`), `TRUNC_S`/`TRUNC_U`
+(`i32/i64.trunc_f32/f64_s/u`, **partial**: the frontend writes a NaN guard and a range guard in
+front, and the verifier refuses the operation without the range guard), `TRUNC_SAT_S`/`TRUNC_SAT_U`,
+`DEMOTE`, `PROMOTE` and `REINTERPRET`. A helper `CALL` takes and returns floats by the SysV
+classification (integers in `rdi`..`r9`, floats in `xmm0`..`xmm7`, each among themselves); between
+compiled functions a float travels as its bit word. They are emitted for x86-64 SysV with SSE2 only,
+and run the same on every host; the arm64 backend and the Windows flavour refuse a function that has
+a float register or operation with `GRJIT_ERR_UNSUPPORTED`, for now. Compiled code assumes the
+default MXCSR and never writes it; the library and its tests are built with `-ffp-contract=off`.
+`documentation/design.md` has the decisions, the NaN rule and what was rejected.
+
+The eight scalar float and conversion files of the same suite commit run too (`f32`, `f64`,
+`f32_cmp`, `f64_cmp`, `f32_bitwise`, `f64_bitwise`, `conversions`, `float_misc`; `tools/wasm/fetch.sh`
+fetches them): a NaN result is checked against the suite's `nan:canonical` or `nan:arithmetic` and
+everything else bit for bit. Counts at that tag: 2,500, 2,500, 2,400, 2,400, 360, 360, 593 (526
+returns and 67 traps) and 470 assertions pass, with the `assert_invalid` and `assert_malformed` it
+cannot run counted as excluded, and 0 failed.
+
 ## Example
 
 ```c
@@ -142,7 +167,7 @@ running a program that includes only the umbrella header.
 
 ## Status
 
-The IR (with `I32` and the integer operations, on x86-64 SysV), the verifier, the printer, the x86-64 and arm64 baseline
+The IR (with `I32`, `F32`, `F64` and the integer and float operations, on x86-64 SysV), the verifier, the printer, the x86-64 and arm64 baseline
 backends (the Windows one with its unwind registration) and their assemblers, the metadata, W^X code memory, the gates, the examples and the
 benchmark harness are in, and so are the parts that need an engine: wiring it
 into `lang-tang` (story 15), tier-up, compiled-code reference counting and the

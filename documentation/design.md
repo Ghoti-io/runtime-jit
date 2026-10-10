@@ -1691,6 +1691,273 @@ refused unless the guards are repeated in front of it. A valid `MIN / x` with an
 dividend and a register divisor is refused too (the rule has no fact for it); rewrite it by moving
 the constant into a register first.
 
+## The float operations: `F32`, `F64`, truncation and the Wasm suite (spec-runtime-float, story 3)
+
+The IR had no float type, so a helper could not take or return a float (a `CALL` loaded every
+argument into an integer register), lang-wasm had nothing to compile `f32` and `f64` to, and Tang's
+float arithmetic (stories 6 and 7) had nothing to be compiled to. `numeric-operations.md` of the spec
+lists the operations; this section says how they are done and what was rejected. It follows the
+integer section above and relies on it.
+
+**The types and the slot.** `GRJIT_TYPE_F32` (5) and `GRJIT_TYPE_F64` (6) are appended after `I32`
+(`COUNT` is 7); the values of every earlier type, of the native-result sentinel (3) and of every
+earlier operation do not move, and a test pins them. A float register holds the **IEEE-754 bits in
+its 64-bit slot**, and **an `F32` is zero-extended in its slot at all times**: after every operation,
+on entry (the entry masks the word it is given, as for an `I32`), in a call result, in a helper's
+result and in an immediate. So an entry word, a `RET`, a `MOVE`, a frame-state slot and a test's
+comparison stay `uint64_t` words with no undefined half, and a float never travels in an `xmm`
+register across the entry. A float is never a reference and never in a stack map; in a frame state its
+location carries `GRCORE_REPR_F32` or `GRCORE_REPR_F64` (an `I64` keeps `BITS`, so the metadata of
+every existing function is unchanged), raw. Floats and integers never mix: `REINTERPRET` and the
+conversions are the only operations that change a value's kind, and `BITCAST` into or out of a float is
+refused.
+
+*Rejected:* **float registers in the slots** (the baseline is slot-based: `rax` and `rcx` carry
+operands, there is no allocator; a value in an `xmm` register across a poll or a call would be a
+caller-saved register holding a live value, which AD-17's rule keeps out by construction, and every
+consumer of a slot would have to know which kind lives in it). **An upper half that is "don't care"**
+for an `F32`: it makes every consumer (the entry, the call, the frame-state conversion, a test
+comparing words) mask, and the one that forgets is a defect nothing in the type shows; the cost of the
+chosen rule is one `movd eax, xmm` where an `F32` result is stored, which also clears the upper half
+(`cvtsd2ss` leaves bits 32 to 63 of its destination alone, so a 64-bit store of the register would be
+wrong: planted defect 55). **Overloading `ADD`, `SUB`, `MUL` and `NEG`** for floats: an integer
+operation on a float register is refused by the verifier, so no existing emitter arm can be reached by
+a float, and no existing byte of an integer function can change.
+
+**The operations.** `FADD FSUB FMUL FDIV FMIN FMAX FCOPYSIGN` (binary, built with
+`grjit_builder_binary`), `FNEG FABS FSQRT FCEIL FFLOOR FTRUNC FNEAREST` (unary), `CONVERT_S`,
+`CONVERT_U`, `TRUNC_S`, `TRUNC_U`, `TRUNC_SAT_S`, `TRUNC_SAT_U`, `DEMOTE`, `PROMOTE` and
+`REINTERPRET` (unary, built with `grjit_builder_unary`), all appended after `EXTEND_U`. The width is
+the destination's; `CONST`, `MOVE`, `LOAD` (exactly 32 bits into an `F32`, 64 into an `F64`,
+zero-extending) and `STORE` (at the float's own width) work on floats as bit moves. `CMP` takes two
+float registers of one width (the other operand may be an immediate, which is the operand's bit
+pattern) with `EQ NE LT LE GT GE` and nothing else, and answers 0 or 1 in an `I32` or `I64` register.
+An immediate in a float position is the operand's bit pattern, and an `F32` one must lie in
+`[0, UINT32_MAX]`. A conversion's source is a register: an immediate has no width to say which
+conversion it is the source of.
+
+**Semantics: Wasm 3.0's, the hardware's result unless Wasm says otherwise.** What the emitter must
+get right, each with a test, an evaluator case and a suite assertion that shows it:
+
+- *Sign bit operations.* `FNEG`, `FABS` and `FCOPYSIGN` act on the sign bit alone, in the integer
+  registers (`xor`, `and`, `or` of a mask): a signalling NaN keeps its payload and its quiet bit, and
+  `neg(+0)` is `-0`, neither of which arithmetic gives. Planted defect 53 does it by arithmetic.
+- *`FMIN` and `FMAX`.* `minsd` and `maxsd` return their second operand for a NaN on either side and
+  for equal operands, which is wrong twice for Wasm. The sequence: `ucomis` the operands; unordered
+  (`PF`) is the NaN case, answered by `add` of the two (a quiet NaN, the first operand's if it is
+  one); equal (`ZF`) combines the bits, `or` for min and `and` for max, which on two zeros is the sign
+  rule (`min(-0, +0)` is `-0`, `max(-0, +0)` is `+0`) and on any other equal pair changes nothing;
+  everything else is the instruction. Planted defect 50 is the bare instruction.
+- *Rounding* (`FCEIL FFLOOR FTRUNC FNEAREST`, inline SSE2, no `roundss`, no libm call). For `|x|`
+  below 2^52 (2^23 for `f32`), `(|x| + 2^52) - 2^52` is the nearest integer to `|x|`, ties to even,
+  because the sum has no bits below the unit place and the default mode rounds it that way; the sign of
+  `x` is put back with a bit operation, which keeps the sign of a zero (`nearest(-0.3)` is `-0`).
+  `trunc` subtracts 1 when that is above `|x|`; `ceil` and `floor` adjust the signed value by one with
+  a compare mask ANDed with 1.0 (no branch), and `ceil` ends by setting the sign bit of `x`, because
+  `-1 + 1` is `+0` and `ceil(-0.999)` is `-0`. A value at or above 2^52 in magnitude is an integer
+  already and an infinity is unchanged: the result is `x`. A NaN (the compare is unordered) gets the
+  quiet bit by an `add` of itself, which keeps its sign and payload. Story 4 adds the SSE4.1
+  `roundss`/`roundsd` arm; these stay as its fallback, so they are a separate function
+  (`emit_float_round`). Planted defect 52 rounds halves away from zero.
+- *Comparison.* `ucomis*` sets ZF, PF and CF together for an unordered pair, so `EQ` is `sete` joined
+  with `setnp`, `NE` is `setne` joined with `setp`, and `LT`/`LE` are `GT`/`GE` with the operands
+  swapped: the unordered case then fails the `above` test by itself. Planted defects 43 (no test of
+  PF) and 47 (the operands swapped the wrong way).
+- *`CONVERT_S/U`.* From 32 bits the value is sign- or zero-extended to the 64-bit integer it now is
+  and converted by `cvtsi2s*`, which is exact in the integer and one rounding in the float. From 64
+  bits unsigned there is no SSE2 form: a value below 2^63 is a signed one; above it, halve with a
+  sticky bit (shift right one and OR back the bit shifted out, so the halved value rounds the way the
+  whole would), convert, double. Converting the halved value without the sticky bit rounds twice
+  (planted defect 51); the suite's `f64.convert_i64_u` cases and the worked `0x8000000000000401` and
+  `f32.convert_i64_u 0x8000008000000001` show it.
+- *`TRUNC_S/U`* are partial (below). The conversion itself is a 64-bit `cvttsd2si`/`cvttss2si`, exact
+  because the guard has put the operand in range; an `i32` result is its low half. An unsigned 64-bit
+  result at or above 2^63 subtracts 2^63, converts, and sets the top bit.
+- *`TRUNC_SAT_S/U`* are total: NaN is 0, a value at or beyond a bound is that bound's integer, the
+  rest truncates. `cvtt*2si` returns the "integer indefinite" value (the minimum) for what it cannot
+  represent, which is an answer for nothing here, so every case it would get wrong is decided before it
+  runs. Planted defect 54 gives a NaN the minimum.
+- *`DEMOTE` and `PROMOTE`* are `cvtsd2ss` and `cvtss2sd`; a signalling NaN comes out quiet. `FSQRT` of
+  a negative is the hardware's default NaN, which is canonical.
+- *MXCSR.* Compiled code assumes the default (round to nearest, exceptions masked, no flush to zero,
+  no denormals-are-zero) and never writes it; a subnormal operand and result survive (the suite and a
+  unit test hold them). There is no x87 instruction and no `long double`, and the library and every
+  float test are built with `-ffp-contract=off` (`check-fp-contract` keeps it on every flag set). A
+  unit test whose result differs fused and unfused holds it: `a*b+c` built as two IR operations is
+  rounded twice, as written.
+
+**The NaN rule, everywhere.** Which payload survives when both operands of an operation are NaN
+depends on the order of the operands, and C does not fix it (a compiler may swap the operands of a
+commutative `a + b`); the sign of a NaN an operation made is not fixed either (hardware gives the
+default NaN the sign bit, a library gives it the other). So the suite accepts `nan:canonical` (the
+quiet bit and no other payload bit, either sign) and `nan:arithmetic` (the quiet bit, any payload)
+where it says so, and everything else bit for bit; and the test evaluator and the differential compare
+floats **by bits with any two NaNs equal**. A NaN never equals a number, and `+0` and `-0` are different.
+This is the rule Tang's frame differential uses. The generated float programs therefore make the
+payload unobservable where a program leaves the float domain (a reinterpret and the final fold replace
+a NaN by one canonical pattern first), and `copysign` takes its sign from an immediate or a parameter,
+never from a NaN an operation made; the sweeps cover `copysign` over every pair of boundary values.
+
+**`trunc` is partial; the guard is ordinary IR.** Wasm distinguishes "invalid conversion to integer"
+(a NaN) from "integer overflow" (out of range), and the hardware yields the integer indefinite for
+both. The IR has no operation that traps or has undefined behaviour in hardware, so `TRUNC_S/U` never
+trap, and the frontend writes the guards with the `GUARD` the IR has. Golden shape for
+`i32.trunc_f64_s` (the site of each guard says which trap fired, not a new exit code):
+
+```
+g1 = CMP EQ x, x               ; GUARD g1  -> "invalid conversion to integer"
+lo = CMP GT x, #-2147483649.0  ; hi = CMP LT x, #2147483648.0
+ok = AND lo, hi                ; GUARD ok  -> "integer overflow"
+r  = TRUNC_S x
+```
+
+The exact bounds, for `i32` signed `x > -2147483649` and `x < 2147483648`; `i32` unsigned `x > -1` and
+`x < 2^32`; `i64` signed `x >= -2^63` (`-2^63 - 1` is no double, so the bound is inclusive) and
+`x < 2^63`; `i64` unsigned `x > -1` and `x < 2^64`; and on an `f32` the lower bound of the signed
+32-bit one is `x >= -2^31`, because `-2147483649` is no float. *The verifier's rule* (`check_one_trunc`
+in `src/ir/verify.c`, on the block-local analysis of the integer rule, with the same positions, so an
+assignment after the guard retires it): a `TRUNC_*` is refused unless an earlier `GUARD` in the block
+tests an `AND` (to a depth of four) of ordered compares of the operand against immediates (`x > L`, `x >= L`,
+`x < H`, `x <= H`, or the mirrored spellings `L < x` and so on), nothing they read assigned since, and
+the interval they prove, **intersected** over every such guard still standing, lies inside the exact
+bounds. A narrower guard is sound and accepted; a wider one is refused (one ulp too wide at either end
+is refused, one ulp narrower accepted, for each of the eight operations); the NaN guard alone is not a
+bound; an empty range passes nothing and is accepted. A constant operand (a register whose latest
+definition is a `CONST` in the block) is judged as it stands. A guard shape it does not recognise (an
+`OR` of the compares, a guard in another block, a guard of a copy) is refused with a reason that names
+the operation and the bounds. The range guard alone satisfies the rule, because ordered compares are
+false for a NaN; the NaN guard in front of it is what lets the harness name the right trap. Which trap
+fired is read from the guard's site identity, as in the integer story. *Rejected:* an operation that
+traps or returns a sentinel (the "integer indefinite" is an answer for no input); a builder that adds
+the guard itself (the frame state is the engine's). The unguarded variants of every truncation (no
+range guard, and the NaN guard alone) are refused by the verifier and the Wasm harness requires it for
+each of the eight; planted defect 44 removes the rule.
+
+**Floats through helper calls (SysV).** An argument of a `CALL` may be an `F32` or `F64` register or a
+**typed float immediate** (`grjit_operand_f32_imm`, `grjit_operand_f64_imm`: new operand kinds, since a
+plain immediate has no class to pass it by, and are accepted as call and tail-call arguments only), and
+its result may be one. Classification is SysV's: the integer-class arguments take `rdi rsi rdx rcx r8 r9` in order among themselves,
+the float-class ones `xmm0` to `xmm7` in order among themselves, so `(i64, f64, i64, f32)` is `rdi,
+xmm0, rsi, xmm1`. An `F32` is passed in the low 32 bits of its register (`movss`, or `movd` from an
+immediate) and a helper's `float` result is taken from `xmm0` with `movd`, so whatever is above bit 31
+is not ours; an `F64` result with `movq`. The call limit (six arguments) means no float is passed on the
+stack on SysV. The test reads the registers the compiled code left with a helper written in assembly
+that stores `rdi`..`r9` and `xmm0`..`xmm7`, and checks about 2,600 argument patterns (every mix of
+integer, `f64` and `f32` register arguments for 0 to 6 arguments, and every mix with plain and typed
+immediates up to 4) against the classification worked out in the test; planted defects 48 (the second
+float to the wrong register) and 49 (the two kinds numbered jointly, as Win64 numbers them) are caught
+there. Natives (`CALL_NATIVE`) stay integer-only: `natives.h` and `GRJIT_NativeDesc` are unchanged
+and a float in a native signature is refused by the table. The arm64 and Win64 refusals of a float
+argument or result are tested through `grjit_emit_for`.
+
+**Between compiled functions.** The internal convention is unchanged: a float travels as its bit word,
+in the register or the stack word an `I64` would use, stack arguments included. A callee's `F32`
+parameter is cut to 32 bits at its entry (register and stack), a call's `F32` result is cut at the
+receiving frame, as an `I32` is. SysV has no callee-saved `xmm` register, so there is nothing to
+preserve and the entry adapter and the epilogue are not edited. `CALL_SLOT`, `CALL_PTR`,
+`TAIL_CALL_SLOT` and `TAIL_CALL_PTR` pass and return `F32` and `F64` in registers and on the stack, and
+a float live across a poll, a collecting call or a native is raw in its frame slot, never in a stack
+map: all tested.
+
+**Other backends.** The arm64 emitter and the Win64 flavour refuse a function that has an `F32` or
+`F64` register, a typed float immediate or any of the new operations with `GRJIT_ERR_UNSUPPORTED`
+before anything is emitted (`grjit_function_needs_int_ext`, which already refused the integer
+extensions, now covers floats), and each has an explicit case for every new operation. Story 5 of the
+float spec replaces the refusals (and adds the callee-saved FP register sentinel there).
+
+**Existing bytes.** No function without a float changes by a byte: the pins of `testPin` are
+unchanged, `ir_gen.h` and `callable_gen.h` and their draw order are untouched, and the new emission is
+new functions and new `switch` arms. The shared helpers `load_operand`, `store_result`, `emit_binary`,
+`emit_binary32` and `cmp_cond` are as they were; `emit_call` gained a float branch an integer function
+cannot reach, and the "zero-extended in its word" test grew to include `F32`. `check-planted-calls`
+matches its anchors by exact text; the 211 of its three tables (SysV, arm64, Win64) occur exactly as
+many times as before, which was checked by executing its table against the tree before and after.
+
+**The tests.** `testFloat_ir`: 280 answers worked by hand (the signs of zero, NaN classes, ties, the
+double-rounding cases of `convert_i64_u`, the boundaries of the truncations, subnormals), the evaluator
+and the code over every operation at both widths (83 `f64` and 80 `f32` boundary values, each squared for the binary operations; the
+conversions over 23 or 44 integers: 175,863 runs compared in the sweep, 270 of them guard exits, a floor
+the test asserts), the traps by site, the typing rules, the verifier's guard rule with a negative test
+per operation and width, the helper ABI, floats through calls, tail calls and the entry in registers and
+on the stack, frame states and stack maps, the refusals. `testDifferential` gains 3,000 generated float
+programs (`generate_float_program`, not `ir_gen.h`) run six times each over the boundary values: per
+run 10,649 returned and 7,351 left by a guard; statically, 3,937 truncations, 8,222 conversions, 4,108
+comparisons and 2,196 programs of more than one block. The evaluator (`tests/ir_eval.h`) writes
+`min`, `max`, the roundings, the conversions and the saturating truncations out; it uses no
+`fmin`, `rint` or cast that differs from Wasm. `FNEG`, `FABS` and `FCOPYSIGN` it does on the bits.
+
+**The Wasm spec suite as the oracle, the float files.** `tools/wasm/fetch.sh` gains the eight files
+at the same commit, `9d36019973201a19f9c9ebb0f10828b2fe2374aa`; each digest is the SHA-256 of the file
+fetched from that commit and was also checked against the git blob id the GitHub contents API gives
+for it. The reader gains `f32`/`f64` params and results; `f32.const` and `f64.const` in decimal,
+hex-float (`0x1.8p1`, `0x1p-149`), `inf`, `-inf`, `nan`, `-nan`, `nan:0xHEX` and `-nan:0xHEX` (an
+*argument* NaN is exact bits), and in an expected result only `nan:canonical` and `nan:arithmetic`;
+underscores; the trap strings `integer divide by zero`, `integer overflow` and `invalid conversion to
+integer` map to guard sites, and any other trap string is a failure. A decimal or hex literal is
+converted **with `strtof` for an `f32`**, never `strtod` and a cast, which rounds twice: a decimal
+just above the midpoint of two floats is that midpoint as a double, and the cast then rounds the tie
+to even, to the lower float; a unit test shows the wrong way giving the wrong float, and that the hex
+and decimal spellings of one number the suite uses agree. A result is compared as a whole word: a NaN
+class by its definition, an `f32` with a non-zero upper half fails, everything else bit for bit.
+
+*The survey of the eight files* (done before the harness was written, by reading them; the shapes
+the harness has to know, each of them there): every file is **one `module`** of exported
+single-instruction functions whose body is `(op (local.get $x) ...)` over the parameters in order
+(`f32.wast`: 11 functions, `f64.wast` 11, `f32_cmp`/`f64_cmp` 6 each, `f32_bitwise`/`f64_bitwise` 3
+each, `conversions` 33, `float_misc` 28), followed by `assert_return` (one invoke, one result) and, in
+`conversions`, `assert_trap` of an invoke with `integer overflow` (35) or `invalid conversion to
+integer` (32), and `assert_invalid` (11, 11, 6, 6, 3, 3, 25, 0) and, in `f32.wast` and `f64.wast`,
+`assert_malformed` (2 each). There is no `register`, `assert_exhaustion`, `assert_unlinkable`, bare
+`invoke`, `module binary` or `module quote`, no loop, no memory, no `local.set`, no call, in any of
+them. **`float_misc.wast` at `wg-3.0` has no multi-instruction function:** its 28 functions are
+`f32.add` .. `f64.max` as single instructions, and its assertions are single invokes, so the
+exclusion "multi-instruction body" the plan allowed for does not occur and nothing is counted under it
+(the harness would count it if a later suite had one). Arguments are `f32.const`/`f64.const` (7,653
+and 7,803 hex floats, 143 and 166 decimals, `inf`, `-inf`, `nan` 1,070 each, `nan:0xHEX` 999 each) and,
+in `conversions`, `i32.const`/`i64.const`; results are the same plus `nan:canonical` (447 and 448) and
+`nan:arithmetic` (468 each) and 11 exact `nan:0x...` payloads each. Excluded forms are pinned by
+reason in the test.
+
+Counts at `wg-3.0` (x86-64 SysV, GCC 14.2; pinned in the test):
+
+| File | assert_return | assert_trap | passed | excluded | failed | refused variants |
+| --- | ---: | ---: | ---: | --- | ---: | ---: |
+| `f32.wast` | 2,500 | 0 | 2,500 | 13 (11 `assert_invalid`, 2 `assert_malformed`) | 0 | 0 |
+| `f64.wast` | 2,500 | 0 | 2,500 | 13 (11, 2) | 0 | 0 |
+| `f32_cmp.wast` | 2,400 | 0 | 2,400 | 6 (`assert_invalid`) | 0 | 0 |
+| `f64_cmp.wast` | 2,400 | 0 | 2,400 | 6 | 0 | 0 |
+| `f32_bitwise.wast` | 360 | 0 | 360 | 3 | 0 | 0 |
+| `f64_bitwise.wast` | 360 | 0 | 360 | 3 | 0 | 0 |
+| `conversions.wast` | 526 | 67 | 593 | 25 (`assert_invalid`) | 0 | 16 |
+| `float_misc.wast` | 470 | 0 | 470 | 0 | 0 | 0 |
+
+(The two integer files are in the section above.) The controls: one ulp, a NaN where a number is
+expected, a number where a NaN is expected, the wrong NaN class (an arithmetic NaN that is not
+canonical expected canonical; a NaN that is not quiet expected arithmetic), `+0` for `-0`, a stated
+payload that is not the one or has the wrong sign, the wrong trap in each direction, a trap message it
+has no guard for, a class given as an argument, an argument or result of the wrong width, a NaN payload
+that is zero or too big, and an export built by hand whose `f32` result word has bits above 31 each
+fail. On a host that does not run the code the reader, the mapping into the IR and the verifier's rule
+still run, and the assertions that need the code are excluded as "not run on this host".
+
+**Planted defects 43 to 55** (`check-planted`, each caught by the instrument named with its control
+passing; see the header of `tools/check-planted.sh` and the comment above `PLANT_DEFECTS`): 43 an
+unordered comparison read as ordered; 44 the verifier does not require the range guard (the negative
+tests and the harness's refused variants; an emitter that dropped the guard would only return the
+indefinite value, so the plant is in the verifier, as 38 was); 45 and 46 the operands of `FSUB` and
+`FDIV` swapped; 47 the operands of an ordered compare swapped the wrong way; 48 the second float
+argument of a helper in the wrong register; 49 float and integer arguments numbered jointly; 50 `min` and
+`max` the bare instruction; 51 `convert_u` from 64 bits with no sticky bit; 52 `nearest` rounding halves
+away from zero; 53 `neg` and `abs` by arithmetic; 54 `trunc_sat` of a NaN not 0; 55 an `F32` left with a
+dirty upper half (the differential cannot see it, because it folds through a reinterpret, which cuts the word; the unit test and the suite harness do). No emitter plant faults: each is placed where the harness catches it and not where
+it kills the test with a signal. The arm64 and Win64 plant lists are untouched.
+
+**Known limits.** The verifier recognises the range guard in the shapes above and in the same block; a
+frontend that computes it another way gets a reason. A conversion's source is a register, never an
+immediate. A float immediate as a call argument is a typed operand kind. Natives take no float. Float
+operations are emitted for x86-64 SysV only; the SSE4.1 arm of the four roundings and the CPU-feature
+mask are story 4, Win64 and arm64 are story 5.
+
 ## Gates
 
 `make check-labels` requires every header to carry exactly one `@stability free`
@@ -1747,7 +2014,8 @@ interpreter).
   `runtime-core`'s walk (`a/compiled.h`), which a callable function feeds by
   storing its walk start before every call that can reach a GC point.
 - **Calls, tail calls and calls to natives on Win64**: story 7b of the calls spec (arm64
-  has them, below). (A native with a floating-point or variadic signature cannot be described;
+  has them, below). (A native with a floating-point or variadic signature cannot be described: `natives.h` and
+  `GRJIT_NativeDesc` are unchanged by the float types, which a native's table refuses;
   resumable natives, which are called only through an exit (AD-23), and the policy of
   an opaque native under a pause are the engine's, story 9.)
 - **Windows arm64 and macOS.** No backend: `grjit_backend_available()` is false,
@@ -1770,10 +2038,11 @@ interpreter).
   asserted, recorded at every hook and native, and never expected as a fault) and a real
   kernel's W^X are not exercised.
 - An ahead-of-time C backend, a Wasm backend, JIT hardening, a
-  register allocator, any pass, SSA, inlining, unboxing, floating point (story 3 of the
-  float spec), SIMD, 8-bit values. (32-bit integers and the integer divide are here: above.)
-- **The integer operations on arm64 and Win64**: refused by name until story 5 of the float
-  spec; and the LZCNT, BMI1, POPCNT and SSE4.1 forms and the feature mask, which are story 4's.
+  register allocator, any pass, SSA, inlining, unboxing, SIMD, 8-bit values. (32-bit integers,
+  the integer divide and floating point on x86-64 SysV are here: above.)
+- **The integer and float operations on arm64 and Win64**: refused by name until story 5 of the
+  float spec; and the LZCNT, BMI1, POPCNT and SSE4.1 forms (`roundss` for the four roundings
+  among them) and the feature mask, which are story 4's.
 - **An in-JIT pause.** A poll's non-zero answer ends the function; see above.
 - **The AD-21 prologue check as more than a hook.**
 - **A fuzzer**, for the reason above.
