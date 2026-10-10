@@ -21,9 +21,12 @@
 
 #include "test_helpers.h"
 
+#include <algorithm>
 #include <csetjmp>
 #include <csignal>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <map>
 #include <string>
 #include <vector>

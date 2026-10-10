@@ -289,6 +289,29 @@ class Harness {
 
   Report run(const std::string & text);
 
+  /* Adds a hand-built export to the anonymous module, compiled when the code is run: it lets a test
+   * give the comparison a function the table of Wasm instructions has no name for (one whose result
+   * word has bits above its declared type). The harness owns `function`. */
+  void inject(const std::string & name, GRJIT_Function * function, std::vector<std::string> params,
+      const std::string & result) {
+    auto e = std::make_unique<Export>();
+    e->name = name;
+    e->params = std::move(params);
+    e->result = result;
+    e->op.function = function;
+    e->op.params = e->params.size();
+    if (world_ != nullptr) {
+      GRJIT_CompileOptions o{};
+      o.pages = world_->pages();
+      GRJIT_Result r = grjit_compile(&o, function, &e->code);
+      if (r != GRJIT_OK) {
+        e->compile_failure = std::string("the compile failed: ") + grjit_result_string(r);
+      }
+    }
+    instances_[""][name] = std::move(e);
+    current_ = "";
+  }
+
  private:
   using Instance = std::map<std::string, std::unique_ptr<Export>>;
 
@@ -780,18 +803,101 @@ std::string summary(const std::string & file, const Report & r) {
   return o.str();
 }
 
-/* Where the suite is: the commit is the pin file's, the data is fetched by tools/wasm/fetch.sh. */
+/* The library's root, fixed when the test is compiled (the Makefile defines it), so that the suite is
+ * found whatever directory the program runs in. */
+#ifndef GRJIT_LIBRARY_ROOT
+#define GRJIT_LIBRARY_ROOT "."
+#endif
+
+std::string library_root() {
+  return GRJIT_LIBRARY_ROOT;
+}
+
+/* Where the suite is: the commit is the pin file's, the data is fetched by tools/wasm/fetch.sh.
+ * GRJIT_WASM_SUITE_DIR names the directory that holds `test/core/` instead. */
 std::string suite_dir() {
   if (const char * d = std::getenv("GRJIT_WASM_SUITE_DIR")) {
     return d;
   }
-  std::ifstream pin("tools/wasm/WASM_SPEC_COMMIT");
+  std::ifstream pin(library_root() + "/tools/wasm/WASM_SPEC_COMMIT");
   std::string commit;
   std::getline(pin, commit);
   while (!commit.empty() && std::isspace(static_cast<unsigned char>(commit.back()))) {
     commit.pop_back();
   }
-  return "third_party/wasm-spec/" + commit;
+  return library_root() + "/third_party/wasm-spec/" + commit;
+}
+
+/* SHA-256 (FIPS 180-4), so that the file read is the file pinned in tools/wasm/SHA256SUMS. */
+std::string sha256_hex(const std::string & data) {
+  static const uint32_t K[64] = {0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b,
+      0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+      0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6,
+      0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d,
+      0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85,
+      0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+      0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585,
+      0x106aa070, 0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+      0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa,
+      0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+  uint32_t h[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c,
+      0x1f83d9ab, 0x5be0cd19};
+  std::string m = data;
+  const uint64_t bits = static_cast<uint64_t>(data.size()) * 8;
+  m += static_cast<char>(0x80);
+  while (m.size() % 64 != 56) {
+    m += '\0';
+  }
+  for (int i = 7; i >= 0; i--) {
+    m += static_cast<char>((bits >> (8 * i)) & 0xFF);
+  }
+  auto rotr = [](uint32_t x, unsigned n) { return (x >> n) | (x << (32 - n)); };
+  for (size_t off = 0; off < m.size(); off += 64) {
+    uint32_t w[64];
+    for (int t = 0; t < 16; t++) {
+      w[t] = (static_cast<uint32_t>(static_cast<uint8_t>(m[off + 4 * t])) << 24) |
+             (static_cast<uint32_t>(static_cast<uint8_t>(m[off + 4 * t + 1])) << 16) |
+             (static_cast<uint32_t>(static_cast<uint8_t>(m[off + 4 * t + 2])) << 8) |
+             static_cast<uint32_t>(static_cast<uint8_t>(m[off + 4 * t + 3]));
+    }
+    for (int t = 16; t < 64; t++) {
+      uint32_t s0 = rotr(w[t - 15], 7) ^ rotr(w[t - 15], 18) ^ (w[t - 15] >> 3);
+      uint32_t s1 = rotr(w[t - 2], 17) ^ rotr(w[t - 2], 19) ^ (w[t - 2] >> 10);
+      w[t] = w[t - 16] + s0 + w[t - 7] + s1;
+    }
+    uint32_t v[8];
+    std::memcpy(v, h, sizeof v);
+    for (int t = 0; t < 64; t++) {
+      uint32_t S1 = rotr(v[4], 6) ^ rotr(v[4], 11) ^ rotr(v[4], 25);
+      uint32_t ch = (v[4] & v[5]) ^ (~v[4] & v[6]);
+      uint32_t t1 = v[7] + S1 + ch + K[t] + w[t];
+      uint32_t S0 = rotr(v[0], 2) ^ rotr(v[0], 13) ^ rotr(v[0], 22);
+      uint32_t mj = (v[0] & v[1]) ^ (v[0] & v[2]) ^ (v[1] & v[2]);
+      uint32_t t2 = S0 + mj;
+      v[7] = v[6]; v[6] = v[5]; v[5] = v[4]; v[4] = v[3] + t1;
+      v[3] = v[2]; v[2] = v[1]; v[1] = v[0]; v[0] = t1 + t2;
+    }
+    for (int i = 0; i < 8; i++) {
+      h[i] += v[i];
+    }
+  }
+  char out[65];
+  for (int i = 0; i < 8; i++) {
+    std::snprintf(out + 8 * i, 9, "%08x", h[i]);
+  }
+  return out;
+}
+
+/* The digest tools/wasm/SHA256SUMS pins for `test/core/<name>`, or "" if it lists none. */
+std::string pinned_digest(const std::string & name) {
+  std::ifstream in(library_root() + "/tools/wasm/SHA256SUMS");
+  std::string digest, path;
+  while (in >> digest >> path) {
+    if (path == "test/core/" + name) {
+      return digest;
+    }
+  }
+  return "";
 }
 
 } // namespace wast
@@ -843,7 +949,7 @@ TEST(Wast, ARightExpectationPassesAndACorruptedOneFails) {
   };
   const Corrupt bad[] = {
       {"a wrong value", "(assert_return (invoke \"add\" (i32.const 1) (i32.const 1)) (i32.const 3))", true},
-      {"a value whose upper half is not zero", "(assert_return (invoke \"add\" (i32.const -1) (i32.const 1)) (i32.const 0x100000000))", false},
+      {"a value that does not fit its type", "(assert_return (invoke \"add\" (i32.const -1) (i32.const 1)) (i32.const 0x100000000))", false},
       {"a value where a trap is the answer", "(assert_return (invoke \"div_s\" (i32.const 1) (i32.const 0)) (i32.const 0))", true},
       {"a trap where a value is the answer", "(assert_trap (invoke \"add\" (i32.const 1) (i32.const 1)) \"integer divide by zero\")", true},
       {"the wrong trap", "(assert_trap (invoke \"div_s\" (i32.const 1) (i32.const 0)) \"integer overflow\")", true},
@@ -978,22 +1084,87 @@ TEST(Wast, TheReaderSkipsCommentsAndKeepsTrackOfLines) {
 
 TEST(Wast, AMissingSuiteFileIsAFailureThatNamesTheFetchScript) {
   std::string text, why;
-  EXPECT_FALSE(wast::load("third_party/wasm-spec/does-not-exist/i32.wast", &text, &why));
+  EXPECT_FALSE(wast::load(wast::library_root() + "/third_party/wasm-spec/does-not-exist/i32.wast", &text, &why));
   EXPECT_NE(why.find("tools/wasm/fetch.sh"), std::string::npos) << why;
+}
+
+TEST(Wast, TheSha256IsTheStandardOne) {
+  EXPECT_EQ(wast::sha256_hex(""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+  EXPECT_EQ(wast::sha256_hex("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+  EXPECT_EQ(wast::sha256_hex(std::string(1000, 'a')),
+      "41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3");
+}
+
+/* The comparison is of the whole result word. The suite's own files cannot show it (an i32 operation
+ * of the table never returns bits above 31), so the control is an export built by hand whose word
+ * has them: the reader accepts the assertion, the comparison must refuse it. */
+TEST(Wast, TheComparisonIsOfTheWholeWordNotOfTheLowHalf) {
+  if (!kExecutes) {
+    GTEST_SKIP() << "the compare is made on the result of running the code, which only x86-64 SysV does";
+  }
+  auto wide = [](int64_t value) {
+    B b("wide", 0);
+    GRJIT_VReg r = b.reg(GRJIT_TYPE_I64);
+    b.at(b.block());
+    b.cnst(r, value);
+    b.ret(V(r));
+    return b.finish();
+  };
+  struct Case {
+    const char * form;
+    const char * type;
+    size_t failed;
+  };
+  const Case cases[] = {
+      // declared i32, but the word is 0x100000002: the low half is 2 and the word is not
+      {"(assert_return (invoke \"w\") (i32.const 2))", "i32", 1},
+      // declared i64: the same word is what is expected, and it passes
+      {"(assert_return (invoke \"w\") (i64.const 0x100000002))", "i64", 0},
+      // declared i64: the low half alone is not the word
+      {"(assert_return (invoke \"w\") (i64.const 2))", "i64", 1},
+  };
+  for (const Case & c : cases) {
+    SCOPED_TRACE(c.form);
+    JitWorld w;
+    wast::Harness h(&w, "hand.wast");
+    h.inject("w", wide(0x100000002ll), {}, c.type);
+    wast::Report r = h.run(c.form);
+    EXPECT_EQ(r.failed, c.failed) << (r.failures.empty() ? "" : r.failures[0]);
+    EXPECT_EQ(r.passed, c.failed == 0 ? 1u : 0u);
+    if (c.failed != 0) {
+      EXPECT_NE(r.failures[0].find("got 0x100000002"), std::string::npos) << r.failures[0];
+    }
+  }
 }
 
 /* ---- The suite ---------------------------------------------------------------------------- */
 
 namespace {
 
-void run_suite_file(const char * name, size_t want_passed, size_t want_excluded, size_t want_traps) {
+/* The suite file `name`, checked against the digest tools/wasm/SHA256SUMS pins. A missing or altered file
+ * is a failure on every host, the ones that do not run the code included. */
+bool read_suite_file(const char * name, std::string * text) {
   const std::string path = wast::suite_dir() + "/test/core/" + name;
-  std::string text, why;
-  if (!wast::load(path, &text, &why)) {
-    if (kExecutes) {
-      FAIL() << why << " (a missing suite is a failure, never a skip)";
-    }
-    GTEST_SKIP() << why << " (this host does not run the compiled code, so it does not insist; an x86-64 SysV host fails)";
+  std::string why;
+  if (!wast::load(path, text, &why)) {
+    ADD_FAILURE() << why << " (a missing suite is a failure, never a skip)";
+    return false;
+  }
+  const std::string want = wast::pinned_digest(name);
+  const std::string got = wast::sha256_hex(*text);
+  if (want.empty() || got != want) {
+    ADD_FAILURE() << path << " has SHA-256 " << got << ", tools/wasm/SHA256SUMS pins "
+                  << (want.empty() ? "nothing" : want) << "; run tools/wasm/fetch.sh";
+    return false;
+  }
+  return true;
+}
+
+void run_suite_file(const char * name, size_t want_passed, size_t want_traps,
+    std::map<std::string, size_t> want_excluded) {
+  std::string text;
+  if (!read_suite_file(name, &text)) {
+    return;
   }
   wast::Report r = run_text(text, name);
   std::printf("%s\n", wast::summary(name, r).c_str());
@@ -1005,10 +1176,13 @@ void run_suite_file(const char * name, size_t want_passed, size_t want_excluded,
   EXPECT_EQ(r.traps, want_traps);
   if (kExecutes) {
     EXPECT_EQ(r.passed, want_passed) << "the number of assertions that ran and held, pinned to wg-3.0";
-    EXPECT_EQ(r.excluded_total(), want_excluded);
   } else {
     EXPECT_EQ(r.passed, 0u);
+    want_excluded["not run on this host (the integer operations are emitted for x86-64 SysV)"] =
+        want_passed;
   }
+  // The excluded forms, by reason, exactly: a reason that appears or goes away is a change of what is checked.
+  EXPECT_EQ(r.excluded, want_excluded);
   EXPECT_GT(r.guard_checks, 8u) << "the verifier's guard rule was shown to refuse the unguarded variants";
 }
 
@@ -1016,12 +1190,12 @@ void run_suite_file(const char * name, size_t want_passed, size_t want_excluded,
 
 TEST(Wast, TheI32SuiteFilePassesEveryAssertionItHoldsAndCountsTheRest) {
   // 364 assert_return and 10 assert_trap run; 83 assert_invalid and 2 assert_malformed do not.
-  run_suite_file("i32.wast", 374, 85, 10);
+  run_suite_file("i32.wast", 374, 10, {{"assert_invalid", 83}, {"assert_malformed", 2}});
 }
 
 TEST(Wast, TheI64SuiteFilePassesEveryAssertionItHoldsAndCountsTheRest) {
   // 374 assert_return and 10 assert_trap run; 29 assert_invalid and 2 assert_malformed do not.
-  run_suite_file("i64.wast", 384, 31, 10);
+  run_suite_file("i64.wast", 384, 10, {{"assert_invalid", 29}, {"assert_malformed", 2}});
 }
 
 GRJIT_TEST_MAIN()

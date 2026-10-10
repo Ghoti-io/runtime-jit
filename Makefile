@@ -162,6 +162,8 @@ CXXFLAGS := -pedantic-errors -Wall -Wextra -Werror -Wno-error=unused-function -W
 # Frame pointers in the tests: a native helper finds the frame of the compiled
 # code that called it by following the saved-rbp chain.
 CXXFLAGS += -fno-omit-frame-pointer
+# Where the library is, for a test that reads its data (the Wasm suite) from any directory it runs in.
+CXXFLAGS += -DGRJIT_LIBRARY_ROOT='"$(CURDIR)"'
 CC := cc
 # -Wstrict-aliasing=1 and -fstrict-aliasing, named rather than inherited.
 # -Wall sets the aliasing warning to level 3, which is silent on the probe
@@ -810,7 +812,7 @@ PLANT_DEFECTS := 1:testDifferential 2:testReadback 3:testReadback \
 	17:testNatives:Natives.TheStackIsSixteenAlignedAtTheNativesEntryAndTheSameAfterEveryCallForOddAndEvenStackArguments \
 	18:testNatives:Natives.TheNativeStackIsCheckedAtTheCallSiteForTheStackArgumentsAndTheNativesOwnUseToTheByte \
 	19:testNatives:Natives.EveryArityFromZeroToSixteenArrivesInTheOrderOfTheCAbiAndTheResultIsTheNativesOwn \
-	38:testInt_ir:IntVerify.* 38:testWast:Wast.TheI32SuiteFile* \
+	38:testInt_ir:IntVerify.ADivisionOrRemainderWithNoGuardIsRefusedForEachOperationAtEachWidth:IntVerify.TheDivisorGuardAloneSatisfiesAllButDivSAndDivSNeedsTheOverflowGuardToo:IntVerify.AGuardThatDoesNotSayTheDivisorIsNotZeroIsRefused:IntVerify.TheOverflowGuardMustBeAboutTheOperandsOfTheDivisionAndStillTrue:IntVerify.AConstantDivisorIsJudgedAsItStands:IntVerify.TheGuardsOfOneDivisionServeTheNextOnlyWhileTheirOperandsStand 38:testWast:Wast.TheI32SuiteFile* \
 	39:testInt_ir:IntRun.DivideByZeroAndSignedOverflow* 39:testWast:Wast.TheI32SuiteFile* \
 	40:testInt_ir:IntRun.EveryOperationGivesTheWorkedAnswer* 40:testWast:Wast.TheI32SuiteFile* \
 	40:testDifferential:Differential.GeneratedIntegerPrograms* \

@@ -14,4 +14,4 @@ docs
 *.pyc
 
 # The WebAssembly spec suite, fetched by tools/wasm/fetch.sh (not ours, not committed)
-third_party
+/third_party
