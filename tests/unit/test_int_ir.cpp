@@ -1153,18 +1153,23 @@ TEST(IntRefusal, AFunctionWithoutTheNewTypeIsStillEmittedByAllThreeBackends) {
   }
 }
 
-TEST(IntRefusal, ACompileOnAHostWhoseBackendIsNotSysVRefusesWithUnsupported) {
+TEST(IntRefusal, ACompileOnTheNativeBackendIsRefusedByNameUnlessItIsSysVWhichEmitsThem) {
   const GRJIT_Arch native = grjit_native_arch();
-  if (native == GRJIT_ARCH_X86_64) {
-    GTEST_SKIP() << "the native backend is x86-64 SysV, which emits these; the refusal is shown by "
-                    "the emit tests above for the other two";
+  if (!grjit_backend_available()) {
+    GTEST_SKIP() << "no native code backend on this target";
   }
   JitWorld w;
   for (int which = 0; which < 7; which++) {
+    SCOPED_TRACE(which);
     Fn f(one_of_each_kind(which));
     Compiled c(f, w.pages());
-    EXPECT_EQ(c.result, GRJIT_ERR_UNSUPPORTED) << which;
-    EXPECT_FALSE(c);
+    if (native == GRJIT_ARCH_X86_64) {
+      EXPECT_EQ(c.result, GRJIT_OK) << "x86-64 SysV emits the integer operations";
+      EXPECT_TRUE(c);
+    } else {
+      EXPECT_EQ(c.result, GRJIT_ERR_UNSUPPORTED) << "arm64 and Win64 refuse them until story 5";
+      EXPECT_FALSE(c);
+    }
   }
 }
 
