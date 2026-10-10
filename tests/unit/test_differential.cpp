@@ -281,8 +281,18 @@ struct IntGen {
 /* An immediate operand: any 64-bit pattern for an i64, a 32-bit pattern (0 to 0xFFFFFFFF, one of
  * the two spellings the verifier accepts) for an i32. */
 int64_t imm_for(IntGen & g, bool narrow) {
-  return static_cast<int64_t>(g.edge(narrow));
+  uint64_t v = g.edge(narrow);
+  if (narrow && v >= 0x80000000u && g.pick(2) == 0) {
+    return static_cast<int64_t>(v) - (int64_t{1} << 32); // the negative spelling of the same 32 bits
+  }
+  return static_cast<int64_t>(v);
 }
+
+bool imm_is_zero(bool narrow, int64_t v) { return narrow ? static_cast<uint32_t>(v) == 0 : v == 0; }
+bool imm_is_min(bool narrow, int64_t v) {
+  return narrow ? static_cast<uint32_t>(v) == 0x80000000u : v == INT64_MIN;
+}
+bool imm_is_neg1(bool narrow, int64_t v) { return narrow ? static_cast<uint32_t>(v) == 0xFFFFFFFFu : v == -1; }
 
 struct IntProgram {
   GRJIT_Function * f = nullptr;
@@ -317,12 +327,77 @@ IntProgram generate_int_program(IntGen & g) {
       GRJIT_OP_POPCNT, GRJIT_OP_EXT8_S, GRJIT_OP_EXT16_S};
   static const GRJIT_OpKind divisions[] = {GRJIT_OP_DIV_S, GRJIT_OP_DIV_U, GRJIT_OP_REM_S,
       GRJIT_OP_REM_U};
+  // A division with the guards a frontend writes. Half the register divisors are made non-zero first,
+  // so the program goes on after most of its divisions; a divisor or a dividend may be a constant
+  // (0 excepted for a divisor, which the verifier refuses), MIN and -1 among them.
+  auto emit_division = [&](bool narrow, GRJIT_VReg d, bool record) {
+    const GRJIT_Type T = narrow ? GRJIT_TYPE_I32 : GRJIT_TYPE_I64;
+    auto & pool = narrow ? p32 : p64;
+    const GRJIT_OpKind k = divisions[g.pick(4)];
+    const int64_t min = narrow ? INT32_MIN : INT64_MIN;
+    bool y_imm = g.pick(4) == 0, a_imm = g.pick(4) == 0;
+    int64_t yv = 1, av = 0;
+    if (y_imm) {
+      yv = g.pick(3) == 0 ? -1 : imm_for(g, narrow);
+      if (imm_is_zero(narrow, yv)) {
+        yv = 3;
+      }
+    }
+    if (a_imm) {
+      av = g.pick(3) == 0 ? min : imm_for(g, narrow);
+    }
+    // MIN / x with a constant MIN and a register x is refused (a limit of the rule): use a register.
+    if (k == GRJIT_OP_DIV_S && a_imm && imm_is_min(narrow, av) && (!y_imm || imm_is_neg1(narrow, yv))) {
+      a_imm = false;
+    }
+    GRJIT_VReg a = a_imm ? GRJIT_NO_VREG : reg_of(narrow);
+    GRJIT_VReg y = GRJIT_NO_VREG;
+    if (!y_imm) {
+      y = reg_of(narrow);
+      if (g.pick(2) == 0) {
+        GRJIT_VReg safe = fresh(narrow);
+        b.bin(GRJIT_OP_OR, safe, V(y), I(1));
+        y = safe;
+        if (record) {
+          pool.push_back(safe);
+        }
+      }
+      GRJIT_VReg c = b.reg(T);
+      switch (g.pick(3)) {
+        case 0: b.cmp(GRJIT_CMP_NE, c, V(y), I(0)); b.guard(V(c), {7, ++site}, state()); break;
+        case 1: b.guard(V(y), {7, ++site}, state()); break;
+        default: b.cmp(GRJIT_CMP_UGT, c, V(y), I(0)); b.guard(V(c), {7, ++site}, state()); break;
+      }
+    }
+    if (k == GRJIT_OP_DIV_S) {
+      if (y_imm && !a_imm && imm_is_neg1(narrow, yv)) {
+        GRJIT_VReg c = b.reg(T);
+        b.cmp(GRJIT_CMP_NE, c, V(a), I(min));
+        b.guard(V(c), {7, ++site}, state());
+      } else if (!y_imm && !a_imm) {
+        if (g.pick(2) == 0) {
+          GRJIT_VReg e1 = b.reg(T), e2 = b.reg(T), t = b.reg(T), fine = b.reg(T);
+          b.cmp(GRJIT_CMP_EQ, e1, V(a), I(min));
+          b.cmp(GRJIT_CMP_EQ, e2, V(y), I(-1));
+          b.bin(GRJIT_OP_AND, t, V(e1), V(e2));
+          b.cmp(GRJIT_CMP_EQ, fine, V(t), I(0));
+          b.guard(V(fine), {7, ++site}, state());
+        } else {
+          GRJIT_VReg n1 = b.reg(T), n2 = b.reg(T), fine = b.reg(T);
+          b.cmp(GRJIT_CMP_NE, n1, V(a), I(min));
+          b.cmp(GRJIT_CMP_NE, n2, V(y), I(-1));
+          b.bin(GRJIT_OP_OR, fine, V(n1), V(n2));
+          b.guard(V(fine), {7, ++site}, state());
+        }
+      }
+    }
+    b.bin(k, d, a_imm ? I(av) : V(a), y_imm ? I(yv) : V(y));
+  };
   const size_t steps = 8 + g.pick(24);
   for (size_t step = 0; step < steps; step++) {
     const bool narrow = g.pick(2) == 0;
-    const GRJIT_Type T = narrow ? GRJIT_TYPE_I32 : GRJIT_TYPE_I64;
     auto & pool = narrow ? p32 : p64;
-    switch (g.pick(8)) {
+    switch (g.pick(10)) {
       case 0:
       case 1: {
         GRJIT_VReg d = fresh(narrow);
@@ -365,43 +440,29 @@ IntProgram generate_int_program(IntGen & g) {
         p64.push_back(d);
         break;
       }
-      default: {
-        // A division, with the guards a frontend writes. Half the divisors are made non-zero
-        // first, so the program goes on after most of its divisions.
-        GRJIT_OpKind k = divisions[g.pick(4)];
-        GRJIT_VReg a = reg_of(narrow);
-        GRJIT_VReg y = reg_of(narrow);
-        if (g.pick(2) == 0) {
-          GRJIT_VReg safe = fresh(narrow);
-          b.bin(GRJIT_OP_OR, safe, V(y), I(1));
-          y = safe;
-          pool.push_back(safe);
-        }
-        const int64_t min = narrow ? INT32_MIN : INT64_MIN;
-        GRJIT_VReg c = b.reg(T);
-        switch (g.pick(3)) {
-          case 0: b.cmp(GRJIT_CMP_NE, c, V(y), I(0)); b.guard(V(c), {7, ++site}, state()); break;
-          case 1: b.guard(V(y), {7, ++site}, state()); break;
-          default: b.cmp(GRJIT_CMP_UGT, c, V(y), I(0)); b.guard(V(c), {7, ++site}, state()); break;
-        }
-        if (k == GRJIT_OP_DIV_S) {
-          if (g.pick(2) == 0) {
-            GRJIT_VReg e1 = b.reg(T), e2 = b.reg(T), t = b.reg(T), fine = b.reg(T);
-            b.cmp(GRJIT_CMP_EQ, e1, V(a), I(min));
-            b.cmp(GRJIT_CMP_EQ, e2, V(y), I(-1));
-            b.bin(GRJIT_OP_AND, t, V(e1), V(e2));
-            b.cmp(GRJIT_CMP_EQ, fine, V(t), I(0));
-            b.guard(V(fine), {7, ++site}, state());
-          } else {
-            GRJIT_VReg n1 = b.reg(T), n2 = b.reg(T), fine = b.reg(T);
-            b.cmp(GRJIT_CMP_NE, n1, V(a), I(min));
-            b.cmp(GRJIT_CMP_NE, n2, V(y), I(-1));
-            b.bin(GRJIT_OP_OR, fine, V(n1), V(n2));
-            b.guard(V(fine), {7, ++site}, state());
-          }
-        }
+      case 8: {
+        // A diamond: the two arms assign one register, and each may hold a division with its own
+        // guards, which do not cross the branch.
+        GRJIT_VReg cv = reg_of(g.pick(2) == 0);
+        GRJIT_BlockId t_arm = b.block(), e_arm = b.block(), join = b.block();
         GRJIT_VReg d = fresh(narrow);
-        b.bin(k, d, V(a), V(y));
+        b.br_if(V(cv), t_arm, e_arm);
+        for (GRJIT_BlockId arm : {t_arm, e_arm}) {
+          b.at(arm);
+          if (g.pick(2) == 0) {
+            emit_division(narrow, d, false);
+          } else {
+            b.bin(binary[g.pick(sizeof binary / sizeof binary[0])], d, operand(narrow), operand(narrow));
+          }
+          b.br(join);
+        }
+        b.at(join);
+        pool.push_back(d);
+        break;
+      }
+      default: {
+        GRJIT_VReg d = fresh(narrow);
+        emit_division(narrow, d, true);
         pool.push_back(d);
         break;
       }
@@ -436,7 +497,8 @@ TEST(Differential, GeneratedIntegerProgramsRunTheSameCompiledAndEvaluated) {
   GTEST_SKIP() << "the integer operations are emitted for x86-64 SysV only; the arm64 and Win64 refusals are tested in testInt_ir";
 #endif
   JitWorld w;
-  size_t returned = 0, deopted = 0, divisions = 0;
+  size_t returned = 0, deopted = 0, divisions = 0, const_divisors = 0, const_dividends = 0,
+         negative_i32_imms = 0, multi_block = 0;
   for (uint64_t seed = 1; seed <= 3000; seed++) {
     IntGen g(seed * 0x9E3779B97F4A7C15ull);
     IntProgram prog = generate_int_program(g);
@@ -448,15 +510,27 @@ TEST(Differential, GeneratedIntegerProgramsRunTheSameCompiledAndEvaluated) {
       size_t n = 0;
       const GRJIT_Op * ops = grjit_function_block_ops(f, static_cast<GRJIT_BlockId>(blk), &n);
       for (size_t i = 0; i < n; i++) {
-        divisions += ops[i].kind >= GRJIT_OP_DIV_S && ops[i].kind <= GRJIT_OP_REM_U;
+        const bool division = ops[i].kind >= GRJIT_OP_DIV_S && ops[i].kind <= GRJIT_OP_REM_U;
+        divisions += division;
+        const_divisors += division && ops[i].b.kind == GRJIT_OPERAND_IMM;
+        const_dividends += division && ops[i].a.kind == GRJIT_OPERAND_IMM;
+        negative_i32_imms += grjit_function_vreg_type(f, ops[i].dst) == GRJIT_TYPE_I32 &&
+                             (ops[i].a.kind == GRJIT_OPERAND_IMM || ops[i].b.kind == GRJIT_OPERAND_IMM) &&
+                             ((ops[i].a.kind == GRJIT_OPERAND_IMM && ops[i].a.imm < 0) ||
+                                 (ops[i].b.kind == GRJIT_OPERAND_IMM && ops[i].b.imm < 0));
       }
     }
+    multi_block += grjit_function_block_count(f) > 1;
     Compiled c(f, w.pages());
     ASSERT_TRUE(c) << describe(f, seed, grjit_result_string(c.result));
     for (int run = 0; run < 6; run++) {
       std::vector<uint64_t> args;
       for (size_t i = 0; i < prog.params; i++) {
-        args.push_back(IntGen::edges(i < 3).at(g.pick(IntGen::edges(i < 3).size())));
+        uint64_t v = IntGen::edges(i < 3).at(g.pick(IntGen::edges(i < 3).size()));
+        if (i < 3 && g.pick(2) == 0) {
+          v |= (g.rng() | 1) << 32; // an i32 argument with garbage above bit 31: the entry masks it
+        }
+        args.push_back(v);
       }
       auto compiled = intfx::run(c.code, w.ctx, args);
       ASSERT_EQ(compiled.fault, 0) << describe(f, seed, "the compiled code faulted in hardware");
@@ -479,11 +553,19 @@ TEST(Differential, GeneratedIntegerProgramsRunTheSameCompiledAndEvaluated) {
       }
     }
   }
-  std::printf("integer differential: 3000 programs x 6 runs, %zu returned, %zu guard exits, %zu divisions\n",
-      returned, deopted, divisions);
-  EXPECT_GT(returned, 3000u);
-  EXPECT_GT(deopted, 500u);
-  EXPECT_GT(divisions, 3000u);
+  // Run counts (of 3000 x 6 = 18000 runs) and static counts (over the 3000 generated programs).
+  std::printf("integer differential: per run: %zu returned, %zu guard exits; static, summed over the operations of the 3000 programs: "
+              "%zu divisions, %zu with a constant divisor, %zu with a constant dividend, %zu i32 "
+              "operations with a negative immediate; and %zu of the programs have more than one block\n",
+      returned, deopted, divisions, const_divisors, const_dividends, negative_i32_imms, multi_block);
+  // Thresholds at about nine tenths of what the fixed seeds give (12267, 5733, 23328, 5876, 5454, 6425, 2531).
+  EXPECT_GT(returned, 11000u);
+  EXPECT_GT(deopted, 5000u);
+  EXPECT_GT(divisions, 21000u);
+  EXPECT_GT(const_divisors, 5200u);
+  EXPECT_GT(const_dividends, 4900u);
+  EXPECT_GT(negative_i32_imms, 5700u);
+  EXPECT_GT(multi_block, 2200u);
 }
 
 GRJIT_TEST_MAIN()
