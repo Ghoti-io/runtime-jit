@@ -278,10 +278,10 @@ struct IntGen {
   }
 };
 
-/* An immediate operand: any 64-bit pattern for an i64, a 32-bit pattern for an i32. */
+/* An immediate operand: any 64-bit pattern for an i64, a 32-bit pattern (0 to 0xFFFFFFFF, one of
+ * the two spellings the verifier accepts) for an i32. */
 int64_t imm_for(IntGen & g, bool narrow) {
-  uint64_t v = g.edge(narrow);
-  return narrow ? static_cast<int64_t>(v) : static_cast<int64_t>(v);
+  return static_cast<int64_t>(g.edge(narrow));
 }
 
 struct IntProgram {

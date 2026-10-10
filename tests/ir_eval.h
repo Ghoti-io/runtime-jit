@@ -216,7 +216,6 @@ inline Result eval(const GRJIT_Function * f, void * ctx, GRJIT_EntryHook hook,
           const uint64_t ua = cut(w, a), ub = cut(w, b);
           const int64_t sa = sext(w, a), sb = sext(w, b);
           const int64_t min = w == 32 ? INT32_MIN : INT64_MIN;
-          const bool is_signed = op.kind == GRJIT_OP_DIV_S || op.kind == GRJIT_OP_REM_S;
           if (ub == 0 || (op.kind == GRJIT_OP_DIV_S && sa == min && sb == -1)) {
             /* A partial operation reached with the operands its guards keep out: the
              * program is wrong, not the operation. Reported as an exit no run has. */
@@ -233,7 +232,6 @@ inline Result eval(const GRJIT_Function * f, void * ctx, GRJIT_EntryHook hook,
           } else {
             v = sb == -1 ? 0 : static_cast<uint64_t>(sa % sb);
           }
-          (void)is_signed;
           regs[op.dst] = cut(w, v);
           break;
         }
