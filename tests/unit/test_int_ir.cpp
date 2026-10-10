@@ -818,6 +818,34 @@ TEST(IntVerify, TheGuardsOfOneDivisionServeTheNextOnlyWhileTheirOperandsStand) {
   EXPECT_NE(why.find("op 5"), std::string::npos) << why;
 }
 
+TEST(IntVerify, AnAllocationThatFailsInTheGuardAnalysisIsOutOfMemoryAndLeaksNothing) {
+  TrackingAllocator t;
+  B b("t", 0, nullptr, t.get());
+  Parts p(b, GRJIT_TYPE_I64);
+  GRJIT_VReg r = b.reg(GRJIT_TYPE_I64);
+  b.at(b.block());
+  p.guard_nonzero();
+  p.guard_overflow_and(p.x, p.y);
+  b.bin(GRJIT_OP_DIV_S, r, V(p.x), V(p.y));
+  b.ret(V(r));
+  Fn f(b.finish());
+  const long before = t.live;
+  GRJIT_Result first = grjit_function_verify(f, nullptr, nullptr, 0);
+  ASSERT_EQ(first, GRJIT_OK);
+  bool saw_oom = false;
+  for (long k = 1; k <= 12; k++) {
+    t.calls = 0;
+    t.fail_at = k;
+    t.sticky = false;
+    GRJIT_Result r2 = grjit_function_verify(f, nullptr, nullptr, 0);
+    t.fail_at = 0;
+    EXPECT_EQ(t.live, before) << "allocation " << k << " failed and something leaked";
+    EXPECT_TRUE(r2 == GRJIT_OK || r2 == GRJIT_ERR_OOM) << k;
+    saw_oom |= r2 == GRJIT_ERR_OOM;
+  }
+  EXPECT_TRUE(saw_oom) << "the analysis allocates, and a refusal of one is an out-of-memory answer";
+}
+
 /* ---- Running the code: the answers ------------------------------------------------------- */
 
 TEST(IntRun, EveryOperationGivesTheWorkedAnswerAndAnI32ResultIsZeroExtended) {
