@@ -376,6 +376,21 @@ inline std::string print(const GRJIT_Function * f) {
   return s;
 }
 
+/* The optional CPU features a test compile switches off when it does not say. The library reads no
+ * environment variable; the test fixtures do: GRJIT_TEST_DISABLE_FEATURES=all (or a number) runs a whole
+ * suite on the v1 sequences of a host that has the features (spec-runtime-float, story 4). Unset means
+ * nothing is disabled, which is what a zero-initialised GRJIT_CompileOptions means. */
+inline GRJIT_Features default_disabled_features() {
+  const char * v = std::getenv("GRJIT_TEST_DISABLE_FEATURES");
+  if (v == nullptr || *v == '\0' || std::strcmp(v, "none") == 0) {
+    return GRJIT_FEATURES_NONE;
+  }
+  if (std::strcmp(v, "all") == 0) {
+    return GRJIT_FEATURES_ALL;
+  }
+  return static_cast<GRJIT_Features>(std::strtoul(v, nullptr, 0));
+}
+
 /* Compiled code the test owns, with a call wrapper. */
 struct Compiled {
   GRJIT_Code * code = nullptr;
@@ -385,12 +400,14 @@ struct Compiled {
   Compiled & operator=(const Compiled &) = delete;
   Compiled(const GRJIT_Function * f, const GRCORE_PageProvider * pages,
       GRJIT_EntryHook hook = nullptr, const GRJIT_Limits * limits = nullptr,
-      const GRJIT_Allocator * allocator = nullptr) {
+      const GRJIT_Allocator * allocator = nullptr,
+      GRJIT_Features disabled = default_disabled_features()) {
     GRJIT_CompileOptions o{};
     o.pages = pages;
     o.allocator = allocator;
     o.limits = limits;
     o.entry_hook = hook;
+    o.disabled_features = disabled;
     result = grjit_compile(&o, f, &code);
   }
   ~Compiled() { grjit_code_destroy(code); }

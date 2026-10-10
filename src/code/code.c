@@ -34,9 +34,11 @@
 
 #include <ghoti.io/runtime-jit/backend.h>
 #include <ghoti.io/runtime-jit/code.h>
+#include <ghoti.io/runtime-jit/features.h>
 #include <ghoti.io/runtime-jit/verify.h>
 
 #include "code_internal.h"
+#include "features_internal.h"
 #include "../x86_64/emit_internal.h"
 #include "../arm64/emit_internal.h"
 
@@ -113,6 +115,20 @@ const void * grjit_code_address(const GRJIT_Code * code) {
 
 size_t grjit_code_size(const GRJIT_Code * code) {
   return code == NULL ? 0 : code->code_bytes;
+}
+
+GRJIT_Features grjit_code_features(const GRJIT_Code * code) {
+  return code == NULL ? GRJIT_FEATURES_NONE : code->features_used;
+}
+
+bool grjit_code_usable_with(const GRJIT_Code * code, GRJIT_Features running) {
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 61
+  /* Planted defect 61 (tests only): the predicate is reversed (the running set is a subset of
+   * the recorded one). */
+  return code != NULL && grjit_features_subset(running, code->features_used);
+#else
+  return code != NULL && grjit_features_subset(code->features_used, running);
+#endif
 }
 
 size_t grjit_code_mapped_size(const GRJIT_Code * code) {
@@ -203,6 +219,14 @@ static GRJIT_Result verify_for_compile(
 GRJIT_Result grjit_emit_for(GRJIT_Arch arch, const GRJIT_Function * function,
     const GRJIT_Allocator * a, const GRJIT_Limits * limits_in,
     GRJIT_EntryHook hook, uint32_t request_offset, GRJIT_Emitted * out) {
+  return grjit_emit_for_features(arch, function, a, limits_in, hook, request_offset,
+      grjit_features_detected(), out);
+}
+
+GRJIT_Result grjit_emit_for_features(GRJIT_Arch arch, const GRJIT_Function * function,
+    const GRJIT_Allocator * a, const GRJIT_Limits * limits_in,
+    GRJIT_EntryHook hook, uint32_t request_offset, GRJIT_Features features,
+    GRJIT_Emitted * out) {
   GRJIT_Limits limits;
   grjit_limits_resolve(limits_in, &limits);
   memset(out, 0, sizeof *out);
@@ -239,7 +263,8 @@ GRJIT_Result grjit_emit_for(GRJIT_Arch arch, const GRJIT_Function * function,
   } else {
     r = grjit_emit_function(function, a, limits.max_code_bytes, hook,
         request_offset, (uint32_t)frame, arch == GRJIT_ARCH_X86_64_WIN64,
-        &live, &x86);
+        features & GRJIT_FEATURES_ALL, &live, &x86);
+    out->features_used = x86.features_used;
     out->prologue = x86.prologue;
     out->internal_offset = x86.internal_offset;
     out->regs_used = grjit_asm_regs_used(&x86.as);
@@ -310,8 +335,10 @@ GRJIT_Result grjit_compile(const GRJIT_CompileOptions * options,
     return GRJIT_ERR_UNSUPPORTED;
   }
   GRJIT_Emitted emitted;
-  r = grjit_emit_for(GRJIT_NATIVE, function, a, options->limits,
-      options->entry_hook, grcore_jit_layout()->request_word_offset, &emitted);
+  /* The features this compile may use: what the CPU has, less what the caller disabled. */
+  r = grjit_emit_for_features(GRJIT_NATIVE, function, a, options->limits,
+      options->entry_hook, grcore_jit_layout()->request_word_offset,
+      grjit_features_effective(options->disabled_features), &emitted);
   if (r != GRJIT_OK) {
     return r;
   }
@@ -332,6 +359,7 @@ GRJIT_Result grjit_compile(const GRJIT_CompileOptions * options,
   code->pages = options->pages;
   code->code_bytes = emitted.size;
   code->internal_offset = emitted.internal_offset;
+  code->features_used = emitted.features_used;
   code->meta = emitted.meta;
   code->meta.meta.sites = code->meta.sites;
   /* The metadata now belongs to the code; the bytes were copied into the

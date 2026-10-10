@@ -46,6 +46,7 @@
 #include <ghoti.io/runtime-jit/builder.h>
 #include <ghoti.io/runtime-jit/code.h>
 #include <ghoti.io/runtime-jit/core.h>
+#include <ghoti.io/runtime-jit/features.h>
 #include <ghoti.io/runtime-jit/ir.h>
 #include <ghoti.io/runtime-jit/libver.h>
 #include <ghoti.io/runtime-jit/limits.h>

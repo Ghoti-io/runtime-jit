@@ -31,6 +31,9 @@ TEST(Umbrella, DeclaresTheWholeSurfaceFromCxx) {
   GRJIT_Code * code = nullptr;
   EXPECT_EQ(grjit_compile(&o, nullptr, &code), GRJIT_ERR_INVALID);
   EXPECT_EQ(grjit_code_meta(nullptr), nullptr);
+  // The CPU features come through the umbrella: a mask of everything leaves no optional feature.
+  EXPECT_EQ(grjit_features_effective(GRJIT_FEATURES_ALL), GRJIT_FEATURES_NONE);
+  EXPECT_EQ(grjit_code_features(nullptr), GRJIT_FEATURES_NONE);
   EXPECT_EQ(GRJIT_EXIT_REFUSED, 2);
   EXPECT_EQ(GRJIT_EXIT_DEOPT, 1);
   EXPECT_EQ(GRJIT_EXIT_RETURNED, 0);

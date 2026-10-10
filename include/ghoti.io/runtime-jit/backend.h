@@ -57,6 +57,8 @@
 #include <ghoti.io/runtime-jit/ir.h>
 #include <ghoti.io/runtime-jit/limits.h>
 
+#include <ghoti.io/runtime-jit/features.h>
+
 #include <ghoti.io/runtime-core/b/page.h>
 
 #include <stdbool.h>
@@ -91,6 +93,17 @@ typedef struct GRJIT_CompileOptions {
   const GRJIT_Allocator * allocator; ///< NULL for the default.
   const GRJIT_Limits * limits;       ///< NULL for the defaults.
   GRJIT_EntryHook entry_hook;        ///< NULL for none.
+  /** The optional CPU features this compile must not use (features.h). Zero
+   *  disables nothing, so a zero-initialised options struct compiles with
+   *  every feature the host has. The mask can only remove: the set a compile
+   *  uses is `detected & ~disabled`, so no value, however wrong, enables a
+   *  feature the CPU lacks. ::GRJIT_FEATURES_ALL is "every optional feature
+   *  off", which is x86-64-v1 code (and how a host that has the features tests
+   *  the fallback sequences). Bits above ::GRJIT_FEATURES_ALL are ignored. On a
+   *  target with no optional feature it is accepted and changes nothing. An
+   *  engine fills it from its own context's option when it compiles.
+   *  Last in the struct: it is a `free` header and a consumer rebuilds. */
+  GRJIT_Features disabled_features;
 } GRJIT_CompileOptions;
 
 /** @brief Whether this build can compile and run code: true on Linux x86-64,

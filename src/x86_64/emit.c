@@ -867,12 +867,45 @@ static void emit_binary32(GRJIT_Emit * e, const GRJIT_Op * op) {
   store_result(e, op->dst, GRJIT_RAX);
 }
 
+/* Whether the arm that needs feature `f` is taken. It is taken only when `f` is in the set this
+ * emit was given (`e->features`, the effective set of the compile: the host's less the caller's
+ * mask), never from the host's own set and never from anything else, and taking it is recorded in
+ * `features_used` at this point, so the record is what the bytes need and not what was permitted.
+ * `lzcnt` and `tzcnt` do not fault on a CPU without them: they run as `bsr` and `bsf`. */
+static bool take_feature(GRJIT_Emit * e, GRJIT_Features f) {
+  GRJIT_Features have = e->features;
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 62
+  /* Planted defect 62 (tests only): the arm is chosen from the host's set, not the effective one,
+   * so a mask changes neither the bytes nor (below) what is recorded. */
+  have = grjit_features_detected();
+#endif
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 63
+  /* Planted defect 63 (tests only): the feature arm is never taken. */
+  have = GRJIT_FEATURES_NONE;
+#endif
+  if ((have & f) == 0) {
+    return false;
+  }
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 60
+  /* Planted defect 60 (tests only): the recorded set is always empty. */
+#else
+  e->features_used |= f;
+#endif
+  return true;
+}
+
 /* `popcnt` without the POPCNT instruction: the parallel bit count. */
 static void emit_popcnt_v1(GRJIT_Emit * e, bool wide) {
   GRJIT_Asm * a = &e->as;
 #define ALU(op, d, s) ((wide) ? grjit_asm_alu_rr(a, op, d, s) : grjit_asm_alu32_rr(a, op, d, s))
 #define MOV(d, s) ((wide) ? grjit_asm_mov_rr(a, d, s) : grjit_asm_mov32_rr(a, d, s))
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 66
+  /* Planted defect 66 (tests only): a wrong mask constant in the v1 sequence, which a host with
+   * POPCNT never runs unless the feature is masked off. */
+  const uint64_t m1 = wide ? UINT64_C(0x5555555555555554) : UINT64_C(0x55555554);
+#else
   const uint64_t m1 = wide ? UINT64_C(0x5555555555555555) : UINT64_C(0x55555555);
+#endif
   const uint64_t m2 = wide ? UINT64_C(0x3333333333333333) : UINT64_C(0x33333333);
   const uint64_t m4 = wide ? UINT64_C(0x0F0F0F0F0F0F0F0F) : UINT64_C(0x0F0F0F0F);
   const uint64_t h01 = wide ? UINT64_C(0x0101010101010101) : UINT64_C(0x01010101);
@@ -914,21 +947,41 @@ static void emit_int_unary(GRJIT_Emit * e, const GRJIT_Op * op) {
   load_operand(e, GRJIT_RAX, &op->a);
   switch (op->kind) {
     case GRJIT_OP_CLZ:
+      if (take_feature(e, GRJIT_FEATURE_LZCNT)) {
+        /* `lzcnt` gives the width for zero in the instruction itself: no cmov. */
+        grjit_asm_lzcnt(a, GRJIT_RAX, GRJIT_RAX, wide);
+        break;
+      }
       /* width - 1 - bsr(x), which is bsr(x) ^ (width - 1); for zero, bsr leaves ZF set and
        * its destination unspecified, so cmov puts 2 * width - 1 there: (2w - 1) ^ (w - 1) = w. */
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 67
+      /* Planted defect 67 (tests only): the zero case of the v1 `clz` is off by one in the value
+       * the cmov supplies, so clz(0) is wrong; only the masked arm on a host with LZCNT runs it. */
+      grjit_asm_mov_ri(a, GRJIT_RCX, wide ? 126 : 62);
+#else
       grjit_asm_mov_ri(a, GRJIT_RCX, wide ? 127 : 63);
+#endif
       grjit_asm_bsr(a, GRJIT_RAX, GRJIT_RAX, wide);
       grjit_asm_cmov(a, GRJIT_COND_E, GRJIT_RAX, GRJIT_RCX, wide);
       grjit_asm_mov_ri(a, GRJIT_RDX, wide ? 63 : 31);
       grjit_asm_alu32_rr(a, GRJIT_ALU_XOR, GRJIT_RAX, GRJIT_RDX);
       break;
     case GRJIT_OP_CTZ:
+      if (take_feature(e, GRJIT_FEATURE_BMI1)) {
+        /* `tzcnt` gives the width for zero in the instruction itself: no cmov. */
+        grjit_asm_tzcnt(a, GRJIT_RAX, GRJIT_RAX, wide);
+        break;
+      }
       grjit_asm_mov_ri(a, GRJIT_RCX, wide ? 64 : 32);
       grjit_asm_bsf(a, GRJIT_RAX, GRJIT_RAX, wide);
       grjit_asm_cmov(a, GRJIT_COND_E, GRJIT_RAX, GRJIT_RCX, wide);
       break;
     case GRJIT_OP_POPCNT:
-      emit_popcnt_v1(e, wide);
+      if (take_feature(e, GRJIT_FEATURE_POPCNT)) {
+        grjit_asm_popcnt(a, GRJIT_RAX, GRJIT_RAX, wide);
+      } else {
+        emit_popcnt_v1(e, wide);
+      }
       break;
     case GRJIT_OP_EXT8_S:
       grjit_asm_movsx(a, GRJIT_RAX, GRJIT_RAX, 8, wide);
@@ -1306,6 +1359,47 @@ static void emit_float_round(GRJIT_Emit * e, const GRJIT_Op * op, bool dbl) {
   store_float(e, op->dst, X, dbl);
 }
 
+/* FCEIL FFLOOR FTRUNC FNEAREST with SSE4.1: one `roundss`/`roundsd` whose immediate is the
+ * mode (bits 0-1: 0 nearest-even, 1 down, 2 up, 3 toward zero) with bit 3 set so that no precision
+ * exception is raised: 0x0A ceil, 0x09 floor, 0x0B trunc, 0x08 nearest. The instruction is
+ * IEEE `roundToIntegral`, which is what the v1 sequence above builds from SSE2: the sign of a
+ * zero result kept, ties to even for `nearest`, an infinity and a value at or above 2^52 (2^23)
+ * unchanged, and a NaN quiet with its sign and payload kept. The F32 result is stored by the
+ * existing `movd`, which writes a zero-extended word. */
+static void emit_float_round_sse41(GRJIT_Emit * e, const GRJIT_Op * op, bool dbl) {
+  GRJIT_Asm * a = &e->as;
+  uint8_t imm = 0x08;
+  switch (op->kind) {
+    case GRJIT_OP_FCEIL:
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 65
+      imm = 0x09; /* Planted defect 65 (tests only): floor and ceil swapped. */
+#else
+      imm = 0x0A;
+#endif
+      break;
+    case GRJIT_OP_FFLOOR:
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 65
+      imm = 0x0A;
+#else
+      imm = 0x09;
+#endif
+      break;
+    case GRJIT_OP_FTRUNC:
+      imm = 0x0B;
+      break;
+    default: /* FNEAREST */
+      imm = 0x08;
+      break;
+  }
+  load_float(e, GRJIT_XMM0, &op->a, dbl);
+  if (dbl) {
+    grjit_asm_roundsd(a, GRJIT_XMM0, GRJIT_XMM0, imm);
+  } else {
+    grjit_asm_roundss(a, GRJIT_XMM0, GRJIT_XMM0, imm);
+  }
+  store_float(e, op->dst, GRJIT_XMM0, dbl);
+}
+
 /* An x86 `setcc` pair joins the flags of `ucomis*`, which sets ZF, PF and CF together for an
  * unordered pair: EQ needs ZF and no PF, NE needs not-ZF or PF, and LT/LE are GT/GE with the
  * operands swapped, because the unordered case then fails the `above` test (CF is set) by
@@ -1537,7 +1631,11 @@ static void emit_float_op(GRJIT_Emit * e, const GRJIT_Op * op) {
     case GRJIT_OP_FFLOOR:
     case GRJIT_OP_FTRUNC:
     case GRJIT_OP_FNEAREST:
-      emit_float_round(e, op, dbl);
+      if (take_feature(e, GRJIT_FEATURE_SSE4_1)) {
+        emit_float_round_sse41(e, op, dbl);
+      } else {
+        emit_float_round(e, op, dbl);
+      }
       break;
     case GRJIT_OP_CONVERT_S:
     case GRJIT_OP_CONVERT_U:
@@ -2149,7 +2247,7 @@ static GRJIT_Result emit_callable(const GRJIT_Function * f, GRJIT_Emit * e,
 GRJIT_Result grjit_emit_function(const GRJIT_Function * f,
     const GRJIT_Allocator * allocator, size_t max_code_bytes,
     GRJIT_EntryHook hook, uint32_t request_offset, uint32_t frame_bytes,
-    bool win64, const GRJIT_LiveSites * live, GRJIT_Emit * e) {
+    bool win64, GRJIT_Features features, const GRJIT_LiveSites * live, GRJIT_Emit * e) {
   if (win64 && grjit_function_needs_numeric_ext(f)) {
     /* The i32 type and the integer operations of numeric-operations.md are emitted for
      * SysV; story 5 of spec-runtime-float brings them to Win64. Until then the flavour
@@ -2159,6 +2257,9 @@ GRJIT_Result grjit_emit_function(const GRJIT_Function * f,
   }
   memset(e, 0, sizeof *e);
   e->win64 = win64;
+  /* The Win64 flavour refuses every operation that has a feature arm (story 5 emits them), so
+   * it is given no feature: nothing there can record one. */
+  e->features = win64 ? GRJIT_FEATURES_NONE : (features & GRJIT_FEATURES_ALL);
   e->abi = win64 ? &grjit_x86_abi_win64 : &grjit_x86_abi_sysv;
   grjit_emit_common_init(&e->c, f,
       e->abi->internal->reg_args,

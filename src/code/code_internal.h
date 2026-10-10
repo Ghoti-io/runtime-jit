@@ -62,6 +62,8 @@ typedef struct GRJIT_Emitted {
   GRJIT_Prologue prologue; ///< x86-64 only: where the prologue's instructions end.
   uint32_t internal_offset; ///< A callable function's internal entry (x86-64 and arm64).
   uint32_t regs_used;      ///< x86-64 only: bit r set if register r was encoded.
+  GRJIT_Features features_used; ///< The features whose arm was emitted (a subset of the set the
+                           ///< emit was given; empty off SysV x86-64).
 } GRJIT_Emitted;
 
 /**
@@ -77,6 +79,21 @@ GRJIT_INTERNAL_API GRJIT_Result grjit_emit_for(GRJIT_Arch arch,
     const GRJIT_Function * function, const GRJIT_Allocator * allocator,
     const GRJIT_Limits * limits, GRJIT_EntryHook hook, uint32_t request_offset,
     GRJIT_Emitted * out);
+
+/**
+ * ::grjit_emit_for with the feature set the emitter may use named, not read: the
+ * arm of every feature-dependent operation (`clz`, `ctz`, `popcnt`, the four
+ * roundings) is chosen from `features` and from nothing else, so a test can emit
+ * the SSE4.1 bytes on a host that lacks SSE4.1 and compare them with a pin, and
+ * can only *run* them where the host has it. `features` is used by the x86-64 SysV
+ * emitter only: the Win64 flavour and the arm64 emitter ignore it (their records
+ * hold no feature). Bits above ::GRJIT_FEATURES_ALL are ignored.
+ * ::grjit_emit_for passes ::grjit_features_detected().
+ */
+GRJIT_INTERNAL_API GRJIT_Result grjit_emit_for_features(GRJIT_Arch arch,
+    const GRJIT_Function * function, const GRJIT_Allocator * allocator,
+    const GRJIT_Limits * limits, GRJIT_EntryHook hook, uint32_t request_offset,
+    GRJIT_Features features, GRJIT_Emitted * out);
 
 /** Frees what ::grjit_emit_for made. */
 GRJIT_INTERNAL_API void grjit_emitted_free(GRJIT_Emitted * emitted);
@@ -98,6 +115,7 @@ struct GRJIT_Code {
   uint64_t token;               ///< Its token (builder.h), also written before the entry.
   uint32_t internal_offset;     ///< Where it is, from the start of the mapping.
   void * unwind_table; ///< The registered RUNTIME_FUNCTION (Win64), or NULL.
+  GRJIT_Features features_used; ///< The optional CPU features its instructions need.
 };
 
 /**

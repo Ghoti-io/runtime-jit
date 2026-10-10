@@ -33,7 +33,9 @@
  * A ::GRJIT_Code is immutable once compiled and may be called from any thread
  * the engine allows (AD-22). It is single-owner: reference counting of
  * compiled code by the core (AD-13) and a code cache arrive with tier-up, not
- * here. Destroying a code object unmaps its pages, so destroying one that a
+ * here; the feature set the code was compiled for and the rule for reusing it
+ * are here (::grjit_code_features, ::grjit_code_usable_with) for that cache to
+ * use. Destroying a code object unmaps its pages, so destroying one that a
  * thread is still running is the caller's error.
  *
  * **Callable code** (AD-28; `ir.h`) has this entry and also an *internal entry*
@@ -64,6 +66,7 @@
 #include <ghoti.io/runtime-jit/macros.h>
 
 #include <ghoti.io/runtime-jit/core.h>
+#include <ghoti.io/runtime-jit/features.h>
 
 #include <ghoti.io/runtime-core/a/code.h>
 #include <ghoti.io/runtime-core/a/codemeta.h>
@@ -168,6 +171,32 @@ GRJIT_API uint64_t grjit_code_token(const GRJIT_Code * code);
 GRJIT_API GRJIT_Result grjit_entry_slot_install(GRCORE_Context * context,
     GRCORE_EntrySlot * slot, GRCORE_Code * handle, const GRJIT_Code * code,
     uint64_t token, size_t arg_count);
+
+/**
+ * @brief The optional CPU features the code's instructions need: those whose
+ *   arm the emitter actually took (features.h).
+ *
+ * It is a subset of the effective set of the compile that made the code, empty
+ * for a function with no `clz`, `ctz`, `popcnt` or rounding and for every
+ * function compiled with every feature disabled. Always empty on arm64, which
+ * needs none. NULL is ::GRJIT_FEATURES_NONE.
+ */
+GRJIT_API GRJIT_Features grjit_code_features(const GRJIT_Code * code);
+
+/**
+ * @brief Whether `code` may run in a context whose effective feature set is
+ *   `running`: its recorded set is a subset of `running` (features.h), and
+ *   nothing else.
+ *
+ * Code recorded as needing nothing runs anywhere; code that needs LZCNT does
+ * not run under a mask that disabled it, nor on a host without it. Equality of
+ * the two sets is not required. **Nothing checks this at call time**: the entry
+ * stays the raw entry, and whatever hands code out for reuse (a code cache,
+ * which arrives with tier-up and does not exist yet) asks first.
+ *
+ * @return false for NULL.
+ */
+GRJIT_API bool grjit_code_usable_with(const GRJIT_Code * code, GRJIT_Features running);
 
 /** @brief The address of the first byte of code. */
 GRJIT_API const void * grjit_code_address(const GRJIT_Code * code);

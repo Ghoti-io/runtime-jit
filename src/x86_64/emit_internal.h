@@ -36,6 +36,7 @@
 
 #include <ghoti.io/runtime-jit/allocator.h>
 #include <ghoti.io/runtime-jit/backend.h>
+#include <ghoti.io/runtime-jit/features.h>
 #include <ghoti.io/runtime-jit/ir.h>
 
 #include <ghoti.io/runtime-core/a/codemeta.h>
@@ -106,6 +107,10 @@ typedef struct GRJIT_Emit {
   GRJIT_Label ret_propagate; ///< Returns what a callee returned, `rdx` and `rax` as they are.
   GRJIT_Label overflow;     ///< The prologue's native-stack exit.
   uint32_t internal_offset; ///< Where the internal entry is, after the adapter.
+  GRJIT_Features features;      ///< The optional CPU features the emitter may use (SysV only:
+                                ///< the Win64 flavour is given none).
+  GRJIT_Features features_used; ///< The features whose arm was emitted, set at the point the arm
+                                ///< is chosen. A subset of `features`.
 } GRJIT_Emit;
 
 /** The outgoing area at the bottom of a Win64 frame: 32 bytes of shadow space
@@ -125,13 +130,17 @@ typedef struct GRJIT_Emit {
  * The recorded sites come back sorted by offset. On failure `out` is still
  * freed by ::grjit_emit_free.
  *
+ * `features` is the set the x86-64 SysV emitter may use (features.h); the Win64
+ * flavour ignores it. The arm of each feature-dependent operation is chosen from it and
+ * nothing else, and the arms taken are recorded in `out->features_used`.
+ *
  * @return ::GRJIT_OK, ::GRJIT_ERR_OOM, ::GRJIT_ERR_LIMIT (the byte cap) or
  *   ::GRJIT_ERR_INTERNAL.
  */
 GRJIT_Result grjit_emit_function(const GRJIT_Function * function,
     const GRJIT_Allocator * allocator, size_t max_code_bytes,
     GRJIT_EntryHook hook, uint32_t request_offset, uint32_t frame_bytes,
-    bool win64, const GRJIT_LiveSites * live, GRJIT_Emit * out);
+    bool win64, GRJIT_Features features, const GRJIT_LiveSites * live, GRJIT_Emit * out);
 
 /** The frame's end: `leave; ret` for SysV, and for Win64 the form its unwinder
  *  recognises as an epilogue, `lea rsp, [rbp]; pop rbp; ret`. */
