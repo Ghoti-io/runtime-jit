@@ -17,6 +17,7 @@
  */
 
 #include "../float_fixture.h"
+#include "../feature_fixture.h"
 
 #include "../calls_fixture.h"
 
@@ -34,6 +35,9 @@
 #include <vector>
 
 using namespace floatfx;
+using featfx::detected;
+using featfx::need_of;
+using featfx::two_arms;
 
 #if defined(__x86_64__) && defined(__linux__)
 #define FLOAT_ONLY_ON_X86_64() GRJIT_REQUIRE_BACKEND()
@@ -474,6 +478,22 @@ struct Built {
   }
 };
 
+/* The optional CPU features this file's compiles switch off. The tests that run the four roundings (and
+ * the integer bit counts, which have feature arms too) run them twice, with what the host has and with
+ * every optional feature masked off, so that the v1 sequences, which a host with SSE4.1 never runs
+ * otherwise, are run and a planted defect in one of them is caught (story 4). */
+GRJIT_Features g_disabled = default_disabled_features();
+
+struct ArmScope {
+  GRJIT_Features saved;
+  explicit ArmScope(GRJIT_Features d) : saved(g_disabled) { g_disabled = d; }
+  ~ArmScope() { g_disabled = saved; }
+};
+
+const char * arm_name(GRJIT_Features disabled) {
+  return disabled == GRJIT_FEATURES_NONE ? "the features the host has" : "every optional feature masked off";
+}
+
 GRJIT_Result compile(Built * b, const std::string & instr, JitWorld & w, TruncGuards g = TruncGuards{}) {
   b->op = build_any_op(instr, g);
   if (b->op.function == nullptr) {
@@ -481,6 +501,7 @@ GRJIT_Result compile(Built * b, const std::string & instr, JitWorld & w, TruncGu
   }
   GRJIT_CompileOptions o{};
   o.pages = w.pages();
+  o.disabled_features = g_disabled;
   return grjit_compile(&o, b->op.function, &b->code);
 }
 
@@ -1335,14 +1356,25 @@ TEST(FloatVerify, AnAllocationThatFailsInTheRangeAnalysisIsOutOfMemoryAndLeaksNo
 TEST(FloatRun, EveryOperationGivesTheWorkedAnswerFromTheCodeAndFromTheEvaluator) {
   FLOAT_ONLY_ON_X86_64();
   JitWorld w;
-  std::map<std::string, std::unique_ptr<Built>> built;
   size_t nan_cases = 0;
+  for (GRJIT_Features disabled : two_arms()) {
+  SCOPED_TRACE(arm_name(disabled));
+  ArmScope arm(disabled);
+  std::map<std::string, std::unique_ptr<Built>> built;
+  nan_cases = 0;
   for (const Worked & k : kWorked) {
     SCOPED_TRACE(std::string(k.instr) + " " + hex(k.a) + " " + hex(k.b));
     auto & slot = built[k.instr];
     if (!slot) {
       slot.reset(new Built);
       ASSERT_EQ(compile(slot.get(), k.instr, w), GRJIT_OK) << k.instr;
+      if (disabled == GRJIT_FEATURES_ALL) {
+        ASSERT_EQ(grjit_code_features(slot->code), GRJIT_FEATURES_NONE)
+            << k.instr << ": the masked arm must have taken no feature arm";
+      } else {
+        ASSERT_EQ(grjit_code_features(slot->code), detected() & need_of(k.instr))
+            << k.instr << ": the recorded set is the arm the host's features give";
+      }
     }
     const unsigned width = result_width(k.instr);
     Outcome o = run(slot->code, w.ctx, {k.a, k.b});
@@ -1361,6 +1393,7 @@ TEST(FloatRun, EveryOperationGivesTheWorkedAnswerFromTheCodeAndFromTheEvaluator)
     nan_cases += k.cls != Cls::Exact;
   }
   EXPECT_GT(nan_cases, 20u) << "the NaN classes are exercised";
+  }
 }
 
 namespace {
@@ -1434,6 +1467,9 @@ TEST(FloatRun, EveryOperationAtEveryWidthAgreesWithTheEvaluatorOnTheBoundaryValu
   JitWorld w;
   const std::vector<uint64_t> f64s = f64_values(), f32s = f32_values();
   size_t compared = 0, traps = 0;
+  for (GRJIT_Features disabled : two_arms()) {
+  SCOPED_TRACE(arm_name(disabled));
+  ArmScope arm(disabled);
   for (const char * ty : {"f32", "f64"}) {
     const bool narrow = std::string(ty) == "f32";
     const std::vector<uint64_t> & vals = narrow ? f32s : f64s;
@@ -1463,10 +1499,12 @@ TEST(FloatRun, EveryOperationAtEveryWidthAgreesWithTheEvaluatorOnTheBoundaryValu
     compared += sweep_one(w, narrow ? "i32.reinterpret_f32" : "i64.reinterpret_f64", vals, {0}, &traps);
     compared += sweep_one(w, narrow ? "f32.reinterpret_i32" : "f64.reinterpret_i64", int_values(narrow), {0}, &traps);
   }
-  std::printf("float boundary sweep: %zu runs compared with the evaluator, %zu of them guard exits\n",
+  }
+  std::printf("float boundary sweep: %zu runs compared with the evaluator (twice: with the host's features and "
+              "with every optional feature masked off), %zu of them guard exits\n",
       compared, traps);
-  EXPECT_GT(compared, 100000u);
-  EXPECT_GT(traps, 240u) << "the truncations' guards were reached";
+  EXPECT_GT(compared, 2 * 100000u);
+  EXPECT_GT(traps, 2 * 240u) << "the truncations' guards were reached";
 }
 
 TEST(FloatRun, ATruncationNamesTheNanGuardTheRangeGuardOrReturnsTheTruncatedValue) {

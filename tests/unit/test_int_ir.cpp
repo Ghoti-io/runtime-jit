@@ -11,6 +11,7 @@
  */
 
 #include "../int_fixture.h"
+#include "../feature_fixture.h"
 
 #include "../calls_fixture.h"
 #include "../ir_eval.h"
@@ -22,6 +23,9 @@
 #include <vector>
 
 using namespace intfx;
+using featfx::detected;
+using featfx::need_of;
+using featfx::two_arms;
 
 #if defined(__x86_64__) && defined(__linux__)
 #define INT_ONLY_ON_X86_64() GRJIT_REQUIRE_BACKEND()
@@ -213,6 +217,21 @@ struct Built {
   }
 };
 
+/* The optional CPU features this file's compiles switch off. The tests that run an operation with a
+ * feature arm (clz, ctz, popcnt) run it twice, with what the host has and with every optional feature
+ * masked off, so that the v1 sequences are run on a host that has the features (story 4). */
+GRJIT_Features g_disabled = default_disabled_features();
+
+struct ArmScope {
+  GRJIT_Features saved;
+  explicit ArmScope(GRJIT_Features d) : saved(g_disabled) { g_disabled = d; }
+  ~ArmScope() { g_disabled = saved; }
+};
+
+const char * arm_name(GRJIT_Features disabled) {
+  return disabled == GRJIT_FEATURES_NONE ? "the features the host has" : "every optional feature masked off";
+}
+
 GRJIT_Result compile(Built * b, const std::string & instr, JitWorld & w, Guards g = Guards{}) {
   b->op = build_wasm_op(instr, g);
   if (b->op.function == nullptr) {
@@ -220,6 +239,7 @@ GRJIT_Result compile(Built * b, const std::string & instr, JitWorld & w, Guards 
   }
   GRJIT_CompileOptions o{};
   o.pages = w.pages();
+  o.disabled_features = g_disabled;
   return grjit_compile(&o, b->op.function, &b->code);
 }
 
@@ -855,18 +875,31 @@ TEST(IntVerify, AnAllocationThatFailsInTheGuardAnalysisIsOutOfMemoryAndLeaksNoth
 TEST(IntRun, EveryOperationGivesTheWorkedAnswerAndAnI32ResultIsZeroExtended) {
   INT_ONLY_ON_X86_64();
   JitWorld w;
-  std::map<std::string, std::unique_ptr<Built>> built;
-  for (const Worked & k : kWorked) {
-    SCOPED_TRACE(std::string(k.instr) + " " + wanted(k.a) + " " + wanted(k.b));
-    auto & slot = built[k.instr];
-    if (!slot) {
-      slot.reset(new Built);
-      ASSERT_EQ(compile(slot.get(), k.instr, w), GRJIT_OK) << k.instr;
+  // Twice: the arm of clz, ctz and popcnt the host's features give, and the v1 sequences of the same
+  // operations (a planted defect in a sequence only the fallback runs is caught by the second).
+  for (GRJIT_Features disabled : two_arms()) {
+    SCOPED_TRACE(arm_name(disabled));
+    ArmScope arm(disabled);
+    std::map<std::string, std::unique_ptr<Built>> built;
+    for (const Worked & k : kWorked) {
+      SCOPED_TRACE(std::string(k.instr) + " " + wanted(k.a) + " " + wanted(k.b));
+      auto & slot = built[k.instr];
+      if (!slot) {
+        slot.reset(new Built);
+        ASSERT_EQ(compile(slot.get(), k.instr, w), GRJIT_OK) << k.instr;
+        if (disabled == GRJIT_FEATURES_ALL) {
+          ASSERT_EQ(grjit_code_features(slot->code), GRJIT_FEATURES_NONE)
+              << k.instr << ": the masked arm must have taken no feature arm";
+        } else {
+          ASSERT_EQ(grjit_code_features(slot->code), detected() & need_of(k.instr))
+              << k.instr << ": the recorded set is the arm the host's features give";
+        }
+      }
+      Outcome o = run(slot->code, w.ctx, {k.a, k.b});
+      ASSERT_EQ(o.fault, 0) << "a hardware fault";
+      ASSERT_EQ(o.exit, uint32_t{GRJIT_EXIT_RETURNED}) << said(slot->code, o);
+      EXPECT_EQ(o.out[0], k.want) << "got " << wanted(o.out[0]) << ", want " << wanted(k.want);
     }
-    Outcome o = run(slot->code, w.ctx, {k.a, k.b});
-    ASSERT_EQ(o.fault, 0) << "a hardware fault";
-    ASSERT_EQ(o.exit, uint32_t{GRJIT_EXIT_RETURNED}) << said(slot->code, o);
-    EXPECT_EQ(o.out[0], k.want) << "got " << wanted(o.out[0]) << ", want " << wanted(k.want);
   }
 }
 
@@ -874,6 +907,9 @@ TEST(IntRun, EveryOperationAtEveryWidthAgreesWithTheEvaluatorOnTheBoundaryValues
   INT_ONLY_ON_X86_64();
   JitWorld w;
   size_t compared = 0, traps = 0;
+  for (GRJIT_Features disabled : two_arms()) {
+  SCOPED_TRACE(arm_name(disabled));
+  ArmScope arm(disabled);
   for (const char * ty : {"i32", "i64"}) {
     const bool narrow = std::string(ty) == "i32";
     const std::vector<uint64_t> vals = boundary(narrow);
@@ -911,11 +947,13 @@ TEST(IntRun, EveryOperationAtEveryWidthAgreesWithTheEvaluatorOnTheBoundaryValues
       }
     }
   }
-  std::printf("integer boundary sweep: %zu runs compared with the evaluator, %zu of them guard exits\n",
+  }
+  std::printf("integer boundary sweep: %zu runs compared with the evaluator (twice: with the host's features and "
+              "with every optional feature masked off), %zu of them guard exits\n",
       compared, traps);
-  // Floors at about nine tenths of the fixed sweep (83,872 runs, 322 guard exits).
-  EXPECT_GT(compared, 75000u);
-  EXPECT_GT(traps, 290u) << "the traps of the four divisions were reached";
+  // Floors at about nine tenths of the fixed sweep (83,872 runs, 322 guard exits), twice.
+  EXPECT_GT(compared, 2 * 75000u);
+  EXPECT_GT(traps, 2 * 290u) << "the traps of the four divisions were reached";
 }
 
 TEST(IntRun, DivideByZeroAndSignedOverflowFireTheirGuardsAndMinRemMinusOneIsZero) {

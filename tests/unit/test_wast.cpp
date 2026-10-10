@@ -26,6 +26,7 @@
  */
 
 #include "../float_fixture.h"
+#include "../feature_fixture.h"
 
 #include "../../src/code/code_internal.h"
 
@@ -379,6 +380,9 @@ struct Export {
 struct Report {
   size_t passed = 0, failed = 0, returns = 0, traps = 0, invokes = 0, modules = 0, exports = 0;
   size_t guard_checks = 0;
+  size_t compiled = 0;      ///< Functions compiled (when the code is run).
+  size_t with_arm = 0;      ///< ... of them with a non-empty recorded feature set.
+  size_t expected_arm = 0;  ///< ... that should have one: the instruction has a feature arm the host has.
   std::map<std::string, size_t> excluded;
   std::vector<std::string> failures;
   std::vector<std::string> unknown_forms;
@@ -394,7 +398,8 @@ struct Report {
 class Harness {
  public:
   /* `world` is null where the code is not run. */
-  Harness(JitWorld * world, std::string file) : world_(world), file_(std::move(file)) {}
+  Harness(JitWorld * world, std::string file, GRJIT_Features disabled = GRJIT_FEATURES_NONE)
+      : world_(world), file_(std::move(file)), disabled_(disabled) {}
   ~Harness() {
     for (auto & inst : instances_) {
       for (auto & e : inst.second) {
@@ -422,6 +427,7 @@ class Harness {
     if (world_ != nullptr) {
       GRJIT_CompileOptions o{};
       o.pages = world_->pages();
+      o.disabled_features = disabled_;
       GRJIT_Result r = grjit_compile(&o, function, &e->code);
       if (r != GRJIT_OK) {
         e->compile_failure = std::string("the compile failed: ") + grjit_result_string(r);
@@ -451,6 +457,7 @@ class Harness {
 
   JitWorld * world_;
   std::string file_;
+  GRJIT_Features disabled_; ///< The optional CPU features every compile of this run switches off.
   Report report_;
   std::map<std::string, Instance> instances_; // by module id; "" for an anonymous one
   std::string current_;                       // the id of the latest module
@@ -631,9 +638,19 @@ bool Harness::function(const Node & n, Instance * inst) {
     if (world_ != nullptr) {
       GRJIT_CompileOptions o{};
       o.pages = world_->pages();
+      o.disabled_features = disabled_;
       GRJIT_Result r = grjit_compile(&o, e->op.function, &e->code);
       if (r != GRJIT_OK) {
         e->compile_failure = std::string("the compile of ") + instr + " failed: " + grjit_result_string(r);
+      } else {
+        // What the compile recorded, against what the instruction and the effective set say it should.
+        report_.compiled++;
+        const GRJIT_Features want = featfx::detected() & ~disabled_ & featfx::need_of(instr);
+        report_.expected_arm += want != GRJIT_FEATURES_NONE;
+        report_.with_arm += grjit_code_features(e->code) != GRJIT_FEATURES_NONE;
+        if (grjit_code_features(e->code) != want) {
+          fail(n, std::string("the recorded feature set of ") + instr + " is not the one its arm and the mask give");
+        }
       }
     }
   }
@@ -950,6 +967,9 @@ std::string summary(const std::string & file, const Report & r) {
   }
   o << ", " << r.failed << " failed; " << r.exports << " exported functions in " << r.modules
     << " module(s), " << r.guard_checks << " unguarded variants refused by the verifier";
+  if (r.compiled != 0) {
+    o << "; " << r.compiled << " compiled, " << r.with_arm << " with a feature arm recorded";
+  }
   return o.str();
 }
 
@@ -1055,10 +1075,11 @@ std::string pinned_digest(const std::string & name) {
 namespace {
 
 /* Runs `text` and returns the report; the world is only made where the code is run. */
-wast::Report run_text(const std::string & text, const char * name = "inline.wast") {
+wast::Report run_text(const std::string & text, const char * name = "inline.wast",
+    GRJIT_Features disabled = GRJIT_FEATURES_NONE) {
   if (kExecutes) {
     JitWorld w;
-    wast::Harness h(&w, name);
+    wast::Harness h(&w, name, disabled);
     return h.run(text);
   }
   wast::Harness h(nullptr, name);
@@ -1568,42 +1589,79 @@ bool read_suite_file(const char * name, std::string * text) {
   return true;
 }
 
-void run_suite_file(const char * name, size_t want_passed, size_t want_traps,
-    std::map<std::string, size_t> want_excluded, size_t want_guard_checks) {
-  std::string text;
-  if (!read_suite_file(name, &text)) {
-    return;
-  }
-  wast::Report r = run_text(text, name);
-  std::printf("%s\n", wast::summary(name, r).c_str());
+/* One file, one arm: the report is checked against the pinned counts. */
+wast::Report run_suite_arm(const char * name, const std::string & text, GRJIT_Features disabled,
+    size_t want_passed, size_t want_traps, std::map<std::string, size_t> want_excluded, size_t want_guard_checks) {
+  const char * arm = disabled == GRJIT_FEATURES_NONE ? "the features the host has" : "every optional feature masked off";
+  wast::Report r = run_text(text, name, disabled);
+  std::printf("%s [%s]\n", wast::summary(name, r).c_str(), arm);
   for (size_t i = 0; i < r.failures.size() && i < 20; i++) {
     ADD_FAILURE() << r.failures[i];
   }
-  EXPECT_EQ(r.failed, 0u);
+  EXPECT_EQ(r.failed, 0u) << arm;
   EXPECT_TRUE(r.unknown_forms.empty());
   EXPECT_EQ(r.traps, want_traps);
   if (kExecutes) {
-    EXPECT_EQ(r.passed, want_passed) << "the number of assertions that ran and held, pinned to wg-3.0";
+    EXPECT_EQ(r.passed, want_passed) << "the number of assertions that ran and held, pinned to wg-3.0 (" << arm << ")";
   } else {
     EXPECT_EQ(r.passed, 0u);
     want_excluded["not run on this host (the integer and float operations are emitted for x86-64 SysV)"] =
         want_passed;
   }
   // The excluded forms, by reason, exactly: a reason that appears or goes away is a change of what is checked.
-  EXPECT_EQ(r.excluded, want_excluded);
+  EXPECT_EQ(r.excluded, want_excluded) << arm;
   EXPECT_EQ(r.guard_checks, want_guard_checks)
       << "the verifier's guard rule was shown to refuse the unguarded variants";
+  return r;
+}
+
+/* Runs a suite file twice where the code is run: with the features the host has, and with every optional
+ * feature masked off. The counts of the two are the same pinned ones. The detected run must have compiled
+ * feature-arm code on a host that has features (`want_arm_functions` exported functions of the file have a
+ * feature arm, and each records it), and the masked run must have compiled none: the fallback sequences were
+ * run by this file, not assumed. */
+void run_suite_file(const char * name, size_t want_passed, size_t want_traps,
+    std::map<std::string, size_t> want_excluded, size_t want_guard_checks, size_t want_arm_functions = 0) {
+  std::string text;
+  if (!read_suite_file(name, &text)) {
+    return;
+  }
+  wast::Report detected_run =
+      run_suite_arm(name, text, GRJIT_FEATURES_NONE, want_passed, want_traps, want_excluded, want_guard_checks);
+  if (!kExecutes) {
+    return; // nothing is compiled here, so there is no second arm to run
+  }
+  wast::Report masked_run =
+      run_suite_arm(name, text, GRJIT_FEATURES_ALL, want_passed, want_traps, want_excluded, want_guard_checks);
+  EXPECT_EQ(detected_run.passed, masked_run.passed) << "the two arms agree on every count";
+  EXPECT_EQ(detected_run.excluded, masked_run.excluded);
+  EXPECT_EQ(detected_run.returns, masked_run.returns);
+  EXPECT_EQ(detected_run.traps, masked_run.traps);
+  EXPECT_EQ(detected_run.exports, masked_run.exports);
+  EXPECT_EQ(detected_run.compiled, masked_run.compiled);
+  EXPECT_EQ(masked_run.with_arm, 0u) << "the masked run compiled feature-arm code";
+  EXPECT_EQ(masked_run.expected_arm, 0u);
+  // Which exported functions have an arm, and whether the host has the feature it uses.
+  EXPECT_EQ(detected_run.with_arm, detected_run.expected_arm)
+      << "every function with a feature arm the host has recorded it";
+  if (featfx::detected() == GRJIT_FEATURES_ALL) {
+    EXPECT_EQ(detected_run.with_arm, want_arm_functions)
+        << "the detected run compiled a different number of feature-arm functions than the file has";
+    if (want_arm_functions != 0) {
+      EXPECT_GT(detected_run.with_arm, 0u) << "a count of zero on a host with every feature fails";
+    }
+  }
 }
 } // namespace
 
 TEST(Wast, TheI32SuiteFilePassesEveryAssertionItHoldsAndCountsTheRest) {
   // 364 assert_return and 10 assert_trap run; 83 assert_invalid and 2 assert_malformed do not.
-  run_suite_file("i32.wast", 374, 10, {{"assert_invalid", 83}, {"assert_malformed", 2}}, 9);
+  run_suite_file("i32.wast", 374, 10, {{"assert_invalid", 83}, {"assert_malformed", 2}}, 9, 3);
 }
 
 TEST(Wast, TheI64SuiteFilePassesEveryAssertionItHoldsAndCountsTheRest) {
   // 374 assert_return and 10 assert_trap run; 29 assert_invalid and 2 assert_malformed do not.
-  run_suite_file("i64.wast", 384, 10, {{"assert_invalid", 29}, {"assert_malformed", 2}}, 9);
+  run_suite_file("i64.wast", 384, 10, {{"assert_invalid", 29}, {"assert_malformed", 2}}, 9, 3);
 }
 
 /* The eight scalar float and conversion files of the same commit. The counts are what the harness reads
@@ -1611,11 +1669,11 @@ TEST(Wast, TheI64SuiteFilePassesEveryAssertionItHoldsAndCountsTheRest) {
  * assert_trap runs, and only assert_invalid and assert_malformed are left out. The unguarded variants are
  * the two refused for each of the eight partial truncations of conversions.wast. */
 TEST(Wast, TheF32SuiteFilePassesEveryAssertionItHoldsAndCountsTheRest) {
-  run_suite_file("f32.wast", 2500, 0, {{"assert_invalid", 11}, {"assert_malformed", 2}}, 0);
+  run_suite_file("f32.wast", 2500, 0, {{"assert_invalid", 11}, {"assert_malformed", 2}}, 0, 4);
 }
 
 TEST(Wast, TheF64SuiteFilePassesEveryAssertionItHoldsAndCountsTheRest) {
-  run_suite_file("f64.wast", 2500, 0, {{"assert_invalid", 11}, {"assert_malformed", 2}}, 0);
+  run_suite_file("f64.wast", 2500, 0, {{"assert_invalid", 11}, {"assert_malformed", 2}}, 0, 4);
 }
 
 TEST(Wast, TheF32CmpSuiteFilePassesEveryAssertionItHoldsAndCountsTheRest) {
@@ -1642,7 +1700,7 @@ TEST(Wast, TheConversionsSuiteFilePassesEveryAssertionItHoldsAndCountsTheRest) {
 TEST(Wast, TheFloatMiscSuiteFilePassesEveryAssertionItHoldsAndCountsTheRest) {
   // Every function of this file at wg-3.0 is one instruction, so none is left out; the survey is in
   // design.md.
-  run_suite_file("float_misc.wast", 470, 0, {}, 0);
+  run_suite_file("float_misc.wast", 470, 0, {}, 0, 8);
 }
 
 GRJIT_TEST_MAIN()

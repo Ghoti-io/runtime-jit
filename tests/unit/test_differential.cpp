@@ -17,6 +17,7 @@
 
 #include "../int_fixture.h"
 #include "../float_fixture.h"
+#include "../feature_fixture.h"
 
 #include "../ir_eval.h"
 #include "../a64_sim.h"
@@ -83,6 +84,29 @@ std::string describe(const GRJIT_Function * f, uint64_t seed, const std::string 
   char head[96];
   std::snprintf(head, sizeof head, "seed %llu: ", static_cast<unsigned long long>(seed));
   return std::string(head) + what + "\n" + print(f);
+}
+
+/* The features whose arm an operation of `f` takes when it is allowed: the set a compile of `f` can
+ * record at most. Read off the function's own operations, not off the compiled code. */
+GRJIT_Features arms_possible(const GRJIT_Function * f) {
+  GRJIT_Features need = GRJIT_FEATURES_NONE;
+  for (size_t blk = 0; blk < grjit_function_block_count(f); blk++) {
+    size_t n = 0;
+    const GRJIT_Op * ops = grjit_function_block_ops(f, static_cast<GRJIT_BlockId>(blk), &n);
+    for (size_t i = 0; i < n; i++) {
+      switch (ops[i].kind) {
+        case GRJIT_OP_CLZ: need |= GRJIT_FEATURE_LZCNT; break;
+        case GRJIT_OP_CTZ: need |= GRJIT_FEATURE_BMI1; break;
+        case GRJIT_OP_POPCNT: need |= GRJIT_FEATURE_POPCNT; break;
+        case GRJIT_OP_FCEIL:
+        case GRJIT_OP_FFLOOR:
+        case GRJIT_OP_FTRUNC:
+        case GRJIT_OP_FNEAREST: need |= GRJIT_FEATURE_SSE4_1; break;
+        default: break;
+      }
+    }
+  }
+  return need;
 }
 
 } // namespace
@@ -500,7 +524,8 @@ TEST(Differential, GeneratedIntegerProgramsRunTheSameCompiledAndEvaluated) {
 #endif
   JitWorld w;
   size_t returned = 0, deopted = 0, divisions = 0, const_divisors = 0, const_dividends = 0,
-         negative_i32_imms = 0, multi_block = 0;
+         negative_i32_imms = 0, multi_block = 0, arm_programs = 0;
+  const size_t masks = featfx::every_subset_masks().size();
   for (uint64_t seed = 1; seed <= 3000; seed++) {
     IntGen g(seed * 0x9E3779B97F4A7C15ull);
     IntProgram prog = generate_int_program(g);
@@ -523,8 +548,9 @@ TEST(Differential, GeneratedIntegerProgramsRunTheSameCompiledAndEvaluated) {
       }
     }
     multi_block += grjit_function_block_count(f) > 1;
-    Compiled c(f, w.pages());
-    ASSERT_TRUE(c) << describe(f, seed, grjit_result_string(c.result));
+    // The six argument sets are drawn once, in the order the runs always drew them, so that every mask
+    // below runs the same ones.
+    std::vector<std::vector<uint64_t>> arg_sets;
     for (int run = 0; run < 6; run++) {
       std::vector<uint64_t> args;
       for (size_t i = 0; i < prog.params; i++) {
@@ -534,6 +560,18 @@ TEST(Differential, GeneratedIntegerProgramsRunTheSameCompiledAndEvaluated) {
         }
         args.push_back(v);
       }
+      arg_sets.push_back(args);
+    }
+    // Under every subset of the host's detected features: the results must be the evaluator's and so
+    // each other's, and the recorded set exactly the arms the function's operations allow.
+    for (GRJIT_Features mask : featfx::every_subset_masks()) {
+    Compiled c(f, w.pages(), nullptr, nullptr, nullptr, mask);
+    ASSERT_TRUE(c) << describe(f, seed, grjit_result_string(c.result));
+    const GRJIT_Features effective = featfx::detected() & ~mask & GRJIT_FEATURES_ALL;
+    ASSERT_EQ(grjit_code_features(c.code), effective & arms_possible(f))
+        << describe(f, seed, "the recorded set is not the arms the effective set allows");
+    arm_programs += grjit_code_features(c.code) != GRJIT_FEATURES_NONE;
+    for (const std::vector<uint64_t> & args : arg_sets) {
       auto compiled = intfx::run(c.code, w.ctx, args);
       ASSERT_EQ(compiled.fault, 0) << describe(f, seed, "the compiled code faulted in hardware");
       ireval::Result eval = ireval::eval(f, w.ctx, nullptr, args);
@@ -554,15 +592,20 @@ TEST(Differential, GeneratedIntegerProgramsRunTheSameCompiledAndEvaluated) {
         deopted++;
       }
     }
+    }
   }
-  // Run counts (of 3000 x 6 = 18000 runs) and static counts (over the 3000 generated programs).
+  // Run counts (of 3000 x 6 x the masks = 18000 runs per mask) and static counts (over the 3000 generated programs).
   std::printf("integer differential: per run: %zu returned, %zu guard exits; static, summed over the operations of the 3000 programs: "
               "%zu divisions, %zu with a constant divisor, %zu with a constant dividend, %zu i32 "
               "operations with a negative immediate; and %zu of the programs have more than one block\n",
       returned, deopted, divisions, const_divisors, const_dividends, negative_i32_imms, multi_block);
-  // Thresholds at about nine tenths of what the fixed seeds give (12267, 5733, 23328, 5876, 5454, 6425, 2531).
-  EXPECT_GT(returned, 11000u);
-  EXPECT_GT(deopted, 5000u);
+  std::printf("integer differential: every program run under each of the %zu subsets of the host's features; "
+              "%zu compiles took a feature arm\n", masks, arm_programs);
+  // Thresholds at about nine tenths of what the fixed seeds give (12267, 5733, 23328, 5876, 5454, 6425, 2531),
+  // the run counts once per mask.
+  EXPECT_GT(returned, 11000u * masks);
+  EXPECT_GT(deopted, 5000u * masks);
+  EXPECT_GT(arm_programs, 0u) << "the integer programs reach clz, ctz or popcnt with a feature allowed";
   EXPECT_GT(divisions, 21000u);
   EXPECT_GT(const_divisors, 5200u);
   EXPECT_GT(const_dividends, 4900u);
@@ -852,7 +895,8 @@ TEST(Differential, GeneratedFloatProgramsRunTheSameCompiledAndEvaluatedWithNansE
   GTEST_SKIP() << "the float operations are emitted for x86-64 SysV only; the arm64 and Win64 refusals are tested in testFloat_ir";
 #endif
   JitWorld w;
-  size_t returned = 0, deopted = 0, truncs = 0, converts = 0, compares = 0, multi_block = 0;
+  size_t returned = 0, deopted = 0, truncs = 0, converts = 0, compares = 0, multi_block = 0, arm_programs = 0;
+  const size_t masks = featfx::every_subset_masks().size();
   for (uint64_t seed = 1; seed <= 3000; seed++) {
     IntGen g(seed * 0x9E3779B97F4A7C15ull + 0xF10A7);
     FloatProgram prog = generate_float_program(g);
@@ -864,10 +908,9 @@ TEST(Differential, GeneratedFloatProgramsRunTheSameCompiledAndEvaluatedWithNansE
     converts += prog.converts;
     compares += prog.compares;
     multi_block += grjit_function_block_count(f) > 1;
-    Compiled c(f, w.pages());
-    ASSERT_TRUE(c) << describe(f, seed, grjit_result_string(c.result));
     static const std::vector<uint64_t> e32 = floatfx::f32_values(), e64 = floatfx::f64_values();
     static const std::vector<uint64_t> i32e = floatfx::int_values(true), i64e = floatfx::int_values(false);
+    std::vector<std::vector<uint64_t>> arg_sets;
     for (int run = 0; run < 6; run++) {
       std::vector<uint64_t> args;
       for (size_t i = 0; i < prog.params; i++) {
@@ -883,6 +926,19 @@ TEST(Differential, GeneratedFloatProgramsRunTheSameCompiledAndEvaluatedWithNansE
         }
         args.push_back(v);
       }
+      arg_sets.push_back(args);
+    }
+    // Under every subset of the host's detected features (up to sixteen): the same programs and the same
+    // arguments, results equal to the evaluator's and to each other's by bits with any two NaNs equal, and
+    // the recorded set exactly the arms the function's operations allow.
+    for (GRJIT_Features mask : featfx::every_subset_masks()) {
+    Compiled c(f, w.pages(), nullptr, nullptr, nullptr, mask);
+    ASSERT_TRUE(c) << describe(f, seed, grjit_result_string(c.result));
+    const GRJIT_Features effective = featfx::detected() & ~mask & GRJIT_FEATURES_ALL;
+    ASSERT_EQ(grjit_code_features(c.code), effective & arms_possible(f))
+        << describe(f, seed, "the recorded set is not the arms the effective set allows");
+    arm_programs += grjit_code_features(c.code) != GRJIT_FEATURES_NONE;
+    for (const std::vector<uint64_t> & args : arg_sets) {
       auto compiled = intfx::run(c.code, w.ctx, args);
       ASSERT_EQ(compiled.fault, 0) << describe(f, seed, "the compiled code faulted in hardware");
       ireval::Result eval = ireval::eval(f, w.ctx, nullptr, args);
@@ -905,13 +961,18 @@ TEST(Differential, GeneratedFloatProgramsRunTheSameCompiledAndEvaluatedWithNansE
         deopted++;
       }
     }
+    }
   }
   std::printf("float differential: per run: %zu returned, %zu guard exits; static, over the 3000 programs: "
               "%zu truncations, %zu conversions, %zu comparisons; %zu programs have more than one block\n",
       returned, deopted, truncs, converts, compares, multi_block);
-  // Thresholds at about nine tenths of what the fixed seeds give (10649, 7351, 3937, 8222, 4108, 2196).
-  EXPECT_GT(returned, 9500u);
-  EXPECT_GT(deopted, 6600u);
+  std::printf("float differential: every program run under each of the %zu subsets of the host's features; "
+              "%zu compiles took a feature arm\n", masks, arm_programs);
+  // Thresholds at about nine tenths of what the fixed seeds give (10649, 7351, 3937, 8222, 4108, 2196), the
+  // run counts once per mask.
+  EXPECT_GT(returned, 9500u * masks);
+  EXPECT_GT(deopted, 6600u * masks);
+  EXPECT_GT(arm_programs, 0u) << "the float programs reach a rounding with SSE4.1 allowed";
   EXPECT_GT(truncs, 3500u);
   EXPECT_GT(converts, 7400u);
   EXPECT_GT(compares, 3600u);
