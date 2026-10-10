@@ -42,6 +42,28 @@ build with none refuses them with `GRJIT_ERR_UNSUPPORTED`. The Windows conventio
 and not on a Windows machine. Every header is labelled `free`: a consumer requires
 the exact version it was built against.
 
+## The integer operations
+
+Besides `I64`, `REF` and `PTR` there is `I32`, a 32-bit integer kept zero-extended in its
+64-bit word, and the integer table of WebAssembly at both widths: `const`, `add`, `sub`,
+`mul`, `and`, `or`, `xor`, `shl`, `shr_s`/`shr_u` (`SAR`/`SHR`), `eqz` (`CMP EQ x, #0`),
+`eq`, `ne` and the signed and unsigned orderings (`CMP`), `clz`, `ctz`, `popcnt`, `rotl`,
+`rotr`, `extend8_s`, `extend16_s`, `i64.extend32_s`, `div_s`, `div_u`, `rem_s`, `rem_u`, and
+the conversions `i32.wrap_i64` (`WRAP`) and `i64.extend_i32_s`/`_u` (`EXTEND_S`, `EXTEND_U`).
+The width of an operation is its destination's; shift and rotate counts are taken modulo the
+width. The four divisions are *partial*: the frontend writes the guards in front of the
+operation (a `GUARD` that the divisor is not zero, and for `div_s` that not (`a == MIN` and
+`b == -1`)) and the verifier refuses a division without them; `rem_s` of `MIN % -1` is 0.
+They are emitted for x86-64 SysV as real 32-bit and 64-bit instructions; the arm64 backend and
+the Windows flavour refuse a function that uses them with `GRJIT_ERR_UNSUPPORTED`, for now.
+`documentation/design.md` has the decisions and what was rejected.
+
+They are checked against the WebAssembly spec suite: `tools/wasm/fetch.sh` fetches `i32.wast`
+and `i64.wast` at the commit of the tag `wg-3.0` into `third_party/` (the harness, in
+`tests/unit/test_wast.cpp`, fails without them), and every `assert_return` and `assert_trap`
+runs through the IR. Counts at that tag: `i32.wast` 374 passed, 85 excluded (the
+`assert_invalid` and `assert_malformed` it cannot run), 0 failed; `i64.wast` 384, 31, 0.
+
 ## Example
 
 ```c
@@ -100,13 +122,13 @@ this library:
 
 | Target | Does |
 | --- | --- |
-| `test` | build, `check-symbols`, `check-aliasing` (gcc only), `check-stamps`, `check-fp-contract`, the gates below, the planted-defect builds, the examples, the unit tests (the differential, the call tests and the tail-call tests among them), and one smoke run of the benchmark |
+| `test` | (needs `tools/wasm/fetch.sh` run once, for the Wasm suite) build, `check-symbols`, `check-aliasing` (gcc only), `check-stamps`, `check-fp-contract`, the gates below, the planted-defect builds, the examples, the unit tests (the differential, the call tests and the tail-call tests among them), and one smoke run of the benchmark |
 | `examples` | build each program under `examples/` and run it; a failing example fails `test` |
 | `check-labels` | fail if a public header has no `@stability free` label (every header here is `free`) |
 | `check-edges` | fail on any `#include` or shared-object dependency on a Ghoti library other than `cutil`, `runtime-core` and this one |
 | `check-fp-contract` | fail if any compile-flag set (the C and C++ flags, the library's, the sanitizer and fuzz builds') lacks `-ffp-contract=off`, ends with another contraction mode or uses `-ffast-math`: a fused multiply-add rounds once where the interpreter's C rounds twice, so a float computed by compiled code would differ on arm64 or under clang |
 | `check-gates` | run each gate against a planted defect and a control, and against an empty tree, and fail unless each behaves |
-| `check-planted` | build the library with a planted backend defect (`SHR` and `SAR` swapped; every stack-map slot 8 bytes off; a live reference left out; and in the Windows flavour a callee-saved register used, no shadow space, an unwind table never registered; for calls, a reference left out of a call site's map, a callee-saved register clobbered, a native-stack check that omits the frame; for tail calls, a stack argument not copied, the hook's arguments area left out of its map, no padding; for calls to natives, the walk start stored after the call, the stack arguments not popped, their area not rounded, the native-stack check without it, an argument one word too high; the same defects of the arm64 convention, 20 to 29, are listed in `tools/arm64-plants.txt` and run, by their tests, by `suite/tools/xarch/jit-arm64.sh` under qemu) and require the differential, the read-back, the call tests, the tail-call tests, the native-call tests or the Win64 structural tests to fail on it, and to pass without it |
+| `check-planted` | build the library with a planted backend defect (`SHR` and `SAR` swapped; every stack-map slot 8 bytes off; a live reference left out; and in the Windows flavour a callee-saved register used, no shadow space, an unwind table never registered; for calls, a reference left out of a call site's map, a callee-saved register clobbered, a native-stack check that omits the frame; for tail calls, a stack argument not copied, the hook's arguments area left out of its map, no padding; for calls to natives, the walk start stored after the call, the stack arguments not popped, their area not rounded, the native-stack check without it, an argument one word too high; for the integer operations, the verifier not requiring a division's guards, `idiv` reached on `MIN % -1`, an i32 shift count masked to 64, an i32 addition done in 64 bits, swapped operands of an i32 subtraction and comparison; the same defects of the arm64 convention, 20 to 29, are listed in `tools/arm64-plants.txt` and run, by their tests, by `suite/tools/xarch/jit-arm64.sh` under qemu) and require the differential, the read-back, the call tests, the tail-call tests, the native-call tests or the Win64 structural tests to fail on it, and to pass without it |
 | `check-planted-calls` | plant, in a scratch copy of `runtime-core` or of this library, the defects of the call protocol (a frame missed in a rebuild, an early free, a short reservation, no status test after a pointer call, a reference left out of a call site's map, the walk start not stored, retired code entered, a token or an arity not checked, a refused rebuild ignored, a derived argument not recorded; for tail calls, a refused hook ignored, the walk start not stored before the hook, the return address left where it was, the verifier not needing the hook; for calls to natives, a status not tested, the status exit built from the state before the call, the result stored after the status test, the cause without the native bit, the stack area not rounded or not popped, an argument at the wrong offset, references or derived pointers left out of a native site's map, the stack check without the area or without the native's use, the verifier not checking an arity, a type or a state, and the two early frees run against the native tests alone; the narrowing of every hook's and the poll helper's 32-bit answer, in each place a function tests it; and, for the arm64 emitter, the indices and kinds of a call's, a tail call's and a native's sites and its large offsets, which the host runs through the metadata and the words it emits for arm64) and require a test to fail on each; first run it against edits of known outcome so that a missed one, a build failure and a hang each show as what they are, not as a catch. `--target=arm64` does the same for the mutations of `src/arm64/`, built with the cross compiler and run under qemu (in the container of `suite/tools/xarch/jit-arm64.sh`, which runs it); a catch by the pin test alone is PIN-ONLY, which is not one |
 | `bench` | run the benchmark harness in full; it prints a calibration result first |
 | `test-asan`, `test-tsan`, `test-valgrind-quiet` | the same tests under ASan+UBSan, ThreadSanitizer and Valgrind |
@@ -118,7 +140,7 @@ running a program that includes only the umbrella header.
 
 ## Status
 
-The IR, the verifier, the printer, the x86-64 and arm64 baseline
+The IR (with `I32` and the integer operations, on x86-64 SysV), the verifier, the printer, the x86-64 and arm64 baseline
 backends (the Windows one with its unwind registration) and their assemblers, the metadata, W^X code memory, the gates, the examples and the
 benchmark harness are in, and so are the parts that need an engine: wiring it
 into `lang-tang` (story 15), tier-up, compiled-code reference counting and the

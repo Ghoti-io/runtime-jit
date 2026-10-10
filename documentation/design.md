@@ -4,7 +4,7 @@
 verifier and printer, the x86-64 (Linux and Windows) and arm64 baseline backends
 with their assemblers, the stack maps and deopt records it emits in
 `runtime-core`'s format, W^X code memory and the Windows unwind registration,
-the gates, the planted-defect proofs and the benchmark harness, taken
+the integer operations and the Wasm spec-suite harness, the gates, the planted-defect proofs and the benchmark harness, taken
 from the runtime stack's architecture spine (AD-2, AD-4, AD-9, AD-12, AD-13,
 AD-14, AD-17 to AD-19, AD-21, AD-22, AD-26). What is not here is listed at the
 end.
@@ -1502,6 +1502,181 @@ Windows, which this run does not have, and the probe is therefore run and not sh
 that hash the code of a call through a pointer mask the address of `grjit_call_target_ok`, which is 8 bytes only
 where the process puts the library above 4 GiB; they were measured, as the earlier ones, in a position-independent
 build.)
+## The integer operations: `I32`, the divisions and the Wasm suite (spec-runtime-float, story 2)
+
+The IR had 64-bit integers and no divide, remainder, bit counting, rotation or sign
+extension. lang-wasm cannot be built on that, Tang's integer `/` and `%` cannot be compiled, and
+nothing checked the numeric semantics against anything but an evaluator written by the same hand.
+`numeric-operations.md` of the spec lists what is added; this section says how, and what was
+rejected.
+
+**The type.** `GRJIT_TYPE_I32` is a 32-bit integer **zero-extended in its 64-bit slot at all
+times**: the upper 32 bits are 0 after every operation that produces one, on entry as a
+parameter (the entry masks the word it is given, so garbage above bit 31 in an argument is
+ignored), in a call result (the receiving frame cuts it) and in a helper's result (a C function
+returning `uint32_t` leaves the upper half of `rax` as it likes). So an entry word, a `RET`, a
+`BITCAST` and the helper ABI stay `uint64_t` words with no undefined half, and a comparison of
+two slots is the comparison of two numbers. An `I32` is never a reference and never in a stack
+map; in a frame state its location carries `GRCORE_REPR_I32` (an `I64` keeps `BITS`, so the
+metadata and the pins of every existing function are unchanged). The rejected alternative is an
+upper half that is "don't care" and is masked where it is read: it makes every consumer (the
+entry, the call, the frame-state conversion, a test comparing words) mask, and the one that
+forgets is a defect nothing in the type shows. The cost of the chosen one is a `mov r32, r32` at
+a few boundaries, and nothing on the arithmetic, because a 32-bit instruction clears the upper
+half itself.
+
+The enum value 3 was `GRJIT_TYPE_COUNT`, and `GRJIT_NATIVE_NO_RESULT` is defined as it. A
+client compiled against 3 must still read "no result", so 3 stays the sentinel and is no
+register type (`GRJIT_TYPE_RESERVED_NO_RESULT`), `I32` is 4, and `COUNT` is 5. The numbers of
+every existing type, operation and comparison are pinned by a test.
+
+**The width is the destination's.** An `I32` destination makes `ADD`, `SHL`, `NEG`, `CLZ`,
+`ROTL`, `DIV_S` and the rest a 32-bit operation over `I32` operands (an immediate is read as its
+low 32 bits and must be one of the two spellings of a 32-bit pattern, `[INT32_MIN,
+UINT32_MAX]`); an `I64` destination is the 64-bit operation, with the bytes it always had. The
+two widths never mix: `WRAP` (`i32.wrap_i64`), `EXTEND_S` and `EXTEND_U` convert, and `BITCAST`
+refuses an `I32` destination because it would make one that is not zero-extended. `CMP` reads
+the width of its register operands and writes 0 or 1 into an `I32` or an `I64` register
+(`i64.lt_s` answers an `i32` in Wasm); `eqz` is `CMP EQ x, #0`. A shift or rotate count is taken
+modulo the width, and that is not code: it is what the 32-bit instruction does. A `LOAD` into an
+`I32` is a zero-extending load of at most 32 bits, a `STORE` of one writes its low bits.
+
+**Real 32-bit instructions.** The i32 operations are `add eax, ecx` and `shl eax, cl`, not the
+64-bit ones followed by a mask. Masking afterwards is a second instruction on every operation and
+a way to be wrong: `1 << 32` in a 64-bit shift is `0x100000000`, whose low half is 0, and Wasm
+says 1. With the 32-bit shift the count is masked to five bits by the hardware, `div` divides
+`edx:eax`, and `rotl`/`rotr` are `rol`/`ror`. Two of the planted defects are exactly the two
+ways to get this wrong (40 and 41).
+
+`clz`, `ctz` and `popcnt` are the x86-64-v1 sequences: `bsr`/`bsf` with the zero case handled by
+a `cmov` of a constant chosen so that `bsr(x) ^ (width - 1)` gives the width, and the parallel
+bit count. The LZCNT, BMI1 and POPCNT forms and the feature mask are the CPU-feature story's;
+these stay as the fallback it needs, and are run on every host.
+
+**Guards are ordinary IR; the operation never traps.** `DIV_S`, `DIV_U`, `REM_S` and `REM_U` are
+partial: a zero divisor, and `MIN / -1` in `DIV_S`, are traps in Wasm and `#DE` in the hardware.
+The IR has no operation that traps or has undefined behaviour in hardware, so the frontend writes
+the guards in front of the operation with the `GUARD` the IR already has (it fires when its operand
+is 0): the divisor is not zero, and for `DIV_S` additionally not (`a == MIN` and `b == -1`). The
+verifier refuses a division it cannot see the guards in front of. Which trap fired is told by the
+guard's site (its frame state's identity), not by a new exit code, so the engine decides what a
+trap means. `REM_S` of `MIN % -1` is 0 and is not a trap in Wasm; `idiv` faults on it, so the
+emitter compares the divisor with -1 and skips the `idiv` (the result is 0). That branch is in
+the operation and not in a guard, because there is nothing to deopt.
+
+*The verifier's rule* (`check_partial` in `src/ir/verify.c`) reads one basic block in order.
+A `GUARD` passing records a fact, valid until a register it is about is assigned again:
+non-zero(d) when the guard's operand is `d` itself or a `CMP NE d, #0`, `CMP UGT d, #0`,
+`CMP ULT #0, d` of it, not changed since the comparison; no-overflow(a, b) when the guard's
+operand is `CMP EQ t, #0` with `t = AND(CMP EQ a, #MIN, CMP EQ b, #-1)`, or `OR(CMP NE a, #MIN,
+CMP NE b, #-1)`, in either order; and, for a constant divisor of -1, not-MIN(a) from a
+`CMP NE a, #MIN`. A constant divisor is judged as it stands (0 is refused; anything but -1
+cannot overflow). A fact is a position in the run of operations, and "assigned again" is a later
+position, so one comparison answers it; the arrays are allocated only for a function that has a
+division. The rule is deliberately about shapes a frontend writes: a guard in another block (a
+fact does not cross a branch), a guard whose operand was computed some other way, or one made
+stale by an assignment is refused, with a reason that names the operation and says what it needs.
+Each rejection has a negative test, for each of the four operations at each width and for the
+missing overflow guard.
+
+*Rejected:* **an implicit-trap divide** (the operation traps, the engine installs a signal
+handler and finds the site from the faulting address): it needs a fault-to-site table, a
+`SIGFPE` handler that every embedding of the library would have to coexist with, and gives the
+trap an identity only by where it faulted; it also makes "no IR operation traps" false. **A
+builder that adds the guards itself**: the library would then decide what a trap's frame state is
+(the guard has one, and it is the engine's: the interpreter resumes from it), and could not
+share one guard between two operations or let the engine hoist it. The guard being explicit
+means a test can leave one out, which the planted defect 38 does. **Masking instead of 32-bit
+instructions**: above.
+
+**Other backends.** The arm64 emitter and the Win64 flavour (which shares the SysV emitter) refuse
+a function that has an `I32` register or any of the new operations with `GRJIT_ERR_UNSUPPORTED`,
+by name and before anything is emitted, and each has an explicit case for every new operation,
+so nothing falls through to a 64-bit operation (a 64-bit `ADD` on an `I32` would be silently
+wrong). Story 5 of the float spec replaces the refusals. `testInt_ir` shows both on every host,
+through `grjit_emit_for`, and the native compile where the host's backend is not SysV.
+
+**Existing bytes.** No function without an `I32` or a new operation changes by a byte: the pins
+of `testPin` (x86-64, arm64, Win64) are unchanged, the generators of `ir_gen.h` and
+`callable_gen.h` and their draw order are untouched, and the new emission is new functions and new
+`switch` arms (`emit_binary`, `load_operand`, `store_result` and `cmp_cond` are as they were).
+`check-planted-calls` matches its anchors by exact text; all 123 still occur once.
+
+**The tests.** `testInt_ir`: answers worked by hand from the Wasm semantics (137, at both
+widths, including shift counts over the width, `clz`/`ctz` of 0, `popcnt` of all ones, the
+extensions, `MIN / -1`, `MIN % -1`); every operation at both widths over the boundary values
+(0, 1, -1, MIN, MAX, the widths and one either side, alternating bits; 32 values squared for i32,
+48 for i64, more than 10,000 runs) against the evaluator; the traps by site; the typing rules;
+the guard rule, accepted and refused; an `I32` through a call, a tail call and the entry in
+registers and on the stack with garbage above bit 31; a frame state's representation; a helper
+result; a native table refusing an `I32`. `testDifferential` gains 3,000 generated integer
+programs (`IntGen`, not `ir_gen.h`) run six times each over the boundary values: arithmetic,
+shifts and rotates by any count, comparisons, bit counting, sign extension, wrap and extend,
+and the four divisions with their guards in both shapes; a guard that fires is compared by
+its frame state and its site (a run: 12,990 returns, 5,010 guard exits, 14,566 divisions). The
+evaluator (`tests/ir_eval.h`) has no builtin in it that a compiler could turn into the
+backend's own instruction. A hardware fault in a compiled function (a `SIGFPE` from an `idiv`
+that should not be reached) is caught by the test and reported as a failure with the signal,
+not as a dead test program (`tests/int_fixture.h`).
+
+**The Wasm spec suite as the oracle.** `tools/wasm/fetch.sh` fetches `test/core/i32.wast` and
+`i64.wast` and `test/LICENSE` of `WebAssembly/spec` at **`9d36019973201a19f9c9ebb0f10828b2fe2374aa`,
+the commit the tag `wg-3.0` names** (checked with `git ls-remote`, 2026-10-10), into the ignored
+`third_party/`. The commit and the SHA-256 of each file are in `tools/wasm/`, and the script
+refuses a file whose digest differs: a tag can be moved, a commit cannot. The repository's
+`LICENSE` puts `test/` under the Apache License 2.0 (`document/` under the W3C Software and
+Document Notice and License, `interpreter/` under Apache-2.0, `papers/` under CC BY 4.0); only
+files of `test/` are fetched and none is copied into a repository of ours. `suite/install.sh
+--test` runs every `tools/*/fetch.sh`, this one included.
+
+`tests/unit/test_wast.cpp` is a reader for exactly the forms the two files use (a `module` of
+exported single-instruction functions, `assert_return`, `assert_trap`, a bare `invoke`, and the
+`i32.const`/`i64.const` literals in decimal and hex, signed, with underscores). It is no Wasm
+frontend and no API, and lang-wasm's is its own spec. Each export becomes an IR function with
+the guards of its partial operation (`tests/int_fixture.h`), is verified and compiled, and an
+`assert_return` compares the **whole result word**, so an `i32` with a non-zero upper half fails;
+an `assert_trap` expects the compiled code to leave through a guard and the guard's site to name
+the trap the suite's message names (`integer divide by zero`, `integer overflow`). What it cannot
+run is **counted as excluded with its reason and never as passed**: `assert_invalid`,
+`assert_malformed`, `assert_exhaustion`, `assert_unlinkable`, `register`, `module binary` and
+`module quote`, and a function whose body is not one supported instruction over its parameters,
+with every assertion about it. A top-level form that is neither handled nor on that list **fails
+the run** and is named, so a form the reader does not know cannot vanish into silence; so does a
+literal or a result form it cannot read, and an export whose signature the harness's table
+disagrees with. A missing suite fails on a host that runs the compiled code, naming the script;
+it is never skipped there. The harness's own control: a corrupted value, a value one bit above
+the type, a trap where a value is the answer and the reverse, the wrong trap in each direction,
+an argument or result of the wrong type, an export that is not there and a form it cannot read
+each fail; the excluded forms are counted; and for every partial operation the harness builds
+the same function with a guard left out (both, the divisor's, and for `div_s` the overflow one)
+and requires the verifier to refuse it.
+
+Counts at `wg-3.0` (x86-64 SysV, GCC 14.2; pinned in the test):
+
+| File | assert_return | assert_trap | passed | excluded | failed |
+| --- | ---: | ---: | ---: | --- | ---: |
+| `i32.wast` | 364 | 10 | 374 | 85 (83 `assert_invalid`, 2 `assert_malformed`) | 0 |
+| `i64.wast` | 374 | 10 | 384 | 31 (29 `assert_invalid`, 2 `assert_malformed`) | 0 |
+
+On a host that does not run the code the reader, the mapping into the IR and the verifier's
+rule still run (the assertions that need the code are excluded as "not run on this host"),
+which is what a real arm64 machine can do of it.
+
+**Planted defects 38 to 42** (`check-planted`, each caught by the instrument named with its
+control passing): 38 the verifier does not require the guards (the negative tests and the
+harness's unguarded variants); 39 `idiv` is reached on `MIN % -1` (a `SIGFPE`, reported by the
+tests); 40 an i32 shift count masked to 64 (a 64-bit shift cut to 32 bits afterwards); 41 an i32
+addition done in 64 bits, so the upper half is not zero; 42 the operands of an i32 subtraction
+and of an i32 ordered comparison swapped. 40 to 42 are also caught by the integer differential.
+The arm64 and Win64 plant lists are untouched.
+
+**Known limits.** The verifier recognises a guard in the shapes above and in the same block; a
+frontend that computes the guard condition another way gets a reason and writes it in a shape the
+rule knows, which is the price of a rule a verifier can check without a dataflow analysis. A
+division by a constant zero is refused (a function that always traps is written as a trap). An
+`I32` is not a native's argument or result, and not a `REF`-like value. `i64.extend32_s` has no
+32-bit form.
+
 ## Gates
 
 `make check-labels` requires every header to carry exactly one `@stability free`
@@ -1581,8 +1756,10 @@ interpreter).
   asserted, recorded at every hook and native, and never expected as a fault) and a real
   kernel's W^X are not exercised.
 - An ahead-of-time C backend, a Wasm backend, JIT hardening, a
-  register allocator, any pass, SSA, inlining, unboxing, floating point, SIMD,
-  32-bit and 8-bit values.
+  register allocator, any pass, SSA, inlining, unboxing, floating point (story 3 of the
+  float spec), SIMD, 8-bit values. (32-bit integers and the integer divide are here: above.)
+- **The integer operations on arm64 and Win64**: refused by name until story 5 of the float
+  spec; and the LZCNT, BMI1, POPCNT and SSE4.1 forms and the feature mask, which are story 4's.
 - **An in-JIT pause.** A poll's non-zero answer ends the function; see above.
 - **The AD-21 prologue check as more than a hook.**
 - **A fuzzer**, for the reason above.
