@@ -1,13 +1,20 @@
 /**
  * @file
  *
- * The Wasm spec-suite harness (spec-runtime-float, story 2): reads the WebAssembly spec suite's
- * `i32.wast` and `i64.wast` at the `wg-3.0` tag, turns each exported single-instruction function
- * into an IR function (with the guards of a partial operation written in front of it), compiles it
- * and runs every `assert_return` and `assert_trap` against the suite's own expectations. This is
- * the independent oracle of the integer IR: the suite is not ours, and says what Wasm means.
+ * The Wasm spec-suite harness (spec-runtime-float, stories 2 and 3): reads the WebAssembly spec
+ * suite's scalar numeric files at the `wg-3.0` tag (`i32`, `i64`, and the eight float and conversion
+ * files `f32`, `f64`, `f32_cmp`, `f64_cmp`, `f32_bitwise`, `f64_bitwise`, `conversions`,
+ * `float_misc`), turns each exported single-instruction function into an IR function (with the
+ * guards of a partial operation written in front of it), compiles it and runs every `assert_return`
+ * and `assert_trap` against the suite's own expectations. This is the independent oracle of the
+ * integer and float IR: the suite is not ours, and says what Wasm means.
  *
- * It is a reader for exactly the forms these two files use, not a Wasm frontend and no API. What it
+ * A float result is compared as the suite says: `nan:canonical` and `nan:arithmetic` are classes of
+ * NaN (the quiet bit and no other payload bit; the quiet bit and any payload), and everything else,
+ * a NaN with a stated payload included, is bit for bit. A float literal is converted with `strtof`
+ * for an `f32` (never `strtod` and a cast, which rounds twice).
+ *
+ * It is a reader for exactly the forms these files use, not a Wasm frontend and no API. What it
  * cannot run is counted as excluded, with its reason, and never as passed: `assert_invalid`,
  * `assert_malformed`, `assert_exhaustion`, `assert_unlinkable`, `register`, `module binary` and
  * `module quote`, and a function whose body is not one supported instruction over its parameters
@@ -18,12 +25,14 @@
  * Copyright 2026 by Corey Pennycuff
  */
 
-#include "../int_fixture.h"
+#include "../float_fixture.h"
 
 #include "../../src/code/code_internal.h"
 
 #include <cctype>
+#include <cerrno>
 #include <cinttypes>
+#include <cstdlib>
 #include <cstdio>
 #include <fstream>
 #include <memory>
@@ -31,8 +40,9 @@
 
 using namespace intfx;
 
-/* The harness runs the compiled code where the integer operations are emitted: x86-64 SysV. Elsewhere
- * (arm64, Win64) the compile is refused by name (testInt_ir shows it) and what is left to do is the
+/* The harness runs the compiled code where the integer and float operations are emitted: x86-64 SysV.
+ * Elsewhere (arm64, Win64) the compile is refused by name (testInt_ir and testFloat_ir show it) and
+ * what is left to do is the
  * reader, the mapping into the IR and the verifier's guard rule, which run wherever the suite is. */
 #if defined(__x86_64__) && defined(__linux__)
 constexpr bool kExecutes = true;
@@ -41,6 +51,9 @@ constexpr bool kExecutes = false;
 #endif
 
 namespace wast {
+
+/* Why an instruction is left out, when neither table has it. */
+const char * const kOutsideTables = "an instruction outside the integer and float tables";
 
 /* ---- S-expressions ------------------------------------------------------------------------ */
 
@@ -243,6 +256,114 @@ bool parse_int(const std::string & text, unsigned bits, uint64_t * out) {
   return true;
 }
 
+/* A float as the suite writes one, for a float of `bits` (32 or 64) bits: decimal, hexadecimal
+ * (`0x1.8p1`), `inf`, `nan`, `nan:0xHEX` (the payload, exact bits) and, in an expected result only
+ * (`allow_class`), `nan:canonical` and `nan:arithmetic`; a sign, and underscores. Answers the bits,
+ * and for a class the NaN class asked for. The decimal and the hexadecimal forms go through `strtof`
+ * for an f32 and `strtod` for an f64: converting an f32 literal by `strtod` and a cast rounds twice
+ * (a decimal just above the midpoint of two floats is that midpoint as a double, and the cast then
+ * rounds the tie to even), and is not the number the suite means. */
+enum class NanClass { None, Canonical, Arithmetic };
+
+bool parse_float(const std::string & text, unsigned bits, bool allow_class, uint64_t * word,
+    NanClass * cls) {
+  std::string t;
+  for (char c : text) {
+    if (c != '_') {
+      t += c;
+    }
+  }
+  *cls = NanClass::None;
+  size_t k = 0;
+  bool negative = false;
+  if (k < t.size() && (t[k] == '+' || t[k] == '-')) {
+    negative = t[k] == '-';
+    k++;
+  }
+  const std::string body = t.substr(k);
+  const uint64_t sign = negative ? (bits == 32 ? 0x80000000ull : 0x8000000000000000ull) : 0;
+  const uint64_t exp = bits == 32 ? 0x7F800000ull : 0x7FF0000000000000ull;
+  const uint64_t quiet = bits == 32 ? 0x00400000ull : 0x0008000000000000ull;
+  const uint64_t fraction = bits == 32 ? 0x007FFFFFull : 0x000FFFFFFFFFFFFFull;
+  if (body == "inf") {
+    *word = sign | exp;
+    return true;
+  }
+  if (body == "nan") {
+    *word = sign | exp | quiet;
+    return true;
+  }
+  if (body == "nan:canonical" || body == "nan:arithmetic") {
+    if (!allow_class) {
+      return false;
+    }
+    *cls = body == "nan:canonical" ? NanClass::Canonical : NanClass::Arithmetic;
+    *word = sign | exp | quiet;
+    return true;
+  }
+  if (body.rfind("nan:0x", 0) == 0) {
+    uint64_t payload = 0;
+    if (!parse_int(body.substr(4), 64, &payload) || payload == 0 || payload > fraction) {
+      return false;
+    }
+    *word = sign | exp | payload;
+    return true;
+  }
+  // A number: it starts with a digit (or a point), and strtof/strtod must use all of it.
+  if (body.empty() || !(std::isdigit(static_cast<unsigned char>(body[0])) || body[0] == '.')) {
+    return false;
+  }
+  for (char c : body) {
+    if (!(std::isxdigit(static_cast<unsigned char>(c)) || c == '.' || c == 'x' || c == 'X' ||
+            c == 'p' || c == 'P' || c == '+' || c == '-')) {
+      return false;
+    }
+  }
+  const char * begin = t.c_str();
+  char * end = nullptr;
+  errno = 0; // an out-of-range result (a subnormal, a zero, an infinity) is still the correctly rounded value
+  if (bits == 32) {
+    float f = std::strtof(begin, &end);
+    if (end == begin || *end != '\0') {
+      return false;
+    }
+    uint32_t b;
+    std::memcpy(&b, &f, sizeof b);
+    *word = b;
+  } else {
+    double d = std::strtod(begin, &end);
+    if (end == begin || *end != '\0') {
+      return false;
+    }
+    std::memcpy(word, &d, sizeof d);
+  }
+  return true;
+}
+
+/* What the suite wrote for a value: its type, its bits, and a NaN class for an expected result. */
+struct Value {
+  std::string type;
+  uint64_t word = 0;
+  NanClass nan = NanClass::None;
+};
+
+/* The expected result `want` against `got`, a word of `type`: bit for bit, except a class. */
+bool value_matches(const Value & want, uint64_t got) {
+  if (want.nan == NanClass::None) {
+    return got == want.word;
+  }
+  const unsigned width = want.type == "f32" ? 32 : 64;
+  const uint64_t quiet = width == 32 ? 0x00400000ull : 0x0008000000000000ull;
+  const uint64_t fraction = width == 32 ? 0x007FFFFFull : 0x000FFFFFFFFFFFFFull;
+  if (width == 32 && (got >> 32) != 0) {
+    return false; // an f32 is zero-extended in its word
+  }
+  if (!ireval::is_nan_bits(width, got) || (got & quiet) == 0) {
+    return false;
+  }
+  return want.nan == NanClass::Arithmetic || (got & fraction) == quiet;
+}
+
 /* ---- The harness -------------------------------------------------------------------------- */
 
 struct Export {
@@ -337,17 +458,27 @@ class Harness {
   std::string current_;                       // the id of the latest module
 };
 
-/* A numeric constant node `(i32.const N)` / `(i64.const N)`; false if it is neither. */
-bool constant(const Node & n, std::string * type, uint64_t * word) {
+/* A numeric constant node `(i32.const N)`, `(i64.const N)`, `(f32.const X)` or `(f64.const X)`; false if it
+ * is none of them or its text is not a value of its type. */
+bool constant(const Node & n, bool allow_class, Value * out) {
   if (!n.list || n.kids.size() != 2 || n.kids[1].list) {
     return false;
   }
   const std::string & h = n.head();
-  if (h != "i32.const" && h != "i64.const") {
+  if (h != "i32.const" && h != "i64.const" && h != "f32.const" && h != "f64.const") {
     return false;
   }
-  *type = h.substr(0, 3);
-  return parse_int(n.kids[1].atom, h == "i32.const" ? 32 : 64, word);
+  out->type = h.substr(0, 3);
+  out->nan = NanClass::None;
+  if (h[0] == 'i') {
+    return parse_int(n.kids[1].atom, h == "i32.const" ? 32 : 64, &out->word);
+  }
+  return parse_float(n.kids[1].atom, h == "f32.const" ? 32 : 64, allow_class, &out->word, &out->nan);
+}
+
+const char * type_word(GRJIT_Type t) {
+  return t == GRJIT_TYPE_I32 ? "i32" : t == GRJIT_TYPE_I64 ? "i64" : t == GRJIT_TYPE_F32 ? "f32"
+         : t == GRJIT_TYPE_F64 ? "f64" : "?";
 }
 
 /* `(func $id? (export "n")* (param $x T)* (result T)? (i32.add (local.get $x) (local.get $y)))`. */
@@ -421,15 +552,19 @@ bool Harness::function(const Node & n, Instance * inst) {
     add(true, "a function body that is not a single instruction over its parameters", instr);
     return true;
   }
-  WasmOp op = build_wasm_op(instr);
+  bool float_table = true;
+  WasmOp op = floatfx::build_float_op(instr);
   if (op.function == nullptr) {
-    exclude("an instruction outside the integer table");
-    add(true, "an instruction outside the integer table", instr);
+    float_table = false;
+    op = build_wasm_op(instr);
+  }
+  if (op.function == nullptr) {
+    exclude(kOutsideTables);
+    add(true, kOutsideTables, instr);
     return true;
   }
   // The suite's signature and the table's must be the same one.
-  const bool wide_result = op.result == GRJIT_TYPE_I64;
-  const std::string want_result = wide_result ? "i64" : "i32";
+  const std::string want_result = type_word(op.result);
   if (op.params != param_types.size() || want_result != result) {
     grjit_function_destroy(op.function);
     fail(n, "the harness's table gives " + instr + " " + std::to_string(op.params) + " parameters and " +
@@ -440,7 +575,7 @@ bool Harness::function(const Node & n, Instance * inst) {
   }
   for (size_t k = 0; k < param_types.size(); k++) {
     const GRJIT_Type t = grjit_function_vreg_type(op.function, static_cast<GRJIT_VReg>(k));
-    if ((t == GRJIT_TYPE_I32 ? "i32" : "i64") != param_types[k]) {
+    if (std::string(type_word(t)) != param_types[k]) {
       grjit_function_destroy(op.function);
       fail(n, "the harness's table gives parameter " + std::to_string(k) + " of " + instr +
                   " another type than the suite");
@@ -456,7 +591,22 @@ bool Harness::function(const Node & n, Instance * inst) {
     return true;
   }
   // The control of the guard rule: the same operation with a guard left out must be refused.
-  if (op.partial) {
+  if (op.partial && float_table) {
+    // A truncation: with no range guard, and with the NaN guard alone, the verifier refuses it.
+    // (The range guard alone is accepted: ordered compares keep a NaN out too.)
+    floatfx::TruncGuards variants[2] = {{false, false}, {true, false}};
+    for (int v = 0; v < 2; v++) {
+      WasmOp bare = floatfx::build_float_op(instr, variants[v]);
+      char why[256] = {0};
+      GRJIT_Result r = grjit_function_verify(bare.function, nullptr, why, sizeof why);
+      report_.guard_checks++;
+      if (r == GRJIT_OK) {
+        fail(n, "the verifier accepts " + instr + " with its range guard left out (" +
+                    (v == 0 ? "no guard at all" : "the NaN guard alone") + ")");
+      }
+      grjit_function_destroy(bare.function);
+    }
+  } else if (op.partial) {
     Guards variants[3] = {{false, false}, {false, true}, {true, false}};
     for (int v = 0; v < 3; v++) {
       if (v == 2 && instr.find("div_s") == std::string::npos) {
@@ -478,7 +628,7 @@ bool Harness::function(const Node & n, Instance * inst) {
   bool first = true;
   for (const std::string & name : names) {
     Export * e = (*inst)[name].get();
-    e->op = first ? op : build_wasm_op(instr);
+    e->op = first ? op : (float_table ? floatfx::build_float_op(instr) : build_wasm_op(instr));
     first = false;
     if (world_ != nullptr) {
       GRJIT_CompileOptions o{};
@@ -564,17 +714,16 @@ bool Harness::invocation(const Node& n, std::vector<uint64_t> * args, std::strin
     return false;
   }
   for (size_t a = 0; a < given; a++) {
-    std::string type;
-    uint64_t word = 0;
-    if (!constant(n.kids[k + 1 + a], &type, &word)) {
-      *why = "an argument that is not an i32.const or i64.const";
+    Value v;
+    if (!constant(n.kids[k + 1 + a], false, &v)) {
+      *why = "an argument that is not an i32, i64, f32 or f64 constant (a form this reader does not read)";
       return false;
     }
-    if (type != (*exp)->params[a]) {
-      *why = "an argument of type " + type + " for a parameter of type " + (*exp)->params[a];
+    if (v.type != (*exp)->params[a]) {
+      *why = "an argument of type " + v.type + " for a parameter of type " + (*exp)->params[a];
       return false;
     }
-    args->push_back(word);
+    args->push_back(v.word);
   }
   return true;
 }
@@ -608,24 +757,21 @@ void Harness::assert_return(const Node & n) {
     exclude("an assertion about an excluded function");
     return;
   }
-  std::vector<uint64_t> want;
-  std::vector<std::string> want_types;
+  std::vector<Value> want;
   for (size_t k = 2; k < n.kids.size(); k++) {
-    std::string type;
-    uint64_t word = 0;
-    if (!constant(n.kids[k], &type, &word)) {
-      fail(n, "an expected result that is not an i32.const or i64.const (a form this reader does not read)");
+    Value v;
+    if (!constant(n.kids[k], true, &v)) {
+      fail(n, "an expected result that is not an i32, i64, f32 or f64 constant (a form this reader does not read)");
       return;
     }
-    want.push_back(word);
-    want_types.push_back(type);
+    want.push_back(v);
   }
-  if (want.size() != 1 || want_types[0] != e->result) {
+  if (want.size() != 1 || want[0].type != e->result) {
     fail(n, "the expected result does not match the function's result type " + e->result);
     return;
   }
   if (!kExecutes) {
-    exclude("not run on this host (the integer operations are emitted for x86-64 SysV)");
+    exclude("not run on this host (the integer and float operations are emitted for x86-64 SysV)");
     return;
   }
   Outcome o;
@@ -639,13 +785,17 @@ void Harness::assert_return(const Node & n) {
   } else if (o.exit == GRJIT_EXIT_DEOPT) {
     const GRCORE_CodeSite * s =
         grcore_codemeta_find(grjit_code_meta(e->code), static_cast<uint32_t>(o.out[0]));
-    fail(n, "\"" + e->name + "\" trapped (" + (s != nullptr ? trap_name(s->identity.offset) : "?") +
+    fail(n, "\"" + e->name + "\" trapped (" + (s != nullptr ? floatfx::trap_name(s->identity.offset) : "?") +
                 "), the suite expects a value");
   } else if (o.exit != GRJIT_EXIT_RETURNED) {
     fail(n, "\"" + e->name + "\" exited " + std::to_string(o.exit));
-  } else if (o.out[0] != want[0]) {
-    // An i32 is compared as a whole word: its upper half must be zero.
-    std::snprintf(buf, sizeof buf, " got 0x%" PRIx64 ", expected 0x%" PRIx64, o.out[0], want[0]);
+  } else if (!value_matches(want[0], o.out[0])) {
+    // A value is compared as a whole word: an i32 or f32 has a zero upper half.
+    std::snprintf(buf, sizeof buf, " got 0x%" PRIx64 ", expected %s0x%" PRIx64, o.out[0],
+        want[0].nan == NanClass::Canonical    ? "nan:canonical, as "
+        : want[0].nan == NanClass::Arithmetic ? "nan:arithmetic, as "
+                                              : "",
+        want[0].word);
     fail(n, "\"" + e->name + "\"" + buf);
   } else {
     report_.passed++;
@@ -683,12 +833,14 @@ void Harness::assert_trap(const Node & n) {
     site = kSiteDivideByZero;
   } else if (text == "integer overflow") {
     site = kSiteIntegerOverflow;
+  } else if (text == "invalid conversion to integer") {
+    site = floatfx::kSiteInvalidConversion;
   } else {
     fail(n, "a trap message this harness has no guard for: \"" + text + "\"");
     return;
   }
   if (!kExecutes) {
-    exclude("not run on this host (the integer operations are emitted for x86-64 SysV)");
+    exclude("not run on this host (the integer and float operations are emitted for x86-64 SysV)");
     return;
   }
   Outcome o;
@@ -707,7 +859,7 @@ void Harness::assert_trap(const Node & n) {
     if (s == nullptr || s->kind != GRCORE_SITE_GUARD || s->identity.function != kTrapFunction) {
       fail(n, "\"" + e->name + "\" left through something that is not one of its guards");
     } else if (s->identity.offset != site) {
-      fail(n, "\"" + e->name + "\" trapped with \"" + trap_name(s->identity.offset) +
+      fail(n, "\"" + e->name + "\" trapped with \"" + floatfx::trap_name(s->identity.offset) +
                   "\", the suite expects \"" + text + "\"");
     } else {
       report_.passed++;
@@ -747,7 +899,7 @@ Report Harness::run(const std::string & text) {
       } else if (e->excluded) {
         exclude("an invoke of an excluded function");
       } else if (!kExecutes) {
-        exclude("not run on this host (the integer operations are emitted for x86-64 SysV)");
+        exclude("not run on this host (the integer and float operations are emitted for x86-64 SysV)");
       } else {
         Outcome o;
         if (!call(e, args, &o)) {
@@ -959,7 +1111,8 @@ TEST(Wast, ARightExpectationPassesAndACorruptedOneFails) {
       {"a result of the wrong type", "(assert_return (invoke \"add\" (i32.const 1) (i32.const 1)) (i64.const 2))", false},
       {"too few arguments", "(assert_return (invoke \"add\" (i32.const 1)) (i32.const 2))", false},
       {"an export that does not exist", "(assert_return (invoke \"nope\" (i32.const 1)) (i32.const 2))", false},
-      {"a result form it cannot read", "(assert_return (invoke \"add\" (i32.const 1) (i32.const 1)) (f32.const 2))", false},
+      {"a result of the wrong type (a float)", "(assert_return (invoke \"add\" (i32.const 1) (i32.const 1)) (f32.const 2))", false},
+      {"a result form it cannot read", "(assert_return (invoke \"add\" (i32.const 1) (i32.const 1)) (v128.const i32x4 0 0 0 0))", false},
   };
   for (const Corrupt & c : bad) {
     SCOPED_TRACE(c.what);
@@ -1014,7 +1167,7 @@ TEST(Wast, AFunctionThatIsNotOneSupportedInstructionIsExcludedAndSoAreItsAsserti
   EXPECT_EQ(r.failed, 0u) << (r.failures.empty() ? "" : r.failures[0]);
   EXPECT_EQ(r.excluded["a function body that is not a single instruction over its parameters"], 5u)
       << "two (an operand that is not a parameter), swapped, three (nested), local, empty";
-  EXPECT_EQ(r.excluded["an instruction outside the integer table"], 1u);
+  EXPECT_EQ(r.excluded[wast::kOutsideTables], 1u);
   EXPECT_EQ(r.excluded["a function with no export"], 1u);
   EXPECT_EQ(r.excluded["an assertion about an excluded function"], 3u);
   if (kExecutes) {
@@ -1137,6 +1290,263 @@ TEST(Wast, TheComparisonIsOfTheWholeWordNotOfTheLowHalf) {
   }
 }
 
+/* ---- The float forms: the reader, and the harness shown able to fail on them ---------------------- */
+
+TEST(Wast, TheFloatsTheSuiteWritesAreRead) {
+  struct Case {
+    const char * text;
+    unsigned bits;
+    bool allow_class;
+    bool ok;
+    uint64_t want;
+    wast::NanClass cls;
+  };
+  using wast::NanClass;
+  const NanClass N = NanClass::None;
+  const Case cases[] = {
+      {"1.5", 32, false, true, 0x3FC00000u, N},
+      {"+1.5", 32, false, true, 0x3FC00000u, N},
+      {"-1.5", 32, false, true, 0xBFC00000u, N},
+      {"0x1.8p1", 32, false, true, 0x40400000u, N},
+      {"0x1.8p+1", 32, false, true, 0x40400000u, N},
+      {"-0x1p-149", 32, false, true, 0x80000001u, N},
+      {"0x1p-149", 32, false, true, 0x00000001u, N},
+      {"0x1p-150", 32, false, true, 0u, N},
+      {"0x1.8p-149", 32, false, true, 2u, N},
+      {"0x1.fffffep+127", 32, false, true, 0x7F7FFFFFu, N},
+      {"0x1.fffffep-127", 32, false, true, 0x00800000u, N}, // halfway to the smallest normal: ties to even
+      {"0x1.fffffcp-127", 32, false, true, 0x007FFFFFu, N},
+      {"0x1p-126", 32, false, true, 0x00800000u, N},
+      {"0", 32, false, true, 0u, N},
+      {"-0", 32, false, true, 0x80000000u, N},
+      {"-0.0", 32, false, true, 0x80000000u, N},
+      {"0x0p+0", 32, false, true, 0u, N},
+      {"1_000.5", 32, false, true, 0x447A2000u, N},
+      {"100", 32, false, true, 0x42C80000u, N},
+      {"16777217", 32, false, true, 0x4B800000u, N},
+      {"1e20", 32, false, true, 0x60AD78ECu, N},
+      {"inf", 32, false, true, 0x7F800000u, N},
+      {"-inf", 32, false, true, 0xFF800000u, N},
+      {"nan", 32, false, true, 0x7FC00000u, N},
+      {"-nan", 32, false, true, 0xFFC00000u, N},
+      {"nan:0x200000", 32, false, true, 0x7FA00000u, N},
+      {"-nan:0x200000", 32, false, true, 0xFFA00000u, N},
+      {"nan:0x7fffff", 32, false, true, 0x7FFFFFFFu, N},
+      {"nan:0x1", 32, false, true, 0x7F800001u, N},
+      {"nan:0x0", 32, false, false, 0, N},
+      {"nan:0x800000", 32, false, false, 0, N},
+      {"nan:canonical", 32, false, false, 0, N},
+      {"nan:canonical", 32, true, true, 0x7FC00000u, NanClass::Canonical},
+      {"nan:arithmetic", 32, true, true, 0x7FC00000u, NanClass::Arithmetic},
+      {"nan:arithmetic", 64, true, true, 0x7FF8000000000000ull, NanClass::Arithmetic},
+      {"nan:0x4000000000000", 64, false, true, 0x7FF4000000000000ull, N},
+      {"-nan:0xfffffffffffff", 64, false, true, 0xFFFFFFFFFFFFFFFFull, N},
+      {"nan:0x10000000000000", 64, false, false, 0, N},
+      {"0.1", 64, false, true, 0x3FB999999999999Aull, N},
+      {"0x1.999999999999ap-4", 64, false, true, 0x3FB999999999999Aull, N},
+      {"0.1", 32, false, true, 0x3DCCCCCDu, N},
+      {"0x1.99999ap-4", 32, false, true, 0x3DCCCCCDu, N},
+      {"0x1p-1074", 64, false, true, 1u, N},
+      {"-0x1.fffffffffffffp+1023", 64, false, true, 0xFFEFFFFFFFFFFFFFull, N},
+      {"1.7976931348623157e308", 64, false, true, 0x7FEFFFFFFFFFFFFFull, N},
+      {"", 32, false, false, 0, N},
+      {"x", 32, false, false, 0, N},
+      {"infinity", 32, false, false, 0, N},
+      {"nan(0x1)", 32, false, false, 0, N},
+      {"1.5f", 32, false, false, 0, N},
+      {"1.0e", 32, false, false, 0, N},
+      {"0x", 32, false, false, 0, N},
+      {"--1", 32, false, false, 0, N},
+      {"1 2", 32, false, false, 0, N},
+  };
+  for (const Case & c : cases) {
+    SCOPED_TRACE(c.text);
+    uint64_t v = 0;
+    wast::NanClass cls;
+    EXPECT_EQ(wast::parse_float(c.text, c.bits, c.allow_class, &v, &cls), c.ok);
+    if (c.ok) {
+      EXPECT_EQ(v, c.want);
+      EXPECT_EQ(static_cast<int>(cls), static_cast<int>(c.cls));
+    }
+  }
+}
+
+/* The conversion of an f32 literal is one rounding. A decimal a hair above the midpoint of two floats is
+ * that midpoint as a double, and converting by `strtod` and a cast then rounds the tie to even, to the
+ * lower of the two: a different float. The control shows the trap is real and the reader avoids it. */
+TEST(Wast, AnF32LiteralIsRoundedOnceNotTwice) {
+  // 1 + 2^-24 is the midpoint of 1.0f and 1.0f + 2^-23; the decimal is just above it.
+  const std::string above = "1.00000005960464477539062501";
+  const std::string below = "1.00000005960464477539062499";
+  uint64_t v = 0;
+  wast::NanClass cls;
+  ASSERT_TRUE(wast::parse_float(above, 32, false, &v, &cls));
+  EXPECT_EQ(v, 0x3F800001u) << "above the midpoint rounds up";
+  ASSERT_TRUE(wast::parse_float(below, 32, false, &v, &cls));
+  EXPECT_EQ(v, 0x3F800000u) << "below the midpoint rounds down";
+  // The wrong way gives the wrong float for the first one: the control is able to fail.
+  const float twice = static_cast<float>(std::strtod(above.c_str(), nullptr));
+  uint32_t twice_bits;
+  std::memcpy(&twice_bits, &twice, sizeof twice_bits);
+  EXPECT_EQ(twice_bits, 0x3F800000u) << "strtod and a cast rounds twice, to the lower float";
+  // The same with the hexadecimal float of more bits than a double holds.
+  ASSERT_TRUE(wast::parse_float("0x1.00000100000000000001p+0", 32, false, &v, &cls));
+  EXPECT_EQ(v, 0x3F800001u);
+}
+
+/* The suite spells one number several ways: hexadecimal and decimal must agree. */
+TEST(Wast, TheHexAndDecimalSpellingsOfOneNumberAgree) {
+  struct Pair {
+    const char * decimal;
+    const char * hex;
+    unsigned bits;
+  };
+  const Pair pairs[] = {
+      {"16777220.0", "0x1.000004p+24", 32}, {"2147483520.0", "0x1.fffffep+30", 32},
+      {"18446742974197923840.0", "0x1.fffffep+63", 32}, {"1.5", "0x1.8p+0", 32},
+      {"0.1", "0x1.99999ap-4", 32}, {"1.1234567890", "1.123456789", 32},
+      {"1.9", "0x1.e66666p+0", 32}, {"1024.25", "0x1.001p+10", 32},
+      {"0.1", "0x1.999999999999ap-4", 64}, {"1.1234567890", "1.123456789", 64},
+      {"9007199254740993.0", "0x1p+53", 64}, {"1e23", "0x1.52d02c7e14af6p+76", 64},
+      {"4503599627370495.5", "0x1.fffffffffffffp+51", 64},
+  };
+  for (const Pair & p : pairs) {
+    SCOPED_TRACE(std::string(p.decimal) + " vs " + p.hex);
+    uint64_t a = 0, b = 1;
+    wast::NanClass cls;
+    ASSERT_TRUE(wast::parse_float(p.decimal, p.bits, false, &a, &cls));
+    ASSERT_TRUE(wast::parse_float(p.hex, p.bits, false, &b, &cls));
+    EXPECT_EQ(a, b);
+  }
+}
+
+namespace {
+
+const char kFloatModule[] = R"wast((module
+  (func (export "f32.add") (param $x f32) (param $y f32) (result f32) (f32.add (local.get $x) (local.get $y)))
+  (func (export "f32.abs") (param $x f32) (result f32) (f32.abs (local.get $x)))
+  (func (export "f32.neg") (param $x f32) (result f32) (f32.neg (local.get $x)))
+  (func (export "f32.sqrt") (param $x f32) (result f32) (f32.sqrt (local.get $x)))
+  (func (export "f64.neg") (param $x f64) (result f64) (f64.neg (local.get $x)))
+  (func (export "f64.eq") (param $x f64) (param $y f64) (result i32) (f64.eq (local.get $x) (local.get $y)))
+  (func (export "i32.trunc_f64_s") (param $x f64) (result i32) (i32.trunc_f64_s (local.get $x)))
+  (func (export "i64.trunc_sat_f32_u") (param $x f32) (result i64) (i64.trunc_sat_f32_u (local.get $x)))
+  (func (export "f64.promote_f32") (param $x f32) (result f64) (f64.promote_f32 (local.get $x)))
+)
+)wast";
+
+} // namespace
+
+TEST(Wast, TheFloatExpectationsPassWhenRightAndEachCorruptedOneFails) {
+  const std::string good = std::string(kFloatModule) +
+      "(assert_return (invoke \"f32.add\" (f32.const 1.0) (f32.const 1.0)) (f32.const 2.0))\n"
+      "(assert_return (invoke \"f32.add\" (f32.const 1.0) (f32.const 0x1p-24)) (f32.const 1.0))\n"
+      "(assert_return (invoke \"f32.neg\" (f32.const 0.0)) (f32.const -0.0))\n"
+      "(assert_return (invoke \"f32.sqrt\" (f32.const -1.0)) (f32.const nan:canonical))\n"
+      "(assert_return (invoke \"f32.sqrt\" (f32.const -1.0)) (f32.const nan:arithmetic))\n"
+      "(assert_return (invoke \"f32.abs\" (f32.const -nan:0x400001)) (f32.const nan:arithmetic))\n"
+      "(assert_return (invoke \"f32.abs\" (f32.const -nan:0x200001)) (f32.const nan:0x200001))\n"
+      "(assert_return (invoke \"f64.neg\" (f64.const nan:0x4000000000000)) (f64.const -nan:0x4000000000000))\n"
+      "(assert_return (invoke \"f64.eq\" (f64.const nan) (f64.const nan)) (i32.const 0))\n"
+      "(assert_return (invoke \"f64.eq\" (f64.const -0.0) (f64.const 0.0)) (i32.const 1))\n"
+      "(assert_return (invoke \"f64.promote_f32\" (f32.const 0x1.8p+0)) (f64.const 1.5))\n"
+      "(assert_return (invoke \"i64.trunc_sat_f32_u\" (f32.const nan)) (i64.const 0))\n"
+      "(assert_trap (invoke \"i32.trunc_f64_s\" (f64.const nan)) \"invalid conversion to integer\")\n"
+      "(assert_trap (invoke \"i32.trunc_f64_s\" (f64.const inf)) \"integer overflow\")\n"
+      "(assert_return (invoke \"i32.trunc_f64_s\" (f64.const -2147483648.9)) (i32.const 0x80000000))\n";
+  wast::Report ok = run_text(good);
+  if (kExecutes) {
+    EXPECT_EQ(ok.passed, 15u);
+  }
+  EXPECT_EQ(ok.failed, 0u) << (ok.failures.empty() ? "" : ok.failures[0]);
+  EXPECT_EQ(ok.guard_checks, 2u) << "the one truncation's two unguarded variants";
+
+  struct Corrupt {
+    const char * what;
+    const char * form;
+    bool decided_by_running;
+  };
+  const Corrupt bad[] = {
+      {"one ulp off", "(assert_return (invoke \"f32.add\" (f32.const 1.0) (f32.const 1.0)) (f32.const 0x1.000002p+1))", true},
+      {"one ulp off, in an f64 promotion", "(assert_return (invoke \"f64.promote_f32\" (f32.const 0x1.8p+0)) (f64.const 0x1.8000000000001p+0))", true},
+      {"a NaN where a number is expected", "(assert_return (invoke \"f32.sqrt\" (f32.const -1.0)) (f32.const 0.0))", true},
+      {"a NaN where infinity is expected", "(assert_return (invoke \"f32.sqrt\" (f32.const -1.0)) (f32.const inf))", true},
+      {"a number where a NaN is expected", "(assert_return (invoke \"f32.add\" (f32.const 1.0) (f32.const 1.0)) (f32.const nan:arithmetic))", true},
+      {"a number where a canonical NaN is expected", "(assert_return (invoke \"f32.add\" (f32.const 1.0) (f32.const 1.0)) (f32.const nan:canonical))", true},
+      {"the wrong NaN class: an arithmetic NaN that is not canonical", "(assert_return (invoke \"f32.abs\" (f32.const -nan:0x400001)) (f32.const nan:canonical))", true},
+      {"the wrong NaN class: a NaN that is not quiet", "(assert_return (invoke \"f32.abs\" (f32.const -nan:0x200001)) (f32.const nan:arithmetic))", true},
+      {"+0 for -0", "(assert_return (invoke \"f32.neg\" (f32.const 0.0)) (f32.const 0.0))", true},
+      {"-0 for +0", "(assert_return (invoke \"f32.neg\" (f32.const -0.0)) (f32.const -0.0))", true},
+      {"a stated payload that is not the one", "(assert_return (invoke \"f32.abs\" (f32.const -nan:0x200001)) (f32.const nan:0x200002))", true},
+      {"a stated payload with the wrong sign", "(assert_return (invoke \"f32.abs\" (f32.const -nan:0x200001)) (f32.const -nan:0x200001))", true},
+      {"a stated NaN where a canonical one is produced", "(assert_return (invoke \"f32.sqrt\" (f32.const -1.0)) (f32.const nan))", false},
+      {"a comparison answered wrongly", "(assert_return (invoke \"f64.eq\" (f64.const nan) (f64.const nan)) (i32.const 1))", true},
+      {"the wrong trap for a NaN", "(assert_trap (invoke \"i32.trunc_f64_s\" (f64.const nan)) \"integer overflow\")", true},
+      {"the wrong trap for a value out of range", "(assert_trap (invoke \"i32.trunc_f64_s\" (f64.const inf)) \"invalid conversion to integer\")", true},
+      {"a trap where a value is the answer", "(assert_trap (invoke \"i32.trunc_f64_s\" (f64.const 1.5)) \"integer overflow\")", true},
+      {"a value where a trap is the answer", "(assert_return (invoke \"i32.trunc_f64_s\" (f64.const inf)) (i32.const 0))", true},
+      {"a trap message it has no guard for", "(assert_trap (invoke \"i32.trunc_f64_s\" (f64.const nan)) \"unreachable\")", false},
+      {"a class given as an argument", "(assert_return (invoke \"f32.abs\" (f32.const nan:canonical)) (f32.const nan:arithmetic))", false},
+      {"an argument of the wrong float width", "(assert_return (invoke \"f32.abs\" (f64.const 1.0)) (f32.const 1.0))", false},
+      {"an argument of an integer type for a float parameter", "(assert_return (invoke \"f32.abs\" (i32.const 1)) (f32.const 1.0))", false},
+      {"a result of the wrong float width", "(assert_return (invoke \"f32.abs\" (f32.const 1.0)) (f64.const 1.0))", false},
+      {"a float literal it cannot read", "(assert_return (invoke \"f32.abs\" (f32.const 1.0e)) (f32.const 1.0))", false},
+      {"a NaN payload that is zero", "(assert_return (invoke \"f32.abs\" (f32.const nan:0x0)) (f32.const nan:arithmetic))", false},
+      {"a NaN payload that does not fit", "(assert_return (invoke \"f32.abs\" (f32.const nan:0x800000)) (f32.const nan:arithmetic))", false},
+      {"a result form it cannot read", "(assert_return (invoke \"f32.abs\" (f32.const 1.0)) (v128.const i32x4 0 0 0 0))", false},
+  };
+  for (const Corrupt & c : bad) {
+    SCOPED_TRACE(c.what);
+    if (c.decided_by_running && !kExecutes) {
+      continue;
+    }
+    wast::Report r = run_text(std::string(kFloatModule) + c.form + "\n");
+    EXPECT_EQ(r.failed, 1u) << c.form;
+    EXPECT_EQ(r.passed, 0u) << c.form;
+  }
+}
+
+/* The result word of an f32 is compared whole: a function whose word has bits above 31 is not an f32, whatever
+ * its low half says, and the NaN classes refuse such a word as well. */
+TEST(Wast, AnF32WithBitsAboveThirtyOneIsNotWhatTheSuiteExpects) {
+  if (!kExecutes) {
+    GTEST_SKIP() << "the compare is made on the result of running the code, which only x86-64 SysV does";
+  }
+  auto wide = [](int64_t value) {
+    B b("wide", 0);
+    GRJIT_VReg r = b.reg(GRJIT_TYPE_I64);
+    b.at(b.block());
+    b.cnst(r, value);
+    b.ret(V(r));
+    return b.finish();
+  };
+  struct Case {
+    const char * form;
+    int64_t word;
+    size_t failed;
+  };
+  const Case cases[] = {
+      {"(assert_return (invoke \"w\") (f32.const 1.5))", 0x3FC00000, 0},
+      {"(assert_return (invoke \"w\") (f32.const 1.5))", 0x100000000ll | 0x3FC00000, 1},
+      {"(assert_return (invoke \"w\") (f32.const nan:arithmetic))", 0x7FC00000, 0},
+      {"(assert_return (invoke \"w\") (f32.const nan:arithmetic))", 0x100000000ll | 0x7FC00000, 1},
+      {"(assert_return (invoke \"w\") (f32.const nan:canonical))", 0x100000000ll | 0x7FC00000, 1},
+      {"(assert_return (invoke \"w\") (f32.const nan:canonical))", 0x7FC00000, 0},
+      {"(assert_return (invoke \"w\") (f32.const nan:canonical))", 0xFFC00000ll, 0},
+      {"(assert_return (invoke \"w\") (f32.const nan:canonical))", 0x7FC00001, 1},
+      {"(assert_return (invoke \"w\") (f32.const nan:arithmetic))", 0x7F800001, 1},
+  };
+  for (const Case & c : cases) {
+    SCOPED_TRACE(std::string(c.form) + " with the word " + std::to_string(c.word));
+    JitWorld w;
+    wast::Harness h(&w, "hand.wast");
+    h.inject("w", wide(c.word), {}, "f32");
+    wast::Report r = h.run(c.form);
+    EXPECT_EQ(r.failed, c.failed) << (r.failures.empty() ? "" : r.failures[0]);
+    EXPECT_EQ(r.passed, c.failed == 0 ? 1u : 0u);
+  }
+}
+
 /* ---- The suite ---------------------------------------------------------------------------- */
 
 namespace {
@@ -1161,7 +1571,7 @@ bool read_suite_file(const char * name, std::string * text) {
 }
 
 void run_suite_file(const char * name, size_t want_passed, size_t want_traps,
-    std::map<std::string, size_t> want_excluded) {
+    std::map<std::string, size_t> want_excluded, size_t want_guard_checks) {
   std::string text;
   if (!read_suite_file(name, &text)) {
     return;
@@ -1178,24 +1588,63 @@ void run_suite_file(const char * name, size_t want_passed, size_t want_traps,
     EXPECT_EQ(r.passed, want_passed) << "the number of assertions that ran and held, pinned to wg-3.0";
   } else {
     EXPECT_EQ(r.passed, 0u);
-    want_excluded["not run on this host (the integer operations are emitted for x86-64 SysV)"] =
+    want_excluded["not run on this host (the integer and float operations are emitted for x86-64 SysV)"] =
         want_passed;
   }
   // The excluded forms, by reason, exactly: a reason that appears or goes away is a change of what is checked.
   EXPECT_EQ(r.excluded, want_excluded);
-  EXPECT_GT(r.guard_checks, 8u) << "the verifier's guard rule was shown to refuse the unguarded variants";
+  EXPECT_EQ(r.guard_checks, want_guard_checks)
+      << "the verifier's guard rule was shown to refuse the unguarded variants";
 }
-
 } // namespace
 
 TEST(Wast, TheI32SuiteFilePassesEveryAssertionItHoldsAndCountsTheRest) {
   // 364 assert_return and 10 assert_trap run; 83 assert_invalid and 2 assert_malformed do not.
-  run_suite_file("i32.wast", 374, 10, {{"assert_invalid", 83}, {"assert_malformed", 2}});
+  run_suite_file("i32.wast", 374, 10, {{"assert_invalid", 83}, {"assert_malformed", 2}}, 9);
 }
 
 TEST(Wast, TheI64SuiteFilePassesEveryAssertionItHoldsAndCountsTheRest) {
   // 374 assert_return and 10 assert_trap run; 29 assert_invalid and 2 assert_malformed do not.
-  run_suite_file("i64.wast", 384, 10, {{"assert_invalid", 29}, {"assert_malformed", 2}});
+  run_suite_file("i64.wast", 384, 10, {{"assert_invalid", 29}, {"assert_malformed", 2}}, 9);
+}
+
+/* The eight scalar float and conversion files of the same commit. The counts are what the harness reads
+ * in them: every assertion is one instruction over its parameters, so each assert_return and
+ * assert_trap runs, and only assert_invalid and assert_malformed are left out. The unguarded variants are
+ * the two refused for each of the eight partial truncations of conversions.wast. */
+TEST(Wast, TheF32SuiteFilePassesEveryAssertionItHoldsAndCountsTheRest) {
+  run_suite_file("f32.wast", 2500, 0, {{"assert_invalid", 11}, {"assert_malformed", 2}}, 0);
+}
+
+TEST(Wast, TheF64SuiteFilePassesEveryAssertionItHoldsAndCountsTheRest) {
+  run_suite_file("f64.wast", 2500, 0, {{"assert_invalid", 11}, {"assert_malformed", 2}}, 0);
+}
+
+TEST(Wast, TheF32CmpSuiteFilePassesEveryAssertionItHoldsAndCountsTheRest) {
+  run_suite_file("f32_cmp.wast", 2400, 0, {{"assert_invalid", 6}}, 0);
+}
+
+TEST(Wast, TheF64CmpSuiteFilePassesEveryAssertionItHoldsAndCountsTheRest) {
+  run_suite_file("f64_cmp.wast", 2400, 0, {{"assert_invalid", 6}}, 0);
+}
+
+TEST(Wast, TheF32BitwiseSuiteFilePassesEveryAssertionItHoldsAndCountsTheRest) {
+  run_suite_file("f32_bitwise.wast", 360, 0, {{"assert_invalid", 3}}, 0);
+}
+
+TEST(Wast, TheF64BitwiseSuiteFilePassesEveryAssertionItHoldsAndCountsTheRest) {
+  run_suite_file("f64_bitwise.wast", 360, 0, {{"assert_invalid", 3}}, 0);
+}
+
+TEST(Wast, TheConversionsSuiteFilePassesEveryAssertionItHoldsAndCountsTheRest) {
+  // 526 assert_return and 67 assert_trap run (35 "integer overflow" and 32 "invalid conversion to integer").
+  run_suite_file("conversions.wast", 593, 67, {{"assert_invalid", 25}}, 16);
+}
+
+TEST(Wast, TheFloatMiscSuiteFilePassesEveryAssertionItHoldsAndCountsTheRest) {
+  // Every function of this file at wg-3.0 is one instruction, so none is left out; the survey is in
+  // design.md.
+  run_suite_file("float_misc.wast", 470, 0, {}, 0);
 }
 
 GRJIT_TEST_MAIN()
