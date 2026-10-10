@@ -1001,6 +1001,7 @@ TEST(CpuModel, AForcedArmOfAFeatureTheHostHasRunsItsInstruction) {
 /* ---- Nothing was skipped for a missing feature on a host that has them all ---------------------- */
 
 TEST(CpuSkips, OnAHostWithEveryFeatureNothingWasSkippedForAMissingOne) {
+  CPU_ONLY_ON_X86_64_LINUX();
   if (detected() != GRJIT_FEATURES_ALL) {
     GTEST_SKIP() << "this host's set is " << set_name(detected()) << ", not every feature, so a skip for a missing "
                  << "one is expected here (" << g_skipped_for_missing_feature.load() << " so far)";
