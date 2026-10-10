@@ -1479,7 +1479,7 @@ TEST(Wast, TheFloatExpectationsPassWhenRightAndEachCorruptedOneFails) {
       {"-0 for +0", "(assert_return (invoke \"f32.neg\" (f32.const -0.0)) (f32.const -0.0))", true},
       {"a stated payload that is not the one", "(assert_return (invoke \"f32.abs\" (f32.const -nan:0x200001)) (f32.const nan:0x200002))", true},
       {"a stated payload with the wrong sign", "(assert_return (invoke \"f32.abs\" (f32.const -nan:0x200001)) (f32.const -nan:0x200001))", true},
-      {"a stated NaN where a canonical one is produced", "(assert_return (invoke \"f32.sqrt\" (f32.const -1.0)) (f32.const nan))", false},
+      {"a stated NaN where a canonical one is produced", "(assert_return (invoke \"f32.sqrt\" (f32.const -1.0)) (f32.const nan))", true},
       {"a comparison answered wrongly", "(assert_return (invoke \"f64.eq\" (f64.const nan) (f64.const nan)) (i32.const 1))", true},
       {"the wrong trap for a NaN", "(assert_trap (invoke \"i32.trunc_f64_s\" (f64.const nan)) \"integer overflow\")", true},
       {"the wrong trap for a value out of range", "(assert_trap (invoke \"i32.trunc_f64_s\" (f64.const inf)) \"invalid conversion to integer\")", true},
