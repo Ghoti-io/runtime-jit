@@ -1314,4 +1314,121 @@ TEST(IntCalls, AnI32GoesThroughATailCallInARegisterAndOnTheStack) {
   EXPECT_EQ(e.st.deopts, 0);
 }
 
+TEST(IntCalls, AnI32GoesThroughACallPtrAndATailCallPtrInARegisterAndOnTheStack) {
+  INT_ONLY_ON_X86_64();
+  fx::Engine e;
+  for (int n : {2, 9}) {
+    SCOPED_TRACE(n);
+    int callee, unused_caller;
+    add_i32_pair(e, n, &callee, &unused_caller);
+    ASSERT_TRUE(e.compile_fn(callee));
+    ASSERT_NE(e.code_of(callee).internal, 0u);
+    auto args_of = [&](P & p, int x) {
+      std::vector<int> args;
+      for (int i = 0; i < n; i++) {
+        int a = p.local(GRJIT_TYPE_I32), k = p.local(GRJIT_TYPE_I32);
+        p.cnst(k, i);
+        p.bin(K::ADD, a, x, k);
+        args.push_back(a);
+      }
+      return args;
+    };
+    int by_call = e.reserve(), by_tail = e.reserve();
+    {
+      P p("via_ptr", {GRJIT_TYPE_I32});
+      int ptr = p.local(GRJIT_TYPE_PTR), r = p.local(GRJIT_TYPE_I32);
+      p.entryof(ptr, callee);
+      std::vector<int> args = args_of(p, 0);
+      p.callp(r, ptr, callee, args);
+      p.ret(r);
+      e.set(by_call, p.done());
+    }
+    {
+      P p("tail_ptr", {GRJIT_TYPE_I32});
+      int ptr = p.local(GRJIT_TYPE_PTR);
+      p.entryof(ptr, callee);
+      std::vector<int> args = args_of(p, 0);
+      p.tailcallp(ptr, callee, args);
+      e.set(by_tail, p.done());
+    }
+    for (uint32_t x : {0u, 3u, 0x80000000u, 0xFFFFFFF0u, 0xFFFFFFFFu}) {
+      SCOPED_TRACE(x);
+      uint32_t want = i32_pair_ref(n, x) - 1;
+      for (int fn : {by_call, by_tail}) {
+        fx::Outcome c = e.run_compiled(fn, {0xDEADBEEF00000000ull | x});
+        ASSERT_TRUE(c.finished);
+        EXPECT_EQ(c.exit, uint32_t{GRJIT_EXIT_RETURNED});
+        EXPECT_EQ(c.value, uint64_t{want}) << (fn == by_call ? "CALL_PTR" : "TAIL_CALL_PTR");
+      }
+    }
+  }
+  EXPECT_EQ(e.st.deopts, 0);
+}
+
+namespace {
+uint64_t live_native(void *, uint64_t v) { return v + 1; }
+uint64_t live_helper(uint64_t v) { return v + 2; }
+uint32_t no_poll(void *, uint64_t, uint64_t) { return 0; }
+} // namespace
+
+/* An I32 live across a poll, a call that can collect and a native call is a raw frame-state value,
+ * never a stack-map entry: the live list of each site holds the reference and nothing else, and the
+ * frame state names the I32 with the representation I32 and the reference as a value. */
+TEST(IntRun, AnI32LiveAcrossAPollACallAndANativeIsRawInTheFrameStateAndNeverInTheStackMap) {
+  INT_ONLY_ON_X86_64();
+  JitWorld w;
+  NativeTab tab;
+  uint32_t native = tab.add(reinterpret_cast<const void *>(&live_native), {GRJIT_TYPE_I64}, GRJIT_TYPE_I64);
+  B b("live", 2);
+  GRJIT_CallHooks h{};
+  h.deopt = [](void *, uint64_t) -> uint32_t { return 0; };
+  b.callable(h);
+  b.natives(tab);
+  b.poll_helper(&no_poll);
+  GRJIT_VReg x = b.param(GRJIT_TYPE_I32), r = b.param(GRJIT_TYPE_REF);
+  GRJIT_VReg u = b.reg(GRJIT_TYPE_I64), v = b.reg(GRJIT_TYPE_I64), t = b.reg(GRJIT_TYPE_I32),
+             keep = b.reg(GRJIT_TYPE_I64);
+  b.at(b.block());
+  auto state = [&] { return std::vector<GRJIT_FrameSlot>{grjit_frame_slot_vreg(x), grjit_frame_slot_vreg(r)}; };
+  b.poll({9, 1}, state());
+  b.call_gc(u, reinterpret_cast<const void *>(&live_helper), {I(5)}, {9, 2}, state());
+  b.call_native(v, native, {V(u)}, {9, 3}, state());
+  b.bin(GRJIT_OP_ADD, t, V(x), I(1));
+  b.bitcast(keep, r);
+  b.ret(V(t));
+  Fn f(b.finish());
+  char why[256] = {0};
+  ASSERT_EQ(grjit_function_verify(f, nullptr, why, sizeof why), GRJIT_OK) << why;
+  Compiled c(f, w.pages());
+  ASSERT_TRUE(c) << grjit_result_string(c.result);
+  const GRCORE_CodeMeta * meta = grjit_code_meta(c.code);
+  size_t polls = 0, calls = 0;
+  for (size_t i = 0; i < meta->site_count; i++) {
+    const GRCORE_CodeSite & s = meta->sites[i];
+    if (s.kind != GRCORE_SITE_GC_POINT_POLL && s.kind != GRCORE_SITE_GC_POINT_CALL &&
+        s.kind != GRCORE_SITE_GC_POINT_ALLOC_SLOW) {
+      continue;
+    }
+    if (s.identity.function != 9) {
+      continue;
+    }
+    polls += s.kind == GRCORE_SITE_GC_POINT_POLL;
+    calls += s.kind != GRCORE_SITE_GC_POINT_POLL;
+    SCOPED_TRACE(s.identity.offset);
+    // The stack map: the reference, and no I32.
+    ASSERT_EQ(s.live_count, 1u);
+    EXPECT_EQ(s.live[0].slot_kind, GRCORE_SLOT_VALUE);
+    EXPECT_EQ(s.live[0].representation, GRCORE_REPR_BITS);
+    // The frame state: the I32 is raw and says so, the reference is a value.
+    ASSERT_EQ(s.frame_state_count, 2u);
+    EXPECT_EQ(s.frame_state[0].kind, GRCORE_LOC_FRAME_SLOT);
+    EXPECT_EQ(s.frame_state[0].slot_kind, GRCORE_SLOT_RAW);
+    EXPECT_EQ(s.frame_state[0].representation, GRCORE_REPR_I32);
+    EXPECT_EQ(s.frame_state[1].slot_kind, GRCORE_SLOT_VALUE);
+    EXPECT_NE(s.frame_state[0].value, s.live[0].value) << "the I32's slot is not the reference's";
+  }
+  EXPECT_EQ(polls, 1u);
+  EXPECT_EQ(calls, 2u) << "the helper that can collect, and the native";
+}
+
 GRJIT_TEST_MAIN()
