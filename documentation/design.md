@@ -713,7 +713,9 @@ machines are not one measurement, and no ratio between them is claimed. An engin
 `fib` here, and none is possible in this library:** it has no interpreter, so there is no
 interpreted run to compare with. That figure belongs to the first engine that has both,
 and it is recorded once in lang-tang's `design.md` ("Calls, measured"): `fib(22)` 36% faster
-compiled, with no call exit, and the `fib(15)` and library-call figures beside it. (Compile
+compiled in a fresh engine per run (compile inside the clock) and about 40% in steady state
+(one execution, compiled once, called many times), with no call exit, and the `fib(15)` and
+library-call figures beside it. (Compile
 of a 100-operation function: 5.5 us here, GCC 16.2; the 7.9 us is the "Benchmarks" table's first measurement, 2026-10-03, the Intel Core 7 150U with GCC 14.2.)
 
 On real arm64 (a Raspberry Pi 4, Cortex-A72, GCC 16.2.0 aarch64 `-O2 -g` release in the arm64 build image, through `tools/rpi`, the same commit and command, 2026-10-09, three runs; calibration 3.34 ns a step) the same loops read: plain 5.00 to 5.25, poll 6.12, helper call 6.67, **compiled call 17.61**, tail call 12.79, `loop-helper-gc` 6.12 to 6.25, `loop-native` 7.23 and `loop-native-status` 8.34 to 9.56 ns an iteration. A compiled call and return costs 12.6 ns more than the plain loop there, 3.8 times the calibration step (it is 1.9 on the EVO-X2), and a tail call 7.8 ns; compiling a 100-operation function takes 44 us. The 3.8 and the 1.9 are each machine's own figure (each against its own calibration), and the difference between them is not attributed to anything here (the machines differ in more than the convention, and nothing was measured to separate them).
