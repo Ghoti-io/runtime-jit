@@ -1566,8 +1566,8 @@ the operation and not in a guard, because there is nothing to deopt.
 
 *The verifier's rule* (`check_partial` in `src/ir/verify.c`) reads one basic block in order.
 A `GUARD` passing records a fact, valid until a register it is about is assigned again:
-non-zero(d) when the guard's operand is `d` itself or a `CMP NE d, #0`, `CMP UGT d, #0`,
-`CMP ULT #0, d` of it, not changed since the comparison; no-overflow(a, b) when the guard's
+non-zero(d) when the guard's operand is `d` itself or a `CMP NE d, #0`, its mirror `CMP NE #0, d`,
+`CMP UGT d, #0` or `CMP ULT #0, d` of it, not changed since the comparison; no-overflow(a, b) when the guard's
 operand is `CMP EQ t, #0` with `t = AND(CMP EQ a, #MIN, CMP EQ b, #-1)`, or `OR(CMP NE a, #MIN,
 CMP NE b, #-1)`, in either order; and, for a constant divisor of -1, not-MIN(a) from a
 `CMP NE a, #MIN`. A constant divisor is judged as it stands (0 is refused; anything but -1
@@ -1606,14 +1606,19 @@ of `testPin` (x86-64, arm64, Win64) are unchanged, the generators of `ir_gen.h` 
 widths, including shift counts over the width, `clz`/`ctz` of 0, `popcnt` of all ones, the
 extensions, `MIN / -1`, `MIN % -1`); every operation at both widths over the boundary values
 (0, 1, -1, MIN, MAX, the widths and one either side, alternating bits; 32 values squared for i32,
-48 for i64, more than 10,000 runs) against the evaluator; the traps by site; the typing rules;
+48 for i64: 83,872 runs, 322 of them guard exits, a floor the test asserts) against the evaluator; the traps by site; the typing rules;
 the guard rule, accepted and refused; an `I32` through a call, a tail call and the entry in
 registers and on the stack with garbage above bit 31; a frame state's representation; a helper
 result; a native table refusing an `I32`. `testDifferential` gains 3,000 generated integer
 programs (`IntGen`, not `ir_gen.h`) run six times each over the boundary values: arithmetic,
 shifts and rotates by any count, comparisons, bit counting, sign extension, wrap and extend,
 and the four divisions with their guards in both shapes; a guard that fires is compared by
-its frame state and its site (a run: 12,990 returns, 5,010 guard exits, 14,566 divisions). The
+its frame state and its site. The test prints its figures and asserts floors at about nine tenths
+of them; over the 3,000 programs x 6 runs = 18,000 runs: 12,267 returned and 5,733 left by a guard
+(per run); and, counted statically over the operations of the 3,000 programs, 23,328 divisions,
+5,876 with a constant divisor, 5,454 with a constant dividend, 6,425 i32 operations with a negative
+immediate, and 2,531 programs of more than one block. The generator also gives i32 arguments garbage
+above bit 31. The
 evaluator (`tests/ir_eval.h`) has no builtin in it that a compiler could turn into the
 backend's own instruction. A hardware fault in a compiled function (a `SIGFPE` from an `idiv`
 that should not be reached) is caught by the test and reported as a failure with the signal,
@@ -1643,11 +1648,16 @@ run is **counted as excluded with its reason and never as passed**: `assert_inva
 with every assertion about it. A top-level form that is neither handled nor on that list **fails
 the run** and is named, so a form the reader does not know cannot vanish into silence; so does a
 literal or a result form it cannot read, and an export whose signature the harness's table
-disagrees with. A missing suite fails on a host that runs the compiled code, naming the script;
-it is never skipped there. The harness's own control: a corrupted value, a value one bit above
-the type, a trap where a value is the answer and the reverse, the wrong trap in each direction,
-an argument or result of the wrong type, an export that is not there and a form it cannot read
-each fail; the excluded forms are counted; and for every partial operation the harness builds
+disagrees with. A missing or altered suite fails **on every host**, the ones that do not run the compiled code
+included, naming `tools/wasm/fetch.sh`: the harness finds the library root from a compile-time
+define (the Makefile's `$(CURDIR)`), so the working directory does not matter,
+`GRJIT_WASM_SUITE_DIR` names another directory that holds `test/core/`, and every file read is
+checked against its SHA-256 in `tools/wasm/SHA256SUMS` by a SHA-256 of the test's own. The harness's own control: a corrupted value,
+a literal that does not fit its type, a trap where a value is the answer and the reverse, the wrong
+trap in each direction, a trap message it has no guard for, an argument or result of the wrong type, an export
+that is not there and a form it cannot read each fail, and so does an export built by hand whose
+result word has bits above its declared type (the reader accepts the assertion and the whole-word
+compare must refuse it); the excluded forms are counted, and pinned by reason; and for every partial operation the harness builds
 the same function with a guard left out (both, the divisor's, and for `div_s` the overflow one)
 and requires the verifier to refuse it.
 
@@ -1658,7 +1668,7 @@ Counts at `wg-3.0` (x86-64 SysV, GCC 14.2; pinned in the test):
 | `i32.wast` | 364 | 10 | 374 | 85 (83 `assert_invalid`, 2 `assert_malformed`) | 0 |
 | `i64.wast` | 374 | 10 | 384 | 31 (29 `assert_invalid`, 2 `assert_malformed`) | 0 |
 
-On a host that does not run the code the reader, the mapping into the IR and the verifier's
+On a host that does not run the code (with the suite fetched, as everywhere) the reader, the mapping into the IR and the verifier's
 rule still run (the assertions that need the code are excluded as "not run on this host"),
 which is what a real arm64 machine can do of it.
 
@@ -1675,7 +1685,11 @@ frontend that computes the guard condition another way gets a reason and writes 
 rule knows, which is the price of a rule a verifier can check without a dataflow analysis. A
 division by a constant zero is refused (a function that always traps is written as a trap). An
 `I32` is not a native's argument or result, and not a `REF`-like value. `i64.extend32_s` has no
-32-bit form.
+32-bit form. The no-overflow fact is kept **one per divisor**: a second overflow guard for the same
+divisor register (with another dividend) overwrites the first, so the division it was meant for is
+refused unless the guards are repeated in front of it. A valid `MIN / x` with an **immediate** `MIN`
+dividend and a register divisor is refused too (the rule has no fact for it); rewrite it by moving
+the constant into a register first.
 
 ## Gates
 

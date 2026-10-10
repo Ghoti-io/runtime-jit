@@ -907,8 +907,11 @@ TEST(IntRun, EveryOperationAtEveryWidthAgreesWithTheEvaluatorOnTheBoundaryValues
       }
     }
   }
-  EXPECT_GT(compared, 10000u);
-  EXPECT_GT(traps, 100u) << "the traps of the four divisions were reached";
+  std::printf("integer boundary sweep: %zu runs compared with the evaluator, %zu of them guard exits\n",
+      compared, traps);
+  // Floors at about nine tenths of the fixed sweep (83,872 runs, 322 guard exits).
+  EXPECT_GT(compared, 75000u);
+  EXPECT_GT(traps, 290u) << "the traps of the four divisions were reached";
 }
 
 TEST(IntRun, DivideByZeroAndSignedOverflowFireTheirGuardsAndMinRemMinusOneIsZero) {

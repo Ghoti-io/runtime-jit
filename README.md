@@ -60,7 +60,9 @@ the Windows flavour refuse a function that uses them with `GRJIT_ERR_UNSUPPORTED
 
 They are checked against the WebAssembly spec suite: `tools/wasm/fetch.sh` fetches `i32.wast`
 and `i64.wast` at the commit of the tag `wg-3.0` into `third_party/` (the harness, in
-`tests/unit/test_wast.cpp`, fails without them), and every `assert_return` and `assert_trap`
+`tests/unit/test_wast.cpp`, fails without them on every host, and checks each file against the
+digest in `tools/wasm/SHA256SUMS`; it finds the library from a compile-time define, so the working
+directory does not matter, and `GRJIT_WASM_SUITE_DIR` names another directory that holds `test/core/`), and every `assert_return` and `assert_trap`
 runs through the IR. Counts at that tag: `i32.wast` 374 passed, 85 excluded (the
 `assert_invalid` and `assert_malformed` it cannot run), 0 failed; `i64.wast` 384, 31, 0.
 

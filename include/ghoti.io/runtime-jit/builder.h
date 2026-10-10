@@ -189,11 +189,18 @@ GRJIT_API GRJIT_Result grjit_builder_set_natives(
 GRJIT_API GRJIT_Result grjit_builder_set_poll_helper(
     GRJIT_Builder * builder, GRJIT_PollHelper helper);
 
-/** @brief `dst = imm`. */
+/**
+ * @brief `dst = imm`. For an `I32` destination `imm` must lie in `[INT32_MIN, UINT32_MAX]` (either
+ *   spelling of a 32-bit pattern, which is stored zero-extended); the verifier refuses another.
+ */
 GRJIT_API GRJIT_Result grjit_builder_const(
     GRJIT_Builder * builder, GRJIT_VReg dst, int64_t imm);
 
-/** @brief `dst = src`. */
+/**
+ * @brief `dst = src`. An `I32` moves only into an `I32`, from an `I32` register or a 32-bit
+ *   immediate; no other pair of types changes (use ::grjit_builder_bitcast, or ::GRJIT_OP_WRAP and
+ *   the extensions between `I32` and `I64`).
+ */
 GRJIT_API GRJIT_Result grjit_builder_move(
     GRJIT_Builder * builder, GRJIT_VReg dst, GRJIT_Operand src);
 
@@ -204,7 +211,10 @@ GRJIT_API GRJIT_Result grjit_builder_move(
  * `MOVE` keeps refusing a change of type; this is the one operation that
  * changes it. It is not a conversion: the 64 bits are the same. A bitcast from
  * a `REF` to an `I64` never makes the computed value a reference, and the
- * destination's type is what decides whether a stack map names it.
+ * destination's type is what decides whether a stack map names it. Neither the source
+ * nor the destination may be an `I32`: the source is refused (its word is a 32-bit value,
+ * not bits of another type), and so is an `I32` destination, which would not be
+ * zero-extended. Convert with ::GRJIT_OP_WRAP, ::GRJIT_OP_EXTEND_S or ::GRJIT_OP_EXTEND_U.
  */
 GRJIT_API GRJIT_Result grjit_builder_bitcast(
     GRJIT_Builder * builder, GRJIT_VReg dst, GRJIT_VReg src);
@@ -231,7 +241,15 @@ GRJIT_API GRJIT_Result grjit_builder_binary(GRJIT_Builder * builder,
 GRJIT_API GRJIT_Result grjit_builder_unary(
     GRJIT_Builder * builder, GRJIT_OpKind kind, GRJIT_VReg dst, GRJIT_Operand a);
 
-/** @brief `dst = (a cmp b) ? 1 : 0`. */
+/**
+ * @brief `dst = (a cmp b) ? 1 : 0`.
+ *
+ * The width of the comparison is that of its register operands: two `I32` operands (an
+ * immediate is read as its low 32 bits) compare as 32-bit numbers, the signed conditions
+ * reading them as signed; otherwise it is 64 bits. `dst` is an `I64` or an `I32` register
+ * (`i64.lt_s` answers an `i32` in WebAssembly). `eqz` is `EQ` against `#0`. An `I32` and an
+ * `I64` operand are not compared.
+ */
 GRJIT_API GRJIT_Result grjit_builder_cmp(GRJIT_Builder * builder,
     GRJIT_Cmp cmp, GRJIT_VReg dst, GRJIT_Operand a, GRJIT_Operand b);
 
@@ -239,13 +257,15 @@ GRJIT_API GRJIT_Result grjit_builder_cmp(GRJIT_Builder * builder,
  * @brief `dst = load of width_bits at base + disp`, zero- or sign-extended.
  *
  * @param width_bits 8, 16, 32 or 64 (the verifier refuses others).
- * @param sign_extend True for `LOAD_S`.
+ * @param sign_extend True for `LOAD_S`. An `I32` destination takes a zero-extending load
+ *   of 8, 16 or 32 bits only (a sign-extending or 64-bit load would leave its upper half
+ *   non-zero), and the verifier refuses the others.
  */
 GRJIT_API GRJIT_Result grjit_builder_load(GRJIT_Builder * builder,
     GRJIT_VReg dst, GRJIT_VReg base, int32_t disp, uint32_t width_bits,
     bool sign_extend);
 
-/** @brief Stores the low `width_bits` of `value` at `base + disp`. */
+/** @brief Stores the low `width_bits` of `value` at `base + disp`. `value` may be an `I32`. */
 GRJIT_API GRJIT_Result grjit_builder_store(GRJIT_Builder * builder,
     GRJIT_VReg base, int32_t disp, uint32_t width_bits, GRJIT_Operand value);
 
@@ -396,7 +416,8 @@ GRJIT_API GRJIT_Result grjit_builder_poll(GRJIT_Builder * builder,
 
 /**
  * @brief A guard: if `cond` is zero, leave through a deopt exit described by
- *   the frame state (copied).
+ *   the frame state (copied). `cond` may be an `I32` (its whole word is tested, and an `I32`
+ *   is zero-extended). The guards of a division are written with this; see ::GRJIT_OP_DIV_S.
  */
 GRJIT_API GRJIT_Result grjit_builder_guard(GRJIT_Builder * builder,
     GRJIT_Operand cond, GRCORE_PollIdentity identity,
@@ -406,7 +427,7 @@ GRJIT_API GRJIT_Result grjit_builder_guard(GRJIT_Builder * builder,
 GRJIT_API GRJIT_Result grjit_builder_br(
     GRJIT_Builder * builder, GRJIT_BlockId target);
 
-/** @brief Jump to `then_block` if `cond` is non-zero, else `else_block`. */
+/** @brief Jump to `then_block` if `cond` is non-zero, else `else_block`. `cond` may be an `I32`. */
 GRJIT_API GRJIT_Result grjit_builder_br_if(GRJIT_Builder * builder,
     GRJIT_Operand cond, GRJIT_BlockId then_block, GRJIT_BlockId else_block);
 

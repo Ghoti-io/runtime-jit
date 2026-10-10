@@ -245,7 +245,7 @@ typedef enum GRJIT_OpKind {
   GRJIT_OP_EXT32_S, ///< The same for the low 32 bits; `I64` only.
   GRJIT_OP_DIV_S,  ///< `dst = a / b`, signed, truncating. **Partial**: needs, earlier
                    ///< in the same block, a `GUARD` whose operand is `b` itself or a
-                   ///< `CMP NE b, #0` (or `UGT b, #0`) of it, with `b` not assigned in
+                   ///< `CMP NE b, #0` (or `#0, b`), `UGT b, #0` or `ULT #0, b` of it, with `b` not assigned in
                    ///< between; and a guard that `a == MIN && b == -1` is false (a `CMP
                    ///< EQ a, #MIN` and a `CMP EQ b, #-1` joined by `AND`, tested for
                    ///< `EQ #0`, or the same two `CMP NE` joined by `OR`), with neither
