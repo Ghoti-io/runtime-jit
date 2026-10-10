@@ -1706,6 +1706,13 @@ TEST(FloatRun, TheOperationsAreRoundedOneAtATimeAndSubnormalsSurviveUnderTheDefa
 }
 
 
+namespace {
+/* Used by the helper tests, and by the refusal tests on every host. */
+float h_f32_result(float a, double b) {
+  return a + static_cast<float>(b);
+}
+} // namespace
+
 /* ---- Floats through a helper call (SysV) --------------------------------------------------------- */
 
 #if defined(__x86_64__) && defined(__linux__)
@@ -1912,10 +1919,6 @@ double h_mixed(int64_t a, double b, int64_t c, float e) {
   return b * 2.0 + static_cast<double>(e) + static_cast<double>(a + c);
 }
 
-float h_f32_result(float a, double b) {
-  return a + static_cast<float>(b);
-}
-
 } // namespace
 
 TEST(FloatHelpers, ACompiledCallOfARealCppHelperGetsItsArgumentsAndGivesItsResultExactly) {
@@ -1987,6 +1990,81 @@ TEST(FloatHelpers, ACallOverTheLimitIsRefusedAsBeforeAndANativeTakesNoFloat) {
   n.ret(V(r));
   Fn f(n.finish());
   EXPECT_NE(refused(f.f), "") << "a float register is not the i64 the native takes";
+}
+
+/* A float argument and a float result of a helper that can reach a GC point: the walk start is stored
+ * first, and the argument is read from its slot after it, so a collection under the helper sees the
+ * frame; the live reference is the only stack-map entry, the float is raw in the frame state. */
+namespace {
+double gc_point_helper(double a, int64_t n) {
+  return a * 4.0 + static_cast<double>(n);
+}
+} // namespace
+
+TEST(FloatHelpers, ACallThatCanReachAGcPointTakesAndReturnsFloatsAndKeepsThemOutOfTheStackMap) {
+  GRJIT_REQUIRE_BACKEND();
+  JitWorld w;
+  B b("gcfloat", 3);
+  GRJIT_CallHooks h{};
+  h.deopt = [](void *, uint64_t) -> uint32_t { return 0; };
+  b.callable(h);
+  GRJIT_VReg x = b.param(GRJIT_TYPE_F64), n = b.param(GRJIT_TYPE_I64), r = b.param(GRJIT_TYPE_REF),
+             y = b.reg(GRJIT_TYPE_F64), keep = b.reg(GRJIT_TYPE_I64);
+  b.at(b.block());
+  b.call_gc(y, reinterpret_cast<const void *>(&gc_point_helper), {V(x), V(n)}, {9, 2},
+      {grjit_frame_slot_vreg(x), grjit_frame_slot_vreg(n), grjit_frame_slot_vreg(r)});
+  b.bitcast(keep, r);
+  b.ret(V(y));
+  Fn f(b.finish());
+  char why[256] = {0};
+  ASSERT_EQ(grjit_function_verify(f, nullptr, why, sizeof why), GRJIT_OK) << why;
+  Compiled c(f, w.pages());
+  ASSERT_TRUE(c) << grjit_result_string(c.result);
+  const GRCORE_CodeMeta * meta = grjit_code_meta(c.code);
+  size_t sites = 0;
+  for (size_t i = 0; i < meta->site_count; i++) {
+    const GRCORE_CodeSite & s = meta->sites[i];
+    if (s.kind != GRCORE_SITE_GC_POINT_CALL || s.identity.function != 9) {
+      continue;
+    }
+    sites++;
+    ASSERT_EQ(s.live_count, 1u);
+    EXPECT_EQ(s.live[0].slot_kind, GRCORE_SLOT_VALUE);
+    ASSERT_EQ(s.frame_state_count, 3u);
+    EXPECT_EQ(s.frame_state[0].representation, GRCORE_REPR_F64);
+    EXPECT_EQ(s.frame_state[0].slot_kind, GRCORE_SLOT_RAW);
+    EXPECT_EQ(s.frame_state[1].representation, GRCORE_REPR_BITS);
+  }
+  EXPECT_EQ(sites, 1u);
+  Outcome o = run(c.code, w.ctx, {B64(2.5), 3, 0});
+  ASSERT_EQ(o.exit, uint32_t{GRJIT_EXIT_RETURNED}) << said(c.code, o);
+  EXPECT_EQ(f64of(o.out[0]), 13.0);
+}
+
+#else // not x86-64 Linux: the same tests, skipped by name
+
+TEST(FloatHelpers, EveryMixOfIntegerAndFloatArgumentsArrivesInItsRegisterBySysVClassification) {
+  GTEST_SKIP() << "the float helper ABI is checked against an assembly probe on x86-64 Linux only";
+}
+
+TEST(FloatHelpers, TheNamedClassificationFromTheStoryComesOutAsStated) {
+  GTEST_SKIP() << "x86-64 Linux only";
+}
+
+TEST(FloatHelpers, AFloatResultIsTakenFromXmm0ByItsOwnWidthWhateverIsAboveBit31) {
+  GTEST_SKIP() << "x86-64 Linux only";
+}
+
+TEST(FloatHelpers, ACompiledCallOfARealCppHelperGetsItsArgumentsAndGivesItsResultExactly) {
+  GTEST_SKIP() << "x86-64 Linux only";
+}
+
+TEST(FloatHelpers, ACallOverTheLimitIsRefusedAsBeforeAndANativeTakesNoFloat) {
+  GTEST_SKIP() << "x86-64 Linux only";
+}
+
+TEST(FloatHelpers, ACallThatCanReachAGcPointTakesAndReturnsFloatsAndKeepsThemOutOfTheStackMap) {
+  GTEST_SKIP() << "x86-64 Linux only";
 }
 
 #endif // x86-64 Linux
