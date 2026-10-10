@@ -77,7 +77,7 @@ inline Bounds trunc_bounds(bool is_signed, bool wide) {
 }
 
 /* The next double (or float) `ulps` away in the direction of `toward`. */
-inline double step(double v, bool dbl, int ulps, double toward) {
+inline double step_ulps(double v, bool dbl, int ulps, double toward) {
   for (int i = 0; i < (ulps < 0 ? -ulps : ulps); i++) {
     const double dir = ulps > 0 ? toward : -toward;
     v = dbl ? std::nextafter(v, dir)
@@ -224,8 +224,8 @@ inline FloatOp build_float_op(const std::string & instr, TruncGuards guards = Tr
           lo0 = static_cast<double>(static_cast<float>(lo0));
           closed = true;
         }
-        const double lo = step(lo0, dbl, guards.widen_lo, -INFINITY);
-        const double hi = step(bd.hi, dbl, guards.widen_hi, INFINITY);
+        const double lo = step_ulps(lo0, dbl, guards.widen_lo, -INFINITY);
+        const double hi = step_ulps(bd.hi, dbl, guards.widen_hi, INFINITY);
         GRJIT_VReg l = b.reg(GRJIT_TYPE_I32), h = b.reg(GRJIT_TYPE_I32), ok = b.reg(GRJIT_TYPE_I32);
         b.cmp(closed ? GRJIT_CMP_GE : GRJIT_CMP_GT, l, V(x),
             I(static_cast<int64_t>(imm_bits(lo, dbl))));
@@ -255,6 +255,73 @@ inline FloatOp build_any_op(const std::string & instr, TruncGuards guards = Trun
   w.partial = false; // an integer partial operation is not truncated here
   return w;
 }
+
+/* ---- The boundary values ------------------------------------------------------------------ */
+
+/* Bit patterns that matter to a float operation: the signs of zero, the smallest and largest
+ * subnormals and normals, the infinities, NaNs of both signs and several payloads (quiet and
+ * signalling), values around 2^52 and the truncation bounds, and each bound one unit in the last
+ * place either side. */
+
+inline std::vector<uint64_t> f64_values() {
+  std::vector<uint64_t> v = {0, 0x8000000000000000ull, 1, 0x8000000000000001ull, 2,
+      0x000FFFFFFFFFFFFFull, 0x800FFFFFFFFFFFFFull, 0x0010000000000000ull, 0x8010000000000000ull,
+      0x7FEFFFFFFFFFFFFFull, 0xFFEFFFFFFFFFFFFFull, 0x7FF0000000000000ull, 0xFFF0000000000000ull,
+      0x7FF8000000000000ull, 0xFFF8000000000000ull, 0x7FF0000000000001ull, 0xFFF0000000000001ull,
+      0x7FF8000000000123ull, 0x7FFFFFFFFFFFFFFFull, 0xFFFFFFFFFFFFFFFFull, 0x7FF4000000000000ull};
+  for (double d : {1.0, -1.0, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5, 3.5, 0.3, -0.3, 1.1, 3.141592653589793,
+           1e300, -1e300, 1e-300, 4503599627370495.5, 4503599627370496.0, 4503599627370497.0,
+           9007199254740993.0, 0.49999999999999994, 0.9999999999999999, 4294967295.5,
+           2147483647.5, -2147483648.9, 123456789.0, 1e10, 1e19, 1.8446744073709552e19}) {
+    v.push_back(f64bits(d));
+  }
+  // The bounds of the truncations and their neighbours, one unit in the last place each side.
+  for (double b : {-2147483649.0, -2147483648.0, 2147483648.0, 4294967296.0, -1.0, 9223372036854775808.0,
+           -9223372036854775808.0, 18446744073709551616.0, 2147483647.0, 4294967295.0, 4503599627370496.0}) {
+    v.push_back(f64bits(b));
+    v.push_back(f64bits(std::nextafter(b, INFINITY)));
+    v.push_back(f64bits(std::nextafter(b, -INFINITY)));
+  }
+  return v;
+}
+
+inline std::vector<uint64_t> f32_values() {
+  std::vector<uint64_t> v = {0, 0x80000000u, 1, 0x80000001u, 2, 0x007FFFFFu, 0x807FFFFFu,
+      0x00800000u, 0x80800000u, 0x7F7FFFFFu, 0xFF7FFFFFu, 0x7F800000u, 0xFF800000u, 0x7FC00000u,
+      0xFFC00000u, 0x7F800001u, 0xFF800001u, 0x7FC00123u, 0x7FFFFFFFu, 0xFFFFFFFFu, 0x7FA00000u};
+  for (float d : {1.0f, -1.0f, 0.5f, -0.5f, 1.5f, -1.5f, 2.5f, -2.5f, 3.5f, 0.3f, -0.3f, 1.1f,
+           3.14159274f, 1e30f, -1e30f, 1e-30f, 8388607.5f, 8388608.0f, 8388609.0f, 16777217.0f,
+           0.49999997f, 0.99999994f, 4294967040.0f, 2147483520.0f, 123456792.0f, 1e10f}) {
+    v.push_back(f32bits(d));
+  }
+  for (float b : {-2147483904.0f, -2147483648.0f, 2147483648.0f, 4294967296.0f, -1.0f,
+           9223372036854775808.0f, -9223372036854775808.0f, 18446744073709551616.0f, 2147483520.0f,
+           4294967040.0f, 8388608.0f}) {
+    v.push_back(f32bits(b));
+    v.push_back(f32bits(std::nextafterf(b, INFINITY)));
+    v.push_back(f32bits(std::nextafterf(b, -INFINITY)));
+  }
+  return v;
+}
+
+inline std::vector<uint64_t> int_values(bool narrow) {
+  std::vector<uint64_t> v = {0, 1, 2, 3, 0x7F, 0x80, 0xFF, 0x7FFF, 0x8000, 0xFFFF, 0x10000,
+      0x7FFFFFFE, 0x7FFFFFFF, 0x80000000u, 0x80000001u, 0xFFFFFFFEu, 0xFFFFFFFFu, 0x01000001u,
+      0x01000003u, 0x00FFFFFFu, 0x1000000u, 0x40000001u, 0xC0000001u};
+  if (!narrow) {
+    for (uint64_t x : std::vector<uint64_t>{0x100000000ull, 0x100000001ull, 0x1FFFFFFFFull,
+             0x0020000000000000ull, 0x0020000000000001ull, 0x0020000000000003ull,
+             0x7FFFFFFFFFFFFFFEull, 0x7FFFFFFFFFFFFFFFull, 0x8000000000000000ull,
+             0x8000000000000001ull, 0x8000000000000400ull, 0x8000000000000401ull,
+             0x8000008000000000ull, 0x8000008000000001ull, 0xFFFFFFFF80000000ull,
+             0xFFFFFFFFFFFFFFFEull, 0xFFFFFFFFFFFFFFFFull, 0xFFFFFFFFFFFFF800ull,
+             0xFFFFFFFFFFFFFC00ull, 0xFFFFFFFFFFFFFBFFull, 0x123456789ABCDEF0ull}) {
+      v.push_back(x);
+    }
+  }
+  return v;
+}
+
 
 } // namespace floatfx
 

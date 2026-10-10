@@ -16,6 +16,7 @@
 #include "test_helpers.h"
 
 #include "../int_fixture.h"
+#include "../float_fixture.h"
 
 #include "../ir_eval.h"
 #include "../a64_sim.h"
@@ -24,6 +25,7 @@
 
 #include <cstdio>
 #include <random>
+#include <set>
 
 namespace {
 
@@ -566,6 +568,354 @@ TEST(Differential, GeneratedIntegerProgramsRunTheSameCompiledAndEvaluated) {
   EXPECT_GT(const_dividends, 4900u);
   EXPECT_GT(negative_i32_imms, 5700u);
   EXPECT_GT(multi_block, 2200u);
+}
+
+/* ---- Generated float programs (spec-runtime-float, story 3) -----------------------------------
+ *
+ * The same comparison for the float types and operations: a random program over f32, f64, i32 and
+ * i64 registers - the seven binary and seven unary float operations, comparisons into an i32 or an
+ * i64, the conversions both ways (integer to float, saturating and guarded truncation, demote,
+ * promote, reinterpret), constants and moves, and a diamond - whose operands are the boundary values
+ * (zeros of both signs, subnormals, the smallest and largest normals, infinities, NaNs of both signs
+ * and several payloads quiet and signalling, integers at the conversion boundaries, floats at the
+ * truncation bounds and a unit in the last place either side) or earlier results. A truncation has
+ * its guards in front of it, in a shape drawn from those the verifier accepts, so a value out of
+ * range or a NaN is an exit with the frame state it names.
+ *
+ * Floats are compared by bits with any two NaNs equal: the compiled code and C++ may disagree on
+ * which payload survives when both operands are NaN. So the program is made insensitive to a payload
+ * where it leaves the float domain: a reinterpret, and the fold of every register into one result,
+ * replace the bits of a NaN by one canonical pattern first. A frame state holds two integers and a
+ * float, and the float is compared by the same rule. Own generator, so no draw order of ir_gen.h
+ * moves. */
+
+namespace {
+
+struct FloatProgram {
+  GRJIT_Function * f = nullptr;
+  size_t params = 0;
+  size_t truncs = 0, converts = 0, compares = 0, nan_values = 0;
+};
+
+FloatProgram generate_float_program(IntGen & g) {
+  using namespace floatfx;
+  static const std::vector<uint64_t> e32 = f32_values(), e64 = f64_values();
+  static const std::vector<uint64_t> i32e = int_values(true), i64e = int_values(false);
+  B b("floats", 3);
+  std::vector<GRJIT_VReg> pf32, pf64, pi32, pi64; // every register of each type assigned so far
+  for (int i = 0; i < 3; i++) pf32.push_back(b.param(GRJIT_TYPE_F32));
+  for (int i = 0; i < 3; i++) pf64.push_back(b.param(GRJIT_TYPE_F64));
+  for (int i = 0; i < 2; i++) pi32.push_back(b.param(GRJIT_TYPE_I32));
+  for (int i = 0; i < 2; i++) pi64.push_back(b.param(GRJIT_TYPE_I64));
+  b.at(b.block());
+  uint64_t site = 0;
+  FloatProgram prog;
+  prog.params = 10;
+  std::set<GRJIT_VReg> consts; // registers made by a CONST
+  auto fresh = [&](GRJIT_Type t) { return b.reg(t); };
+  auto pick = [&](const std::vector<GRJIT_VReg> & v) { return v[g.pick(v.size())]; };
+  auto fimm = [&](bool dbl) -> int64_t { return static_cast<int64_t>(dbl ? e64[g.pick(e64.size())] : e32[g.pick(e32.size())]); };
+  auto foperand = [&](bool dbl) -> GRJIT_Operand {
+    return g.pick(5) == 0 ? I(fimm(dbl)) : V(pick(dbl ? pf64 : pf32));
+  };
+  auto state = [&]() {
+    return std::vector<GRJIT_FrameSlot>{grjit_frame_slot_vreg(pick(pi64)), grjit_frame_slot_vreg(pick(pi32)),
+        grjit_frame_slot_vreg(pick(pf64))};
+  };
+  /* The bits of a float register as an integer register, a NaN replaced by the canonical NaN, so that a
+   * payload that is not fixed does not leave the float domain. */
+  auto clean_bits = [&](GRJIT_VReg r, bool dbl) -> GRJIT_VReg {
+    GRJIT_Type it = dbl ? GRJIT_TYPE_I64 : GRJIT_TYPE_I32;
+    GRJIT_VReg flag = fresh(GRJIT_TYPE_I32), bits = fresh(it), mask = fresh(it), nm = fresh(it),
+               kept = fresh(it), canon = fresh(it), out = fresh(it);
+    b.cmp(GRJIT_CMP_NE, flag, V(r), V(r));
+    b.un(GRJIT_OP_REINTERPRET, bits, V(r));
+    if (dbl) {
+      GRJIT_VReg wide = fresh(GRJIT_TYPE_I64);
+      b.un(GRJIT_OP_EXTEND_U, wide, V(flag));
+      b.un(GRJIT_OP_NEG, mask, V(wide));
+    } else {
+      b.un(GRJIT_OP_NEG, mask, V(flag));
+    }
+    b.un(GRJIT_OP_NOT, nm, V(mask));
+    b.bin(GRJIT_OP_AND, kept, V(bits), V(nm));
+    b.bin(GRJIT_OP_AND, canon, V(mask), I(dbl ? 0x7FF8000000000000ll : 0x7FC00000ll));
+    b.bin(GRJIT_OP_OR, out, V(kept), V(canon));
+    return out;
+  };
+  // copysign reads the sign of its second operand, and the sign of a NaN that an operation made is
+  // not fixed (hardware gives the default NaN its sign, the evaluator another): so its second
+  // operand is an immediate or a parameter, whose bits are the same on both sides. The other six
+  // binary operations are free: a NaN in is a NaN out, and a NaN is a NaN to every consumer.
+  const std::vector<GRJIT_VReg> params32(pf32.begin(), pf32.begin() + 3),
+      params64(pf64.begin(), pf64.begin() + 3);
+  auto sign_operand = [&](bool dbl) -> GRJIT_Operand {
+    return g.pick(3) == 0 ? I(fimm(dbl)) : V(pick(dbl ? params64 : params32));
+  };
+  auto binary_op = [&](GRJIT_VReg d, bool dbl) {
+    static const GRJIT_OpKind six[] = {GRJIT_OP_FADD, GRJIT_OP_FSUB, GRJIT_OP_FMUL, GRJIT_OP_FDIV,
+        GRJIT_OP_FMIN, GRJIT_OP_FMAX};
+    const uint64_t k = g.pick(7);
+    if (k == 6) {
+      b.bin(GRJIT_OP_FCOPYSIGN, d, foperand(dbl), sign_operand(dbl));
+    } else {
+      b.bin(six[k], d, foperand(dbl), foperand(dbl));
+    }
+  };
+  static const GRJIT_OpKind unary[] = {GRJIT_OP_FNEG, GRJIT_OP_FABS, GRJIT_OP_FSQRT, GRJIT_OP_FCEIL,
+      GRJIT_OP_FFLOOR, GRJIT_OP_FTRUNC, GRJIT_OP_FNEAREST};
+  static const GRJIT_Cmp cmps[] = {GRJIT_CMP_EQ, GRJIT_CMP_NE, GRJIT_CMP_LT, GRJIT_CMP_LE, GRJIT_CMP_GT,
+      GRJIT_CMP_GE};
+  const size_t steps = 8 + g.pick(24);
+  for (size_t step = 0; step < steps; step++) {
+    const bool dbl = g.pick(2) == 0;
+    auto & fpool = dbl ? pf64 : pf32;
+    const GRJIT_Type FT = dbl ? GRJIT_TYPE_F64 : GRJIT_TYPE_F32;
+    switch (g.pick(14)) {
+      case 0:
+      case 1:
+      case 2: {
+        GRJIT_VReg d = fresh(FT);
+        binary_op(d, dbl);
+        fpool.push_back(d);
+        break;
+      }
+      case 3:
+      case 4: {
+        GRJIT_VReg d = fresh(FT);
+        b.un(unary[g.pick(7)], d, foperand(dbl));
+        fpool.push_back(d);
+        break;
+      }
+      case 5: {
+        const bool result32 = g.pick(2) == 0;
+        GRJIT_VReg d = fresh(result32 ? GRJIT_TYPE_I32 : GRJIT_TYPE_I64);
+        b.cmp(cmps[g.pick(6)], d, V(pick(fpool)), foperand(dbl));
+        (result32 ? pi32 : pi64).push_back(d);
+        prog.compares++;
+        break;
+      }
+      case 6: {
+        // integer to float
+        const bool from64 = g.pick(2) == 0;
+        GRJIT_VReg d = fresh(FT);
+        b.un(g.pick(2) == 0 ? GRJIT_OP_CONVERT_S : GRJIT_OP_CONVERT_U, d, V(pick(from64 ? pi64 : pi32)));
+        fpool.push_back(d);
+        prog.converts++;
+        break;
+      }
+      case 7: {
+        // saturating truncation
+        const bool to64 = g.pick(2) == 0;
+        GRJIT_VReg d = fresh(to64 ? GRJIT_TYPE_I64 : GRJIT_TYPE_I32);
+        b.un(g.pick(2) == 0 ? GRJIT_OP_TRUNC_SAT_S : GRJIT_OP_TRUNC_SAT_U, d, V(pick(fpool)));
+        (to64 ? pi64 : pi32).push_back(d);
+        prog.converts++;
+        break;
+      }
+      case 8: {
+        // a guarded truncation, in one of the shapes the verifier accepts
+        const bool to64 = g.pick(2) == 0, is_signed = g.pick(2) == 0;
+        // (A register a CONST set is judged as it stands by the verifier, so it is not a source here.)
+        GRJIT_VReg x = pick(fpool), d = fresh(to64 ? GRJIT_TYPE_I64 : GRJIT_TYPE_I32);
+        for (int tries = 0; tries < 20 && consts.count(x) != 0; tries++) {
+          x = pick(fpool);
+        }
+        if (consts.count(x) != 0) {
+          x = (dbl ? pf64 : pf32)[0];
+        }
+        const Bounds bd = trunc_bounds(is_signed, to64);
+        double lo0 = bd.lo;
+        bool closed = bd.lo_closed;
+        if (!dbl && static_cast<double>(static_cast<float>(lo0)) != lo0) {
+          lo0 = static_cast<double>(static_cast<float>(lo0));
+          closed = true;
+        }
+        // sometimes a narrower guard: a unit in the last place in, at either end
+        const double lo = step_ulps(lo0, dbl, g.pick(4) == 0 ? -1 : 0, -INFINITY);
+        const double hi = step_ulps(bd.hi, dbl, g.pick(4) == 0 ? -1 : 0, INFINITY);
+        if (g.pick(2) == 0) {
+          GRJIT_VReg same = fresh(GRJIT_TYPE_I32);
+          b.cmp(GRJIT_CMP_EQ, same, V(x), V(x));
+          b.guard(V(same), {7, ++site}, state());
+        }
+        GRJIT_VReg l = fresh(GRJIT_TYPE_I32), h = fresh(GRJIT_TYPE_I32), ok = fresh(GRJIT_TYPE_I32);
+        switch (g.pick(3)) {
+          case 0:
+            b.cmp(closed ? GRJIT_CMP_GE : GRJIT_CMP_GT, l, V(x), I(static_cast<int64_t>(imm_bits(lo, dbl))));
+            b.cmp(GRJIT_CMP_LT, h, V(x), I(static_cast<int64_t>(imm_bits(hi, dbl))));
+            b.bin(GRJIT_OP_AND, ok, V(l), V(h));
+            break;
+          case 1: // mirrored, joined in the other order
+            b.cmp(closed ? GRJIT_CMP_LE : GRJIT_CMP_LT, l, I(static_cast<int64_t>(imm_bits(lo, dbl))), V(x));
+            b.cmp(GRJIT_CMP_GT, h, I(static_cast<int64_t>(imm_bits(hi, dbl))), V(x));
+            b.bin(GRJIT_OP_AND, ok, V(h), V(l));
+            break;
+          default: // the upper bound as <=, one unit in the last place in
+            b.cmp(closed ? GRJIT_CMP_GE : GRJIT_CMP_GT, l, V(x), I(static_cast<int64_t>(imm_bits(lo, dbl))));
+            b.cmp(GRJIT_CMP_LE, h, V(x), I(static_cast<int64_t>(imm_bits(step_ulps(hi, dbl, -1, INFINITY), dbl))));
+            b.bin(GRJIT_OP_AND, ok, V(l), V(h));
+            break;
+        }
+        b.guard(V(ok), {7, ++site}, state());
+        b.un(is_signed ? GRJIT_OP_TRUNC_S : GRJIT_OP_TRUNC_U, d, V(x));
+        (to64 ? pi64 : pi32).push_back(d);
+        prog.truncs++;
+        break;
+      }
+      case 9: {
+        GRJIT_VReg d = fresh(dbl ? GRJIT_TYPE_F32 : GRJIT_TYPE_F64);
+        b.un(dbl ? GRJIT_OP_DEMOTE : GRJIT_OP_PROMOTE, d, V(pick(dbl ? pf64 : pf32)));
+        (dbl ? pf32 : pf64).push_back(d);
+        break;
+      }
+      case 10: {
+        // reinterpret: integer bits to a float, and a float's bits (payload-cleaned) to an integer
+        if (g.pick(2) == 0) {
+          GRJIT_VReg d = fresh(FT);
+          b.un(GRJIT_OP_REINTERPRET, d, V(pick(dbl ? pi64 : pi32)));
+          fpool.push_back(d);
+        } else {
+          (dbl ? pi64 : pi32).push_back(clean_bits(pick(fpool), dbl));
+        }
+        break;
+      }
+      case 11: {
+        GRJIT_VReg d = fresh(FT);
+        if (g.pick(2) == 0) {
+          b.cnst(d, fimm(dbl));
+          consts.insert(d);
+        } else {
+          b.mov(d, foperand(dbl));
+        }
+        fpool.push_back(d);
+        break;
+      }
+      case 12: {
+        // an integer operation beside the floats, so the two kinds of register mix in one function
+        GRJIT_VReg d = fresh(GRJIT_TYPE_I64);
+        b.bin(GRJIT_OP_ADD, d, V(pick(pi64)), I(static_cast<int64_t>(i64e[g.pick(i64e.size())])));
+        pi64.push_back(d);
+        GRJIT_VReg e = fresh(GRJIT_TYPE_I32);
+        b.bin(GRJIT_OP_XOR, e, V(pick(pi32)), I(static_cast<int64_t>(i32e[g.pick(i32e.size())])));
+        pi32.push_back(e);
+        break;
+      }
+      default: {
+        // a diamond on a comparison: the two arms assign one float register
+        GRJIT_VReg c = fresh(GRJIT_TYPE_I32), d = fresh(FT);
+        b.cmp(cmps[g.pick(6)], c, V(pick(fpool)), foperand(dbl));
+        GRJIT_BlockId t_arm = b.block(), e_arm = b.block(), join = b.block();
+        b.br_if(V(c), t_arm, e_arm);
+        for (GRJIT_BlockId arm : {t_arm, e_arm}) {
+          b.at(arm);
+          if (g.pick(2) == 0) {
+            binary_op(d, dbl);
+          } else {
+            b.un(unary[g.pick(7)], d, foperand(dbl));
+          }
+          b.br(join);
+        }
+        b.at(join);
+        fpool.push_back(d);
+        break;
+      }
+    }
+  }
+  // Fold every register into one i64: floats through their payload-cleaned bits, i32s extended.
+  GRJIT_VReg acc = fresh(GRJIT_TYPE_I64);
+  b.cnst(acc, 0);
+  auto mix = [&](GRJIT_VReg v, bool narrow, unsigned rot) {
+    GRJIT_VReg w = v;
+    if (narrow) {
+      w = fresh(GRJIT_TYPE_I64);
+      b.un(GRJIT_OP_EXTEND_U, w, V(v));
+    }
+    b.bin(GRJIT_OP_ROTL, acc, V(acc), I(rot));
+    b.bin(GRJIT_OP_XOR, acc, V(acc), V(w));
+  };
+  for (GRJIT_VReg r : pi64) mix(r, false, 5);
+  for (GRJIT_VReg r : pi32) mix(r, true, 7);
+  for (GRJIT_VReg r : pf64) mix(clean_bits(r, true), false, 11);
+  for (GRJIT_VReg r : pf32) mix(clean_bits(r, false), true, 13);
+  b.ret(V(acc));
+  prog.f = b.finish();
+  return prog;
+}
+
+} // namespace
+
+TEST(Differential, GeneratedFloatProgramsRunTheSameCompiledAndEvaluatedWithNansEqual) {
+#if defined(__x86_64__) && defined(__linux__)
+  GRJIT_REQUIRE_BACKEND();
+#else
+  GTEST_SKIP() << "the float operations are emitted for x86-64 SysV only; the arm64 and Win64 refusals are tested in testFloat_ir";
+#endif
+  JitWorld w;
+  size_t returned = 0, deopted = 0, truncs = 0, converts = 0, compares = 0, multi_block = 0;
+  for (uint64_t seed = 1; seed <= 3000; seed++) {
+    IntGen g(seed * 0x9E3779B97F4A7C15ull + 0xF10A7);
+    FloatProgram prog = generate_float_program(g);
+    Fn f(prog.f);
+    char why[256] = {0};
+    ASSERT_EQ(grjit_function_verify(f, nullptr, why, sizeof why), GRJIT_OK)
+        << describe(f, seed, std::string("the generator made a function the verifier refuses: ") + why);
+    truncs += prog.truncs;
+    converts += prog.converts;
+    compares += prog.compares;
+    multi_block += grjit_function_block_count(f) > 1;
+    Compiled c(f, w.pages());
+    ASSERT_TRUE(c) << describe(f, seed, grjit_result_string(c.result));
+    static const std::vector<uint64_t> e32 = floatfx::f32_values(), e64 = floatfx::f64_values();
+    static const std::vector<uint64_t> i32e = floatfx::int_values(true), i64e = floatfx::int_values(false);
+    for (int run = 0; run < 6; run++) {
+      std::vector<uint64_t> args;
+      for (size_t i = 0; i < prog.params; i++) {
+        uint64_t v;
+        if (i < 3) {
+          v = e32[g.pick(e32.size())] | (g.pick(2) == 0 ? (g.rng() | 1) << 32 : 0); // garbage above bit 31
+        } else if (i < 6) {
+          v = e64[g.pick(e64.size())];
+        } else if (i < 8) {
+          v = i32e[g.pick(i32e.size())] | (g.pick(2) == 0 ? (g.rng() | 1) << 32 : 0);
+        } else {
+          v = i64e[g.pick(i64e.size())];
+        }
+        args.push_back(v);
+      }
+      auto compiled = intfx::run(c.code, w.ctx, args);
+      ASSERT_EQ(compiled.fault, 0) << describe(f, seed, "the compiled code faulted in hardware");
+      ireval::Result eval = ireval::eval(f, w.ctx, nullptr, args);
+      ASSERT_EQ(compiled.exit, eval.exit) << describe(f, seed, "different exits");
+      if (compiled.exit == GRJIT_EXIT_RETURNED) {
+        ASSERT_EQ(compiled.out[0], eval.out[0]) << describe(f, seed, "different results");
+        returned++;
+      } else {
+        ASSERT_EQ(compiled.exit, uint32_t{GRJIT_EXIT_DEOPT});
+        const size_t slots = grjit_function_interp_slot_count(f);
+        ASSERT_EQ(slots, 3u);
+        ASSERT_EQ(compiled.out[0], eval.out[0]) << describe(f, seed, "different frame state slot 0");
+        ASSERT_EQ(compiled.out[1], eval.out[1]) << describe(f, seed, "different frame state slot 1");
+        ASSERT_TRUE(ireval::same_float(64, compiled.out[2], eval.out[2]))
+            << describe(f, seed, "different frame state slot 2 (the float)");
+        const GRCORE_CodeSite * site = grcore_codemeta_find(
+            grjit_code_meta(c.code), static_cast<uint32_t>(compiled.out[slots]));
+        ASSERT_NE(site, nullptr);
+        ASSERT_EQ(site->identity.offset, eval.guard_identity.offset) << describe(f, seed, "different guard");
+        deopted++;
+      }
+    }
+  }
+  std::printf("float differential: per run: %zu returned, %zu guard exits; static, over the 3000 programs: "
+              "%zu truncations, %zu conversions, %zu comparisons; %zu programs have more than one block\n",
+      returned, deopted, truncs, converts, compares, multi_block);
+  // Thresholds at about nine tenths of what the fixed seeds give (10649, 7351, 3937, 8222, 4108, 2196).
+  EXPECT_GT(returned, 9500u);
+  EXPECT_GT(deopted, 6600u);
+  EXPECT_GT(truncs, 3500u);
+  EXPECT_GT(converts, 7400u);
+  EXPECT_GT(compares, 3600u);
+  EXPECT_GT(multi_block, 1950u);
 }
 
 GRJIT_TEST_MAIN()

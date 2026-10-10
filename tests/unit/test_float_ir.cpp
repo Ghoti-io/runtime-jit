@@ -144,67 +144,6 @@ bool result_ok(unsigned width, uint64_t got, uint64_t want, Cls cls) {
   }
 }
 
-/* ---- The boundary values ------------------------------------------------------------------ */
-
-std::vector<uint64_t> f64_values() {
-  std::vector<uint64_t> v = {0, 0x8000000000000000ull, 1, 0x8000000000000001ull, 2,
-      0x000FFFFFFFFFFFFFull, 0x800FFFFFFFFFFFFFull, 0x0010000000000000ull, 0x8010000000000000ull,
-      0x7FEFFFFFFFFFFFFFull, 0xFFEFFFFFFFFFFFFFull, 0x7FF0000000000000ull, 0xFFF0000000000000ull,
-      0x7FF8000000000000ull, 0xFFF8000000000000ull, 0x7FF0000000000001ull, 0xFFF0000000000001ull,
-      0x7FF8000000000123ull, 0x7FFFFFFFFFFFFFFFull, 0xFFFFFFFFFFFFFFFFull, 0x7FF4000000000000ull};
-  for (double d : {1.0, -1.0, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5, 3.5, 0.3, -0.3, 1.1, 3.141592653589793,
-           1e300, -1e300, 1e-300, 4503599627370495.5, 4503599627370496.0, 4503599627370497.0,
-           9007199254740993.0, 0.49999999999999994, 0.9999999999999999, 4294967295.5,
-           2147483647.5, -2147483648.9, 123456789.0, 1e10, 1e19, 1.8446744073709552e19}) {
-    v.push_back(B64(d));
-  }
-  // The bounds of the truncations and their neighbours, one unit in the last place each side.
-  for (double b : {-2147483649.0, -2147483648.0, 2147483648.0, 4294967296.0, -1.0, 9223372036854775808.0,
-           -9223372036854775808.0, 18446744073709551616.0, 2147483647.0, 4294967295.0, 4503599627370496.0}) {
-    v.push_back(B64(b));
-    v.push_back(B64(std::nextafter(b, INFINITY)));
-    v.push_back(B64(std::nextafter(b, -INFINITY)));
-  }
-  return v;
-}
-
-std::vector<uint64_t> f32_values() {
-  std::vector<uint64_t> v = {0, 0x80000000u, 1, 0x80000001u, 2, 0x007FFFFFu, 0x807FFFFFu,
-      0x00800000u, 0x80800000u, 0x7F7FFFFFu, 0xFF7FFFFFu, 0x7F800000u, 0xFF800000u, 0x7FC00000u,
-      0xFFC00000u, 0x7F800001u, 0xFF800001u, 0x7FC00123u, 0x7FFFFFFFu, 0xFFFFFFFFu, 0x7FA00000u};
-  for (float d : {1.0f, -1.0f, 0.5f, -0.5f, 1.5f, -1.5f, 2.5f, -2.5f, 3.5f, 0.3f, -0.3f, 1.1f,
-           3.14159274f, 1e30f, -1e30f, 1e-30f, 8388607.5f, 8388608.0f, 8388609.0f, 16777217.0f,
-           0.49999997f, 0.99999994f, 4294967040.0f, 2147483520.0f, 123456792.0f, 1e10f}) {
-    v.push_back(B32(d));
-  }
-  for (float b : {-2147483904.0f, -2147483648.0f, 2147483648.0f, 4294967296.0f, -1.0f,
-           9223372036854775808.0f, -9223372036854775808.0f, 18446744073709551616.0f, 2147483520.0f,
-           4294967040.0f, 8388608.0f}) {
-    v.push_back(B32(b));
-    v.push_back(B32(std::nextafterf(b, INFINITY)));
-    v.push_back(B32(std::nextafterf(b, -INFINITY)));
-  }
-  return v;
-}
-
-std::vector<uint64_t> int_values(bool narrow) {
-  std::vector<uint64_t> v = {0, 1, 2, 3, 0x7F, 0x80, 0xFF, 0x7FFF, 0x8000, 0xFFFF, 0x10000,
-      0x7FFFFFFE, 0x7FFFFFFF, 0x80000000u, 0x80000001u, 0xFFFFFFFEu, 0xFFFFFFFFu, 0x01000001u,
-      0x01000003u, 0x00FFFFFFu, 0x1000000u, 0x40000001u, 0xC0000001u};
-  if (!narrow) {
-    for (uint64_t x : std::vector<uint64_t>{0x100000000ull, 0x100000001ull, 0x1FFFFFFFFull,
-             0x0020000000000000ull, 0x0020000000000001ull, 0x0020000000000003ull,
-             0x7FFFFFFFFFFFFFFEull, 0x7FFFFFFFFFFFFFFFull, 0x8000000000000000ull,
-             0x8000000000000001ull, 0x8000000000000400ull, 0x8000000000000401ull,
-             0x8000008000000000ull, 0x8000008000000001ull, 0xFFFFFFFF80000000ull,
-             0xFFFFFFFFFFFFFFFEull, 0xFFFFFFFFFFFFFFFFull, 0xFFFFFFFFFFFFF800ull,
-             0xFFFFFFFFFFFFFC00ull, 0xFFFFFFFFFFFFFBFFull, 0x123456789ABCDEF0ull}) {
-      v.push_back(x);
-    }
-  }
-  return v;
-}
-
 /* ---- Hand-worked answers -------------------------------------------------------------------- */
 
 struct Worked {
@@ -1318,7 +1257,7 @@ TEST(FloatVerify, AGuardOnAnotherRegisterOrAStaleOrAnotherBlocksGuardDoesNotCoun
     {
       Imm wider = m;
       wider.hi = static_cast<int64_t>(imm_bits(
-          step(trunc_bounds(k.is_signed, k.dst == GRJIT_TYPE_I64).hi, k.src == GRJIT_TYPE_F64, 1, INFINITY),
+          step_ulps(trunc_bounds(k.is_signed, k.dst == GRJIT_TYPE_I64).hi, k.src == GRJIT_TYPE_F64, 1, INFINITY),
           k.src == GRJIT_TYPE_F64));
       B b("t", 0);
       GRJIT_VReg x = b.param(k.src), r = b.reg(k.dst);
@@ -1358,7 +1297,7 @@ TEST(FloatVerify, AConstantOperandIsJudgedAsItStands) {
     if (!k.is_signed) {
       EXPECT_NE(with_constant(imm_bits(-1.0, dbl)), "") << "-1 does not fit an unsigned";
     }
-    EXPECT_EQ(with_constant(imm_bits(step(bd.hi, dbl, -1, INFINITY), dbl)), "")
+    EXPECT_EQ(with_constant(imm_bits(step_ulps(bd.hi, dbl, -1, INFINITY), dbl)), "")
         << "the largest value below the upper bound fits";
   }
 }
