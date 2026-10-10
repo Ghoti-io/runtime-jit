@@ -824,8 +824,8 @@ TEST(CpuRun, EveryFeatureDependentOperationGivesTheEvaluatorsAnswersUnderEverySu
   }
   std::printf("feature-dependent operations: %zu runs compared with the evaluator across %zu masks, %zu NaN results\n",
       compared, masks.size(), nans);
-  EXPECT_GT(compared, 5000u);
-  EXPECT_GT(nans, 50u);
+  EXPECT_GT(compared, 1000u * masks.size());
+  EXPECT_GT(nans, 5u * masks.size());
 }
 
 /* ---- A qemu CPU model (suite/tools/xarch/jit-x86-cpu.sh) ---------------------------------------- */
