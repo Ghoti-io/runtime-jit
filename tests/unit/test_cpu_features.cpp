@@ -398,6 +398,14 @@ TEST(CpuArms, EachOperationEmitsItsFeatureArmWhenAndOnlyWhenItsFeatureIsInTheSet
     }
   }
   EXPECT_EQ(checked, size_t{14 * 16 * 2});
+  // For the log: the two arms of one operation are different code (if these two lines were equal, the
+  // arm tests would be measuring nothing).
+  for (const cpupins::Pin & pin : cpupins::kPins) {
+    if (std::string(pin.instr) == "i32.clz") {
+      std::printf("i32.clz with every feature masked off (bsr, cmov, xor): %s\n", pin.v1);
+      std::printf("i32.clz with LZCNT                     (lzcnt):          %s\n", pin.arm);
+    }
+  }
 }
 
 TEST(CpuArms, TheBytesOfEachArmContainTheInstructionsItIsSaidToUseAndTheV1OnesContainNone) {
