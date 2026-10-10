@@ -153,7 +153,12 @@ endif
 PKG_CONFIG_LOOKUP_PATH := $(if $(PKG_CONFIG_PATH_ENV),$(PKG_CONFIG_PATH_ENV):)$(PC_INSTALL_PATH)
 
 CXX := g++
-CXXFLAGS := -pedantic-errors -Wall -Wextra -Werror -Wno-error=unused-function -Wfatal-errors -std=c++20 -O1 -g $(EXTRA_CXXFLAGS)
+# -ffp-contract=off is named, not inherited: a fused multiply-add rounds once
+# where the interpreter's C rounds twice, so a float computed in compiled code
+# would differ on arm64 or under clang (whose default is "on"). GCC's default
+# is "off" only in the ISO modes used here. tools/check-fp-contract.sh fails
+# when any compile-flag set lacks it. Never -ffast-math.
+CXXFLAGS := -pedantic-errors -Wall -Wextra -Werror -Wno-error=unused-function -Wfatal-errors -std=c++20 -O1 -g -ffp-contract=off $(EXTRA_CXXFLAGS)
 # Frame pointers in the tests: a native helper finds the frame of the compiled
 # code that called it by following the saved-rbp chain.
 CXXFLAGS += -fno-omit-frame-pointer
@@ -167,7 +172,7 @@ CC := cc
 # shape is reported at level 1 and silent at 0, 2, and 3. Do not simplify it
 # to `*(int *)&local`, which fires at every level from 1 up and certifies
 # nothing. check-aliasing is the measurement.
-CFLAGS := -pedantic-errors -Wall -Wextra -Werror -Wfloat-conversion -fstrict-aliasing -Wstrict-aliasing=1 -Wno-error=unused-function -Wfatal-errors -std=c17 -pthread $(OPT_CFLAGS) -g $(EXTRA_CFLAGS)
+CFLAGS := -pedantic-errors -Wall -Wextra -Werror -Wfloat-conversion -fstrict-aliasing -Wstrict-aliasing=1 -Wno-error=unused-function -Wfatal-errors -std=c17 -pthread $(OPT_CFLAGS) -ffp-contract=off -g $(EXTRA_CFLAGS)
 ifeq ($(OS_NAME), Windows)
 CFLAGS += -DGRJIT_STATIC
 CXXFLAGS += -DGRJIT_STATIC
@@ -229,7 +234,7 @@ TESTFLAGS := `PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --libs --cfla
 
 # coverage clears this: --coverage links the gcov runtime, whose mangle_path
 # check-symbols is right to reject in a shipping library.
-TEST_GATES ?= check-symbols check-aliasing check-stamps check-labels \
+TEST_GATES ?= check-symbols check-aliasing check-stamps check-fp-contract check-labels \
 	check-edges check-gates check-planted check-planted-calls examples
 
 VALGRIND_FLAGS := --leak-check=full --show-leak-kinds=definite,indirect,possible --track-origins=yes --error-exitcode=1 --suppressions=tests/valgrind.supp
@@ -363,7 +368,7 @@ $(APP_DIR)/examples/%$(EXE_EXTENSION): examples/%.c $(APP_DIR)/$(STATIC_TARGET) 
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) $(INCLUDE) -o $@ $< $(LDFLAGS) $(CORELIBRARY) $(CUTIL_LIBS)
 
-.PHONY: clean cloc docs docs-pdf examples coverage check-symbols check-stamps check-aliasing
+.PHONY: clean cloc docs docs-pdf examples coverage check-symbols check-stamps check-fp-contract check-aliasing
 .PHONY: check-labels check-edges check-gates check-planted check-planted-calls bench test-tsan
 .PHONY: all install test test-quiet test-asan test-valgrind test-valgrind-quiet test-watch uninstall watch
 .PHONY: all-debug install-debug test-debug test-valgrind-debug test-watch-debug uninstall-debug watch-debug
@@ -436,6 +441,9 @@ endif
 
 check-stamps: ## Fail if a compile rule names no flags stamp, or a stamp omits a variable
 	@python3 tools/check-stamps.py
+
+check-fp-contract: ## Fail if a compile-flag set lacks -ffp-contract=off (a fused multiply-add changes guest floats)
+	@tools/check-fp-contract.sh
 
 ####################################################################
 # Layering gates (AD-2, AD-3, AD-14)

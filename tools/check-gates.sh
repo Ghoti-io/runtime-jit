@@ -194,6 +194,31 @@ else
   fail "could not build the extended-name fixture"
 fi
 
+printf 'check-fp-contract\n'
+# -ffp-contract=off is what makes a compiled float the interpreter's float on
+# every host. The real Makefile is the control; the same Makefile with the flag
+# taken out, everywhere or from one flag set, is the planted defect and must
+# name the library and the set.
+F="$HERE/check-fp-contract.sh"
+lib="$(basename "$ROOT")"
+expect_pass 'fp-contract/control (the Makefile as it is)' "$F" "$ROOT/Makefile"
+sed 's/ -ffp-contract=off//g' "$ROOT/Makefile" > "$work/Makefile.nofp"
+expect_fail 'fp-contract/planted (the flag removed everywhere)' "$lib: CFLAGS does not name -ffp-contract=off" "$F" "$work/Makefile.nofp" "$ROOT"
+expect_fail 'fp-contract/planted (the flag removed everywhere, C++)' "$lib: CXXFLAGS does not name -ffp-contract=off" "$F" "$work/Makefile.nofp" "$ROOT"
+sed '/^CXXFLAGS :=/s/ -ffp-contract=off//' "$ROOT/Makefile" > "$work/Makefile.nofp-cxx"
+expect_fail 'fp-contract/planted (removed from CXXFLAGS only)' "$lib: CXXFLAGS does not name -ffp-contract=off" "$F" "$work/Makefile.nofp-cxx" "$ROOT"
+sed '/^CFLAGS :=/s/ -ffp-contract=off//' "$ROOT/Makefile" > "$work/Makefile.nofp-c"
+expect_fail 'fp-contract/planted (removed from CFLAGS only, so LIB_CFLAGS and the sanitizer sets too)' "$lib: LIB_CFLAGS does not name -ffp-contract=off" "$F" "$work/Makefile.nofp-c" "$ROOT"
+expect_pass 'fp-contract/fixture control' "$F" "$FIX/fp-contract/control.mk"
+expect_fail 'fp-contract/planted-cflags' 'fixture: CFLAGS does not name' "$F" "$FIX/fp-contract/planted-cflags.mk"
+expect_fail 'fp-contract/planted-cxxflags' 'fixture: CXXFLAGS does not name' "$F" "$FIX/fp-contract/planted-cxxflags.mk"
+expect_fail 'fp-contract/planted-lib-flags' 'fixture: LIB_CFLAGS does not name' "$F" "$FIX/fp-contract/planted-lib-flags.mk"
+expect_fail 'fp-contract/planted-sanitizer-set' 'fixture: TSAN_CXXFLAGS does not name' "$F" "$FIX/fp-contract/planted-sanitizer-set.mk"
+expect_fail 'fp-contract/planted-overridden (a later =fast wins)' 'ends with -ffp-contract=fast' "$F" "$FIX/fp-contract/planted-overridden.mk"
+expect_fail 'fp-contract/planted-fast-math' 'uses -ffast-math' "$F" "$FIX/fp-contract/planted-fast-math.mk"
+expect_fail 'fp-contract/planted-no-flag-sets' 'measuring nothing' "$F" "$FIX/fp-contract/planted-no-flag-sets.mk"
+expect_fail 'fp-contract/empty' 'measuring nothing' "$F" "$work/empty/Makefile"
+
 printf 'check-stamps (fixtures)\n'
 S="$HERE/check-stamps.py"
 expect_pass 'stamps/control' python3 "$S" "$FIX/stamps/control.mk"
