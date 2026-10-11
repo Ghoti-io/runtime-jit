@@ -817,6 +817,13 @@ endif
 # register, an f32 result taken as `fmov x0, d0`, and a float sequence that changes d8): all caught here through the
 # simulator, and 86 also by the structural scan of the registers the assembler encoded. 87, an i32 or f32 parameter
 # not cut on entry to a callable function, is in the callable entry only and is caught by real arm64 code alone.
+# Defects 92 to 100 are the arm64 emitter's cuts and sequences that 69 to 87 did not reach: the plain entry's argument
+# words, a helper's 32-bit result and a move of a 32-bit value not cut (92, 93, 94), a left rotation as a right one
+# (95), the sign extensions in the wrong width (96, 97), the f32 copysign mask (98), and a demotion and a promotion
+# that do not convert (99, 100). 92, 93 and 95 to 100 are caught here through the simulator; 94 by real arm64 code
+# alone. Four mutations of the same kind were tried by hand and no input separates them from the code (a guest call's
+# result cut, a reinterpretation's cut, the width of an i32 popcnt's move, an f32 copysign's cut: every slot and
+# every immediate the verifier admits is already clean), so they have no plant; design.md says so.
 # Defects 88 to 90 are the Win64 flavour's float operations: the SSE2 rounding sequence unreworked, naming the
 # callee-saved xmm6 and xmm7 (caught here by the structural scan of the registers the assembler encoded and by
 # objdump's reading of the bytes, and under wine by the sentinels), and the helper's float arguments numbered by class
@@ -906,7 +913,15 @@ PLANT_DEFECTS := 1:testDifferential 2:testReadback 3:testReadback \
 	86:testDifferential:Differential.GeneratedFloatProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluatedWithNansEqual 86:testArm64_numeric:Arm64Registers.NoCalleeSaved* \
 	88:testWin64_numeric:Win64Numeric.NoCalleeSavedVector* 88:testWin64:Win64Registers.TheDisassemblerAgreesThatNoCalleeSavedRegisterAppears \
 	89:testWin64_numeric:Win64Numeric.AHelperCall* 90:testWin64_numeric:Win64Numeric.AHelperCall* \
-	91:testCpu_features:CpuArms.TheWin64Flavour*
+	91:testCpu_features:CpuArms.TheWin64Flavour* \
+	92:testDifferential:Differential.GeneratedIntegerProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluated \
+	93:testArm64_numeric:Arm64SimCompiled.AHelperGets* \
+	95:testDifferential:Differential.GeneratedIntegerProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluated \
+	96:testDifferential:Differential.GeneratedIntegerProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluated \
+	97:testDifferential:Differential.GeneratedIntegerProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluated \
+	98:testArm64_numeric:Arm64SimCompiled.AnF32Result* \
+	99:testDifferential:Differential.GeneratedFloatProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluatedWithNansEqual \
+	100:testDifferential:Differential.GeneratedFloatProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluatedWithNansEqual
 
 # The controls the script runs are built by this make, as prerequisites, and
 # not by the script's own sub-make. Under `make -j test` the sibling goals

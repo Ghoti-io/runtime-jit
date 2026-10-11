@@ -35,4 +35,14 @@
 84|84|testArm64_numeric|Arm64Helpers.EveryMixOfIntegerAndFloatArgumentsArrivesInItsRegisterByAapcs64Classification||the float and integer arguments of a helper numbered jointly, as Win64 numbers them
 85|85|testArm64_numeric|Arm64Helpers.AFloatResultIsTakenFromD0ByItsOwnWidthWhateverIsAboveBit31||an f32 helper result taken as fmov x0, d0 (the junk above bit 31 lands in the slot)
 86|86|testArm64_numeric|Arm64Sentinels.FloatCodeLeavesEveryCalleeSavedRegisterAloneOnAReturnAGuardExitAPollAndATrashingHelper||a float sequence that changes d8 and does not restore it
-87|87|testFloat_ir|FloatCalls.AFloatGoesThroughACallInARegisterAndOnTheStackAndComesBackExact||an i32 or f32 parameter not cut to 32 bits on entry to a callable function
+87|87|testFloat_ir|FloatCalls.AFloatGoesThroughACallInARegisterAndOnTheStackAndComesBackExact||an f32 or i32 parameter not cut to 32 bits on entry to a callable function (found by an f32 and an i32 word on the stack)
+87b|87|testInt_ir|IntCalls.AnI32ParameterReturnedWholeIsItsLow32BitsInARegisterAndOnTheStackWhateverTheEntryWordHeld||the same defect, found by an i32 parameter returned as it is (a sum of i32 parameters cannot see a dirty upper half)
+92|92|testInt_ir|IntRun.AnI32EntersAndLeavesAsItsLow32BitsWhateverTheCallerLeftAbove||an i32 or f32 argument word of the plain entry not cut to 32 bits
+93|93|testInt_ir|IntRun.AHelperResultReceivedAsAnI32IsItsLow32Bits||a helper's 32-bit result not cut: what the callee left above bit 31 of x0 lands in the slot
+94|94|testInt_ir|IntRun.AnI32EntersAndLeavesAsItsLow32BitsWhateverTheCallerLeftAbove||a move of a 32-bit value not cut to 32 bits
+95|95|testInt_ir|IntRun.EveryOperationGivesTheWorkedAnswerAndAnI32ResultIsZeroExtended||a left rotation emitted as a right rotation by the same count
+96|96|testInt_ir|IntRun.EveryOperationGivesTheWorkedAnswerAndAnI32ResultIsZeroExtended||an i32 extend8_s or extend16_s done in the 64-bit form: a negative value has ones above bit 31
+97|97|testInt_ir|IntRun.EveryOperationGivesTheWorkedAnswerAndAnI32ResultIsZeroExtended||the 32-bit sign extensions of an i64 (extend32_s, extend_i32_s) stopping at 16 bits
+98|98|testFloat_ir|FloatRun.EveryOperationGivesTheWorkedAnswerFromTheCodeAndFromTheEvaluator||the sign mask of an f32 copysign taken as the f64 one
+99|99|testFloat_ir|FloatRun.EveryOperationGivesTheWorkedAnswerFromTheCodeAndFromTheEvaluator||a demotion that does not convert
+100|100|testFloat_ir|FloatRun.EveryOperationGivesTheWorkedAnswerFromTheCodeAndFromTheEvaluator||a promotion that does not convert

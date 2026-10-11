@@ -296,7 +296,12 @@ static void emit_call(GRJIT_A64Emit * e, const GRJIT_Op * op) {
 #endif
     } else if (vreg_is_narrow(e, op->dst)) {
       /* A helper's 32-bit result: the upper half of x0 is not ours. */
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 93
+      /* Planted defect 93 (tests only): a helper's 32-bit result is not cut, so what the callee left above bit
+       * 31 of x0 lands in the slot. */
+#else
       grjit_a64_mov32_rr(a, GRJIT_A64_X0, GRJIT_A64_X0);
+#endif
     }
     store_result(e, op->dst, GRJIT_A64_X0);
   }
@@ -831,14 +836,30 @@ static void emit_int_unary(GRJIT_A64Emit * e, const GRJIT_Op * op) {
       grjit_a64_fmov_to_gpr(a, GRJIT_A64_SINGLE, GRJIT_A64_X0, GRJIT_A64_V0);
       break;
     case GRJIT_OP_EXT8_S:
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 96
+      /* Planted defect 96 (tests only): an i32 sign extension of 8 or 16 bits is the 64-bit form, so a negative
+       * value has ones above bit 31. */
+      grjit_a64_sext(a, GRJIT_A64_SXTB, GRJIT_A64_X0, GRJIT_A64_X0, true);
+#else
       grjit_a64_sext(a, GRJIT_A64_SXTB, GRJIT_A64_X0, GRJIT_A64_X0, wide);
+#endif
       break;
     case GRJIT_OP_EXT16_S:
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 96
+      grjit_a64_sext(a, GRJIT_A64_SXTH, GRJIT_A64_X0, GRJIT_A64_X0, true);
+#else
       grjit_a64_sext(a, GRJIT_A64_SXTH, GRJIT_A64_X0, GRJIT_A64_X0, wide);
+#endif
       break;
     case GRJIT_OP_EXT32_S:
     case GRJIT_OP_EXTEND_S:
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 97
+      /* Planted defect 97 (tests only): the 32-bit sign extensions (i64.extend32_s, i64.extend_i32_s) stop at
+       * 16 bits. */
+      grjit_a64_sext(a, GRJIT_A64_SXTH, GRJIT_A64_X0, GRJIT_A64_X0, true);
+#else
       grjit_a64_sext(a, GRJIT_A64_SXTW, GRJIT_A64_X0, GRJIT_A64_X0, true);
+#endif
       break;
     case GRJIT_OP_WRAP:
     case GRJIT_OP_EXTEND_U:
@@ -848,7 +869,7 @@ static void emit_int_unary(GRJIT_A64Emit * e, const GRJIT_Op * op) {
       break;
     default:
       e->c.error = GRJIT_ERR_INTERNAL;
-      break;
+      return;
   }
   store_result(e, op->dst, GRJIT_A64_X0);
 }
@@ -860,7 +881,12 @@ static void emit_rotate(GRJIT_A64Emit * e, const GRJIT_Op * op) {
   const bool wide = !dst_is_i32(e, op);
   load_operand(e, GRJIT_A64_X0, &op->a);
   load_operand(e, GRJIT_A64_X1, &op->b);
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 95
+  /* Planted defect 95 (tests only): a left rotation is a right rotation by the same count. */
+  if (false) {
+#else
   if (op->kind == GRJIT_OP_ROTL) {
+#endif
     if (wide) {
       grjit_a64_neg(a, GRJIT_A64_X1, GRJIT_A64_X1);
     } else {
@@ -1020,7 +1046,13 @@ static void emit_float_copysign(GRJIT_A64Emit * e, const GRJIT_Op * op, bool dbl
   A * a = &e->as;
   load_operand(e, GRJIT_A64_X0, &op->a);
   load_operand(e, GRJIT_A64_X1, &op->b);
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 98
+  /* Planted defect 98 (tests only): the sign mask of an f32 is the f64 one, so the sign bit of bit 31 is
+   * taken from nowhere. */
+  grjit_a64_mov_ri(a, GRJIT_A64_X2, UINT64_C(0x8000000000000000));
+#else
   grjit_a64_mov_ri(a, GRJIT_A64_X2, dbl ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000));
+#endif
   grjit_a64_alu(a, GRJIT_A64_BIC, GRJIT_A64_X0, GRJIT_A64_X0, GRJIT_A64_X2);
   grjit_a64_alu(a, GRJIT_A64_AND, GRJIT_A64_X1, GRJIT_A64_X1, GRJIT_A64_X2);
   grjit_a64_alu(a, GRJIT_A64_ORR, GRJIT_A64_X0, GRJIT_A64_X0, GRJIT_A64_X1);
@@ -1125,12 +1157,21 @@ static void emit_float_op(GRJIT_A64Emit * e, const GRJIT_Op * op) {
     }
     case GRJIT_OP_DEMOTE:
       load_float(e, GRJIT_A64_V0, &op->a, true, GRJIT_A64_X2);
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 99
+      /* Planted defect 99 (tests only): a demotion that does not convert, the double's low 32 bits stored. */
+#else
       grjit_a64_fcvt(a, GRJIT_A64_SINGLE, GRJIT_A64_V0, GRJIT_A64_V0);
+#endif
       store_float(e, op->dst, GRJIT_A64_V0, false);
       break;
     case GRJIT_OP_PROMOTE:
       load_float(e, GRJIT_A64_V0, &op->a, false, GRJIT_A64_X2);
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 100
+      /* Planted defect 100 (tests only): a promotion that does not convert, the single's bits stored as the
+       * double's low word. */
+#else
       grjit_a64_fcvt(a, GRJIT_A64_DOUBLE, GRJIT_A64_V0, GRJIT_A64_V0);
+#endif
       store_float(e, op->dst, GRJIT_A64_V0, true);
       break;
     case GRJIT_OP_REINTERPRET:
@@ -1154,7 +1195,13 @@ static void emit_op(GRJIT_A64Emit * e, const GRJIT_Op * op, size_t block) {
     case GRJIT_OP_MOVE:
     case GRJIT_OP_BITCAST:
       load_operand(e, GRJIT_A64_X0, &op->a);
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 94
+      /* Planted defect 94 (tests only): a move of a 32-bit value is not cut, so an immediate or a register with
+       * bits above 31 passes through whole. */
+      if (false) {
+#else
       if (vreg_is_narrow(e, op->dst)) {
+#endif
         grjit_a64_mov32_rr(a, GRJIT_A64_X0, GRJIT_A64_X0); /* an i32 or f32 immediate: its low 32 bits */
       }
       store_result(e, op->dst, GRJIT_A64_X0);
@@ -1577,7 +1624,12 @@ static GRJIT_Result emit_pass(const GRJIT_Function * f, GRJIT_A64Emit * e,
       for (size_t i = 0; i < f->param_count; i++) {
         grjit_a64_load(a, GRJIT_A64_MEM_X64, GRJIT_A64_X0, GRJIT_A64_X1,
             (int32_t)(8 * i));
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 92
+        /* Planted defect 92 (tests only): an i32 or f32 argument word of the plain entry is not cut to 32 bits. */
+        if (false) {
+#else
         if (vreg_is_narrow(e, (GRJIT_VReg)i)) {
+#endif
           grjit_a64_mov32_rr(a, GRJIT_A64_X0, GRJIT_A64_X0); /* an i32 argument is its low 32 bits */
         }
         store_slot(e, GRJIT_A64_X0, grjit_emit_slot((GRJIT_VReg)i));

@@ -142,6 +142,18 @@
 #                                                         structural scan of the registers encoded)
 #  87  an i32 or f32 parameter not cut on entry to a   -> not on this host: a callable function's entry
 #      callable function                                  is not run by the simulator (tools/arm64-plants.txt)
+#  92  an i32 or f32 argument word of the plain entry  -> testDifferential (the simulator)
+#      not cut to 32 bits
+#  93  a helper's 32-bit result not cut                -> testArm64_numeric (the simulator's typed helper call)
+#  94  a move of a 32-bit value not cut                -> not on this host (tools/arm64-plants.txt)
+#  95  a left rotation as a right rotation            -> testDifferential
+#  96  an i32 extend8_s / extend16_s in the 64-bit     -> testDifferential
+#      form
+#  97  extend32_s / extend_i32_s stopping at 16 bits   -> testDifferential
+#  98  the sign mask of an f32 copysign taken as       -> testArm64_numeric, testDifferential
+#      the f64 one
+#  99  a demotion that does not convert                -> testDifferential
+# 100  a promotion that does not convert               -> testDifferential
 #
 #  88  the SSE2 rounding sequence unreworked for      -> testWin64_numeric (the registers the
 #      Win64: it names the callee-saved xmm6 and xmm7      assembler encoded), testWin64 (objdump)

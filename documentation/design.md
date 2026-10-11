@@ -2275,21 +2275,33 @@ backend, twice on the backends with feature arms) and `testCpu_features`. The th
 (`FloatHelpers.EveryMixOf...BySysVClassification`, `...TheNamedClassificationFromTheStory...`,
 `...AFloatResultIsTakenFromXmm0...`) stay SysV-only and are replaced on the other two ABIs by probes of their own.
 
-**Planted defects 69 to 91.** 69-75 arm64 integer (an `I32` `add`/`sub`/`mul` in 64 bits, a shift or rotate by the
+**Planted defects 69 to 100.** 69-75 arm64 integer (an `I32` `add`/`sub`/`mul` in 64 bits, a shift or rotate by the
 64-bit form, an ordered compare on the whole register, `ctz` without `rbit`, `div_u`/`rem_u` signed, a `GUARD`
 emitted as nothing, a remainder's `msub` with its operands swapped); 76-86 arm64 float (the operands of `FSUB` and
 `FDIV` swapped, `lt`/`le` with the integer conditions, `fminnm`/`fmaxnm`, `frinta`, `str s`, `trunc_sat_u` by the
 signed instruction, `convert_u` from 64 bits by `scvtf`, a helper's second float argument in the wrong register, an
 `F32` result taken as `fmov x0, d0`, a sequence that changes `d8`); 87 an `I32`/`F32` parameter not cut on entry to a
 callable function; 88-90 Win64 float (the rounding unreworked, arguments numbered by class, stack arguments without
-the shadow offset); 91 the Win64 flavour given no feature again. 69-86 are caught on any host through the simulator
-(`make check-planted`); every one of 69-87 is caught by real arm64 code (`tools/arm64-plants.txt`: under qemu and on
+the shadow offset); 91 the Win64 flavour given no feature again; 92-100 arm64 again (the plain entry's argument words, a
+helper's 32-bit result and a move not cut, a left rotation as a right one, the sign extensions in the wrong width, the
+f32 copysign mask, a demotion and a promotion that do not convert). 69-86, 92, 93 and 95-100 are caught on any host
+through the simulator (`make check-planted`); every one of 69-87 and 92-100 is caught by real arm64 code (`tools/arm64-plants.txt`: under qemu and on
 the Pi, one test alone, control first); 88-91 are caught on the laptop by the structural and byte tests and under wine
 (`tools/win64-plants.txt`), which also reruns the shared defects 38, 40-47, 50-55, 66 and 67 on the Win64 flavour (not
 39, whose `idiv` fault wine reports as an unhandled exception that kills the program, and not 48 and 49, which are in
 SysV assembly). A dropped guard is a different test on each ABI: on x86 it faults (`#DE`), so SysV turns the signal
 into a result and Win64 cannot (the harness has no handler there), and the Win64 guard defects are the verifier's; on
 arm64 nothing faults, so a missing guard returns 0 and only an assertion that the trap fired can see it (74).
+
+**Cuts with no plant.** Four of the cut-to-32-bits sites and sequences were mutated by hand (removed, or given the wide
+form) and run through the simulator tests, `testInt_ir`, `testFloat_ir`, `testArm64_numeric` and `testWast` under
+`qemu-aarch64`, and nothing failed: the result of a call to compiled code (`emit_guest_call`), the cut of a
+`REINTERPRET` into a 32-bit type, the width of the move in an i32 `popcnt`, and the cut after an f32 `copysign`. No
+input separates them from the code that is there: every slot of a 32-bit type is clean by the representation rule,
+every callee returns a clean word, and the verifier refuses a 32-bit immediate that does not fit 32 bits ("source
+immediate does not fit 32 bits"), so the operand the cut would act on is clean already. They are kept as the
+defence in depth the rule asks for at every place a word enters or leaves, and a plant for them would be a defect no
+test can see, which is what a plant must not be.
 
 **Existing bytes.** No function without an `I32`, `F32` or `F64` changes by a byte on any backend: the pins of
 `testPin`, the generators and the SysV bytes are as they were, and the `check-planted-calls` anchors all occur once
