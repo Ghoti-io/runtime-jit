@@ -94,10 +94,19 @@
  * among themselves, the float ones `xmm0` to `xmm7` in order among themselves, so
  * `(i64, f64, i64, f32)` is `rdi, xmm0, rsi, xmm1`; an `F32` is in the low 32 bits of its
  * `xmm` register, and a helper's `float` result is taken from the low 32 bits of `xmm0`,
- * whatever is above them. Natives (`CALL_NATIVE`) stay integer-only. Between compiled
- * functions a float travels as its bit word, in the register or stack word an `I64` uses.
- * The arm64 and Win64 backends refuse a function with a float register or operation
- * (`GRJIT_ERR_UNSUPPORTED`) until story 5 of spec-runtime-float.
+ * whatever is above them. AAPCS64 (arm64) classifies the same way: the integer-class
+ * arguments take `x0`-`x5` among themselves, the float ones `d0`-`d7` among themselves
+ * (`(i64, f64, i64, f32)` is `x0, d0, x1, s1`), and a float result is taken from `d0`/`s0`
+ * by its own width. Microsoft x64 (Win64) numbers the four register slots by **position**,
+ * not by class: argument `i < 4` is in `rcx rdx r8 r9` if it is an integer and in
+ * `xmm0`-`xmm3` if it is a float (`(i64, f64, i64, f32)` is `rcx, xmm1, r8, xmm3`), and the
+ * fifth and sixth go in the stack words above the 32 bytes of shadow space, a float as its
+ * bit word. A helper must not be variadic (a variadic callee wants a float repeated in the
+ * integer register, which is not done on any target). Natives (`CALL_NATIVE`) stay
+ * integer-only on every backend. Between compiled functions a float travels as its bit word,
+ * in the register or stack word an `I64` uses. Every backend emits every operation here;
+ * compiled code assumes the default MXCSR / FPCR and never writes it, and none of them
+ * encodes a callee-saved vector register (`xmm6`-`xmm15` on Win64, `d8`-`d15` on arm64).
  *
  * **Integer width.** The width of an arithmetic operation is the type of its
  * destination: an `I32` destination makes it a 32-bit operation on `I32`

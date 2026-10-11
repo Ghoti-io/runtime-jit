@@ -1591,12 +1591,12 @@ share one guard between two operations or let the engine hoist it. The guard bei
 means a test can leave one out, which the planted defect 38 does. **Masking instead of 32-bit
 instructions**: above.
 
-**Other backends.** The arm64 emitter and the Win64 flavour (which shares the SysV emitter) refuse
-a function that has an `I32` register or any of the new operations with `GRJIT_ERR_UNSUPPORTED`,
-by name and before anything is emitted, and each has an explicit case for every new operation,
-so nothing falls through to a 64-bit operation (a 64-bit `ADD` on an `I32` would be silently
-wrong). Story 5 of the float spec replaces the refusals. `testInt_ir` shows both on every host,
-through `grjit_emit_for`, and the native compile where the host's backend is not SysV.
+**Other backends.** When this section was written the arm64 emitter and the Win64 flavour (which shares
+the SysV emitter) refused a function that has an `I32` register or any of the new operations with
+`GRJIT_ERR_UNSUPPORTED`, by name and before anything was emitted, and each had an explicit case for every
+new operation, so nothing fell through to a 64-bit operation (a 64-bit `ADD` on an `I32` would be silently
+wrong). Story 5 of the float spec replaced the refusals: [the section "The numeric operations on arm64
+and Win64"](#the-numeric-operations-on-arm64-and-win64-spec-runtime-float-story-5) below says how.
 
 **Existing bytes.** No function without an `I32` or a new operation changes by a byte: the pins
 of `testPin` (x86-64, arm64, Win64) are unchanged, the generators of `ir_gen.h` and
@@ -1854,8 +1854,8 @@ integer, `f64` and `f32` register arguments for 0 to 6 arguments, and every mix 
 immediates up to 4) against the classification worked out in the test; planted defects 48 (the second
 float to the wrong register) and 49 (the two kinds numbered jointly, as Win64 numbers them) are caught
 there. Natives (`CALL_NATIVE`) stay integer-only: `natives.h` and `GRJIT_NativeDesc` are unchanged
-and a float in a native signature is refused by the table. The arm64 and Win64 refusals of a float
-argument or result are tested through `grjit_emit_for`.
+and a float in a native signature is refused by the table. (The arm64 and Win64 helper conventions for
+floats are in the story 5 section below.)
 
 **Between compiled functions.** The internal convention is unchanged: a float travels as its bit word,
 in the register or the stack word an `I64` would use, stack arguments included. A callee's `F32`
@@ -1961,9 +1961,9 @@ it kills the test with a signal. The arm64 and Win64 plant lists are untouched.
 
 **Known limits.** The verifier recognises the range guard in the shapes above and in the same block; a
 frontend that computes it another way gets a reason. A conversion's source is a register, never an
-immediate. A float immediate as a call argument is a typed operand kind. Natives take no float. Float
-operations are emitted for x86-64 SysV only (Win64 and arm64 are story 5); the SSE4.1 arm of the four
-roundings and the CPU-feature mask are in the next section.
+immediate. A float immediate as a call argument is a typed operand kind. Natives take no float. (Float
+operations were emitted for x86-64 SysV only when this section was written; arm64 and Win64 are story 5,
+below.) The SSE4.1 arm of the four roundings and the CPU-feature mask are in the next section.
 
 ## CPU features: detection, the mask, the arms and the record (spec-runtime-float, story 4)
 
@@ -2146,9 +2146,167 @@ tested, and not the cache that consumes them.
   for VMX is clear in every model (TCG does not offer it), so plant 56 is caught under qemu by a model
   that has LZCNT losing it, rather than by one that has VMX gaining it.
 
-What is not here: feature arms on Win64 and arm64 (the shared emitter under its Win64 flag and the
-arm64 emitter refuse the integer-extension and float operations by name, as before, and are given no
-feature), a code cache, and wiring the mask to lang-tang's context option.
+What is not here: feature arms on arm64 (it needs none: `clz`, `rbit`, `frint*` and `cnt` are baseline
+ARMv8-A, and its detected, effective and recorded sets are always empty), a code cache, and wiring the mask
+to lang-tang's context option. (Win64 was given the arms in story 5, below.)
+
+## The numeric operations on arm64 and Win64 (spec-runtime-float, story 5)
+
+Stories 2 to 4 gave the IR `I32`, `F32` and `F64` and every operation of `numeric-operations.md` on x86-64 SysV
+only; the other two backends refused any function that used them, by name. This story emits all of it on arm64
+(AAPCS64) and on Win64 (Microsoft x64), with the same semantics, the same slot representation and the same IR and
+verifier rules, so the Wasm suite runs once per backend with x86-64's counts, a float can be passed to a helper in
+each ABI, and the one invariant that is specific to these two ABIs, that the callee-saved vector registers are never
+touched, is shown rather than assumed. The sequences below were written from the Arm Architecture Reference Manual
+and the Intel manual, checked on a Raspberry Pi 4 and under `qemu-aarch64` and `wine`, and are the decisions; the
+rejected alternatives are at the end.
+
+**The representation does not change.** An `I32` and an `F32` are zero-extended in their 64-bit slot at all times,
+enforced at the sites the x86-64 emitter enforces it at: `CONST`, `MOVE` and `BITCAST` into one (an immediate is read as
+its low 32 bits), a helper's result (an integer helper's upper half is not ours; an `F32` result is taken with
+`fmov w0, s0` on arm64 and `movd eax, xmm0` on x86, never as 64 bits), a callee's result (cut at the receiving frame),
+a parameter on entry in all three forms (the plain entry's `args` array, a callable function's register parameters,
+its stack parameters), and every operation whose hardware form writes 64 bits when the IR result is 32. The `w`
+forms of arm64 clear the upper half by the architecture, which is why no mask follows an `I32` operation there and
+why planted defect 69 (the `x` form for an `I32` `add`) is a wrong answer and not a crash. A float register holds the
+IEEE bits; an `F32` never travels as a `double`; floats and integers mix only through `REINTERPRET` and the
+conversions. The slot-based shape holds: `x0`-`x2` and `d0`/`d1` (rax/rcx/xmm0/xmm1 on x86) are scratch, nothing is
+kept in a vector register between two IR operations.
+
+**arm64: the sequences.** (`w` for an `I32` destination, `x` for an `I64`.)
+
+| operation | instructions |
+| --- | --- |
+| `add sub and or xor shl shr_u shr_s` | `add sub and orr eor lslv lsrv asrv` (the count is taken modulo the width of the form) |
+| `mul` | `madd rd, rn, rm, xzr` (`mul`) |
+| `rotr` / `rotl` | `rorv` / `neg` the count, then `rorv` |
+| `clz` / `ctz` | `clz` / `rbit`, `clz` (zero gives the width both ways) |
+| `popcnt` | `fmov d0, x0` (`s0, w0`), `cnt v0.8b`, `addv b0`, `fmov w0, s0` |
+| `extend8_s` `extend16_s` `extend32_s` `extend_i32_s` | `sxtb sxth sxtw` (`w` or `x` form) |
+| `wrap` `extend_i32_u` | `mov w0, w0` (the cut is emitted so that a dirty input cannot pass through) |
+| `div_s` `div_u` | `sdiv` `udiv`: nothing faults, a zero divisor gives 0 and `MIN / -1` gives `MIN` |
+| `rem_s` `rem_u` | `sdiv` or `udiv` into a scratch register, then `msub`: `MIN % -1` is 0 with no special case |
+| `cmp` | `cmp` (`w` form if either operand is an `I32`), `cset` |
+| `fadd fsub fmul fdiv fsqrt` | the scalar instruction of that name, operands in order |
+| `fmin fmax` | `fmin` `fmax`: a NaN operand gives a NaN and `-0 < +0`, which is WebAssembly's rule (`fminnm`/`fmaxnm` ignore a quiet NaN: the wrong ones, planted defect 79) |
+| `fneg fabs` | `fneg` `fabs`: the sign bit only, so a signalling NaN keeps its payload |
+| `fcopysign` | `(a & ~sign) | (b & sign)` in the integer registers: `bic`, `and`, `orr` with the one-`movz` mask |
+| `fceil ffloor ftrunc fnearest` | `frintp frintm frintz frintn` (ties to even; `frinta` rounds halves away, planted defect 80; `frinti` and `frintx` follow FPCR) |
+| float `cmp` | `fcmp`, then `cset` with `eq ne gt ge` and **`mi` for `lt`, `ls` for `le`**: an unordered pair is `NZCV = 0011`, so the integer `lt` and `le` are true for a NaN (planted defect 78) |
+| `convert_s` `convert_u` | `scvtf` `ucvtf` from a `w` or an `x` register: one rounding, so no sticky-bit sequence |
+| `trunc_*` `trunc_sat_*` | `fcvtzs` `fcvtzu`: toward zero, saturating, a NaN is 0, which is `trunc_sat` itself; `trunc` is the same instruction behind the guards a frontend writes |
+| `demote` `promote` | `fcvt s, d` `fcvt d, s` (a signalling NaN comes out quiet) |
+| `reinterpret` | the slot move, cut to 32 bits where the destination is 32 wide |
+
+A float operand is read with `ldr s` or `ldr d` from its slot (or built from an immediate through `x2` with `fmov`), and
+a result is stored as a whole word: an `F64` with `str d`, an `F32` with `fmov w0, s0` and `str x0`. A `str s` would
+leave the upper half of the slot as it was (planted defect 81). A slot past `ldur`'s reach uses the register form
+through `x17`, as the integer slots do.
+
+**AAPCS64 helper calls.** The integer-class arguments take `x0`-`x5` in order among themselves and the float
+ones `d0`-`d7` in order among themselves (an `F32` in the low 32 bits), so `(i64, f64, i64, f32)` is `x0, d0, x1, s1`.
+The builder's limit of six arguments means no float is stack-passed. A float immediate goes through `x16`, which the
+call address is loaded into after. A float result comes back in `d0`/`s0`; an `F32` is taken with `fmov w0, s0`, which
+clears the upper half, because the standard does not promise that a callee wrote only the low half and the test stub
+that returns a float with junk above bit 31 is how the rule is held. The convention between compiled functions is
+unchanged: a float travels as its bit word in the register or stack word an `I64` uses.
+
+**FPCR.** Compiled code assumes the default (round to nearest, no flush to zero, default NaN off, no trap enabled)
+and never writes it. A test reads `fpcr` before the float tests of an arm64 host and asserts it (bits `0x07C09F00`
+clear); a non-default value skips the float tests by name. Subnormal inputs and results survive.
+
+**Win64: what was lifted and what had to change.** The integer sequences are shared code that uses `rax`, `rcx` and
+`rdx` only, so the integer lift was removing the refusals. The float path uses `xmm0`-`xmm5` everywhere **except the
+SSE2 rounding sequence**, which named `xmm6` and `xmm7` as its `MASK` and `ONE` registers: callee-saved under
+Microsoft x64, so lifting the refusal as it stood would have been a clobbered callee-saved register in a function
+that passes every value test (planted defect 88). The Win64 variant uses the two registers that are dead at the point
+where the SysV code loads those two: `ABS` once `SIGN` is built, `MAGIC` once the rounded magnitude is built. The
+instructions are the same, the SysV bytes did not change (the 2,000 pinned functions and the byte comparison with
+`7bf1b55` are the check), and the SSE4.1 arm uses `xmm0` only. Helper arguments are numbered **by position**:
+argument `i < 4` goes in the register of position `i`, `rcx rdx r8 r9` for an integer and `xmm0`-`xmm3` for a float, so
+`(i64, f64, i64, f32)` is `rcx, xmm1, r8, xmm3`; the fifth and sixth are stack words at `[rsp + 32]` and `[rsp + 40]`,
+above the 32 bytes of shadow space, a float as its bit word whatever its class (planted defects 89 and 90). A helper
+is non-variadic: a variadic callee would want a float repeated in the integer register, which is unsupported here as
+on SysV. A float result is taken from `xmm0` by its width.
+
+**Win64 and the CPU-feature arms.** The `win64 ? NONE` line is gone: the arms (`lzcnt`, `tzcnt`, `popcnt`,
+`roundss`/`roundsd`) are plain x86 with no ABI dependence, so the flavour takes them under the effective set,
+records the set it used and honours `disabled_features` (planted defect 91). Both arms run under wine, which has the
+host's features; a mask of `ALL` runs the v1 arm, the Win64 rounding variant among them. arm64 keeps the empty set:
+detected `NONE`, effective `NONE`, recorded `NONE`, stamp prefix `arm64-v8`, a mask accepted and ignored.
+
+**The callee-saved vector registers: never encoded, shown two ways.** Under Win64 they are `xmm6`-`xmm15`; under
+AAPCS64 the low 64 bits of `d8`-`d15`. The assemblers record which vector registers they encode (`fp_regs_used` in the
+emitted record, bit `n` for `xmm`n on x86-64 and `v`n on arm64), and the tests read the record for every instruction
+of the tables, the helper calls and a function whose slots are far apart: no register in `xmm6`/`xmm7` (the assembler
+has no others) or in `v8`-`v15`, and every scratch register is used by something (`xmm0`-`xmm5`, `v0`-`v5`) so the scan
+is not vacuous; the control is the SysV flavour of the same functions, which does name `xmm6` and `xmm7`. The same is
+read back from the bytes with the real disassembler. A **sentinel** test then runs a float-heavy function (every
+float family, a store and a load of each width, a helper that trashes every caller-saved vector register with a float
+live across the call, a poll and a guard) through `fx_call_with_sentinels`, which loads `d8`-`d15` (or `xmm6`-`xmm15`)
+and the callee-saved general registers with known values and reads them back after a return, a guard exit, a poll whose
+slow path runs and a poll the helper refuses. The two instruments need each other: a sentinel cannot show that code
+never uses a callee-saved register, only that it did not change one on the paths run; the scan shows *never* and the
+sentinel shows the scan is looking at the right registers. Planted defects 86 and 88 are caught by both. Only the low
+64 bits of `d8`-`d15` are asserted: the upper halves are caller-saved, and a test that compared 128 bits would fail on
+correct code.
+
+**The simulator.** `tests/a64_sim.h` now runs the integer `w` forms, division, rotate, bit counts, sign extension, the
+scalar floating-point subset, `cnt`/`addv`, and typed helper calls (a signature says which arguments are integers,
+`float`s and `double`s; the host's own C ABI classifies them as AAPCS64 does), with Arm's NaN, zero-sign and saturation
+rules written out (a NaN operand comes back quietened, any other NaN is the positive default NaN, `fmin`/`fmax` order
+`-0 < +0`, the conversions saturate and give 0 for a NaN) and only the arithmetic itself taken from the host. It fills
+the stack with a pattern, leaves noise above bit 31 of `d0` after a float result, trashes every caller-saved vector
+register after a call and checks the low halves of `d8`-`d15` at the return. It makes the arm64 differential and the
+arm64 planted defects run on any host, and it is a dev loop, not the verdict: it is written by the same author as the
+emitter and can share a misreading of the manual with it. The instruments that count are `qemu-aarch64` and a real
+Raspberry Pi 4 (which are independent of each other: qemu's softfloat is not the Pi's silicon).
+
+**What the tests are.** `testArm64_numeric` and `testWin64_numeric` hold what is specific to one ABI: the simulator's own
+tests (hand-worked answers, the host's `<cmath>` where they must agree, every word it refuses), the structural scans, the
+helper-ABI probes in that ABI's own assembly (every mix of integer, `f64` and `f32` arguments up to six, and with
+immediates, 2,647 patterns each), a float result with junk above bit 31, the sentinels, and on arm64 the `fpcr` read.
+Everything portable stays in `testInt_ir`, `testFloat_ir`, `testDifferential` (the integer and float programs run
+natively on every host that has a backend, and again through the simulator), `testWast` (the ten files, once per
+backend, twice on the backends with feature arms) and `testCpu_features`. The three probes in SysV assembly
+(`FloatHelpers.EveryMixOf...BySysVClassification`, `...TheNamedClassificationFromTheStory...`,
+`...AFloatResultIsTakenFromXmm0...`) stay SysV-only and are replaced on the other two ABIs by probes of their own.
+
+**Planted defects 69 to 91.** 69-75 arm64 integer (an `I32` `add`/`sub`/`mul` in 64 bits, a shift or rotate by the
+64-bit form, an ordered compare on the whole register, `ctz` without `rbit`, `div_u`/`rem_u` signed, a `GUARD`
+emitted as nothing, a remainder's `msub` with its operands swapped); 76-86 arm64 float (the operands of `FSUB` and
+`FDIV` swapped, `lt`/`le` with the integer conditions, `fminnm`/`fmaxnm`, `frinta`, `str s`, `trunc_sat_u` by the
+signed instruction, `convert_u` from 64 bits by `scvtf`, a helper's second float argument in the wrong register, an
+`F32` result taken as `fmov x0, d0`, a sequence that changes `d8`); 87 an `I32`/`F32` parameter not cut on entry to a
+callable function; 88-90 Win64 float (the rounding unreworked, arguments numbered by class, stack arguments without
+the shadow offset); 91 the Win64 flavour given no feature again. 69-86 are caught on any host through the simulator
+(`make check-planted`); every one of 69-87 is caught by real arm64 code (`tools/arm64-plants.txt`: under qemu and on
+the Pi, one test alone, control first); 88-91 are caught on the laptop by the structural and byte tests and under wine
+(`tools/win64-plants.txt`), which also reruns the shared defects 38, 40-47, 50-55, 66 and 67 on the Win64 flavour (not
+39, whose `idiv` fault wine reports as an unhandled exception that kills the program, and not 48 and 49, which are in
+SysV assembly). A dropped guard is a different test on each ABI: on x86 it faults (`#DE`), so SysV turns the signal
+into a result and Win64 cannot (the harness has no handler there), and the Win64 guard defects are the verifier's; on
+arm64 nothing faults, so a missing guard returns 0 and only an assertion that the trap fired can see it (74).
+
+**Existing bytes.** No function without an `I32`, `F32` or `F64` changes by a byte on any backend: the pins of
+`testPin`, the generators and the SysV bytes are as they were, and the `check-planted-calls` anchors all occur once
+except the one Win64 anchor that did not occur before (`src/code/memory.c`). Two arm64 anchors that sat on the text
+where a callee's result is stored carry the mask line this story added there, with the mutation unchanged.
+
+**Rejected.** *Float values kept in vector registers between operations*: a register allocator, and the callee-saved
+registers it would need saved; nothing here needs it and the slot shape is what every consumer's frame walk assumes.
+*`fcvt*` with a rounding-mode variant, or `frinti`/`frintx`*: they follow FPCR, and the point is that nothing depends
+on it. *`fminnm`/`fmaxnm`*: they are the wrong semantics for WebAssembly. *A scalar `popcnt` helper*: a call for a
+four-instruction sequence, and the vector unit is baseline. *A Win64 rounding that saves and restores `xmm6` and
+`xmm7`*: correct, and rejected for the unwind information it needs and because it would make the sentinel test unable to
+tell a clobber from a save. *A libm call for `ceil`/`floor`/`trunc`/`nearbyint` or as the evaluator's reference where
+WebAssembly differs from it*. *Generalising the SysV probes*: one test asserting three conventions would hide which is
+wrong. *Treating the simulator as the arm64 verdict*.
+
+**Known limits.** Instruction-cache coherence, a real kernel's W^X, memory ordering and the Windows kernel are outside
+every instrument here (`qemu-user`, wine and the simulator model none of them); the Pi covers the first three for
+arm64. A claim in this section says "under wine" (wine 10.0, the host's features), "under `qemu-aarch64`" (10.0.13) or
+"on the Pi (Cortex-A72)", and "simulated" for the simulator.
 
 ## Gates
 
@@ -2232,9 +2390,9 @@ interpreter).
 - An ahead-of-time C backend, a Wasm backend, JIT hardening, a
   register allocator, any pass, SSA, inlining, unboxing, SIMD, 8-bit values. (32-bit integers,
   the integer divide and floating point on x86-64 SysV are here: above.)
-- **The integer and float operations on arm64 and Win64**: refused by name until story 5 of the
-  float spec. (The CPU features are x86-64 SysV's only; arm64 needs none, and Win64 will be given them
-  with its float operations.)
+- **Callee-saved vector registers used by compiled code**: never, by design (below). A register allocator
+  would need the prologue and unwind information to save `xmm6`-`xmm15` or `d8`-`d15`, and nothing here
+  keeps a value in a vector register between two operations.
 - **A code cache.** The feature set a piece of code needs is recorded with it and a stamp text and a
   reuse predicate exist, but nothing consumes them: the cache arrives with tier-up (below).
 - **An in-JIT pause.** A poll's non-zero answer ends the function; see above.

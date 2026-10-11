@@ -54,9 +54,9 @@ The width of an operation is its destination's; shift and rotate counts are take
 width. The four divisions are *partial*: the frontend writes the guards in front of the
 operation (a `GUARD` that the divisor is not zero, and for `div_s` that not (`a == MIN` and
 `b == -1`)) and the verifier refuses a division without them; `rem_s` of `MIN % -1` is 0.
-They are emitted for x86-64 SysV as real 32-bit and 64-bit instructions; the arm64 backend and
-the Windows flavour refuse a function that uses them with `GRJIT_ERR_UNSUPPORTED`, for now.
-`documentation/design.md` has the decisions and what was rejected.
+They are emitted on all three backends as real 32-bit and 64-bit instructions (x86-64 SysV, arm64
+and the Windows flavour), the `I32` always zero-extended in its word. `documentation/design.md`
+has the decisions and what was rejected.
 
 They are checked against the WebAssembly spec suite: `tools/wasm/fetch.sh` fetches `i32.wast`
 and `i64.wast` at the commit of the tag `wg-3.0` into `third_party/` (the harness, in
@@ -64,7 +64,9 @@ and `i64.wast` at the commit of the tag `wg-3.0` into `third_party/` (the harnes
 digest in `tools/wasm/SHA256SUMS`; it finds the library from a compile-time define, so the working
 directory does not matter, and `GRJIT_WASM_SUITE_DIR` names another directory that holds `test/core/`), and every `assert_return` and `assert_trap`
 runs through the IR. Counts at that tag: `i32.wast` 374 passed, 85 excluded (the
-`assert_invalid` and `assert_malformed` it cannot run), 0 failed; `i64.wast` 384, 31, 0.
+`assert_invalid` and `assert_malformed` it cannot run), 0 failed; `i64.wast` 384, 31, 0. They are the
+same on every backend: natively on x86-64, under `qemu-aarch64` and on a Raspberry Pi 4 for arm64,
+and under wine for Win64.
 
 ## CPU features
 
@@ -82,8 +84,10 @@ predicate are the contract it will use, not a feature anything consumes today. A
 LZCNT or BMI1 runs `lzcnt` and `tzcnt` as `bsr` and `bsf` instead of faulting, which is why
 detection is a pure decoder over the CPUID words with a test for each rule, and is also run under
 qemu CPU models (`suite/tools/xarch/jit-x86-cpu.sh` in the workspace). arm64 needs none of
-this, and the Win64 flavour is given no feature. `documentation/design.md` has the decisions and
-what was rejected.
+this (`clz`, `rbit`, `frint*` and `cnt` are baseline ARMv8-A): its detected, effective and recorded
+sets are always empty, the stamp is `arm64-v8` and a mask is accepted and ignored. The Win64 flavour
+takes the same four features as SysV. `documentation/design.md` has the decisions and what was
+rejected.
 
 ## The float operations
 
@@ -95,12 +99,14 @@ over two float registers with the ordered conditions (`eq ne lt le gt ge`, false
 `ne`), and the conversions `CONVERT_S`/`CONVERT_U` (`f32/f64.convert_i32/i64_s/u`), `TRUNC_S`/`TRUNC_U`
 (`i32/i64.trunc_f32/f64_s/u`, **partial**: the frontend writes a NaN guard and a range guard in
 front, and the verifier refuses the operation without the range guard), `TRUNC_SAT_S`/`TRUNC_SAT_U`,
-`DEMOTE`, `PROMOTE` and `REINTERPRET`. A helper `CALL` takes and returns floats by the SysV
-classification (integers in `rdi`..`r9`, floats in `xmm0`..`xmm7`, each among themselves); between
-compiled functions a float travels as its bit word. They are emitted for x86-64 SysV with SSE2 only,
-and run the same on every host; the arm64 backend and the Windows flavour refuse a function that has
-a float register or operation with `GRJIT_ERR_UNSUPPORTED`, for now. Compiled code assumes the
-default MXCSR and never writes it; the library and its tests are built with `-ffp-contract=off`.
+`DEMOTE`, `PROMOTE` and `REINTERPRET`. A helper `CALL` takes and returns floats by the platform's
+convention (SysV: integers in `rdi`..`r9`, floats in `xmm0`..`xmm7`, each among themselves; AAPCS64:
+integers in `x0`..`x5`, floats in `d0`..`d7`, each among themselves; Microsoft x64: by position,
+`rcx rdx r8 r9` or `xmm0`..`xmm3`, then two stack words); between compiled functions a float travels
+as its bit word. All three backends emit every operation (x86-64 with SSE2, with SSE4.1 where the CPU
+has it), and none encodes a callee-saved vector register (`xmm6`-`xmm15` on Win64, `d8`-`d15` on arm64).
+Compiled code assumes the default MXCSR / FPCR and never writes it; the library and its tests are built
+with `-ffp-contract=off`.
 `documentation/design.md` has the decisions, the NaN rule and what was rejected.
 
 The eight scalar float and conversion files of the same suite commit run too (`f32`, `f64`,
@@ -174,7 +180,7 @@ this library:
 | `check-edges` | fail on any `#include` or shared-object dependency on a Ghoti library other than `cutil`, `runtime-core` and this one |
 | `check-fp-contract` | fail if any compile-flag set (the C and C++ flags, the library's, the sanitizer and fuzz builds') lacks `-ffp-contract=off`, ends with another contraction mode or uses `-ffast-math`: a fused multiply-add rounds once where the interpreter's C rounds twice, so a float computed by compiled code would differ on arm64 or under clang |
 | `check-gates` | run each gate against a planted defect and a control, and against an empty tree, and fail unless each behaves |
-| `check-planted` | build the library with a planted backend defect (`SHR` and `SAR` swapped; every stack-map slot 8 bytes off; a live reference left out; and in the Windows flavour a callee-saved register used, no shadow space, an unwind table never registered; for calls, a reference left out of a call site's map, a callee-saved register clobbered, a native-stack check that omits the frame; for tail calls, a stack argument not copied, the hook's arguments area left out of its map, no padding; for calls to natives, the walk start stored after the call, the stack arguments not popped, their area not rounded, the native-stack check without it, an argument one word too high; for the integer operations, the verifier not requiring a division's guards, `idiv` reached on `MIN % -1`, an i32 shift count masked to 64, an i32 addition done in 64 bits, swapped operands of an i32 subtraction and comparison; the same defects of the arm64 convention, 20 to 29, are listed in `tools/arm64-plants.txt` and run, by their tests, by `suite/tools/xarch/jit-arm64.sh` under qemu) and require the differential, the read-back, the call tests, the tail-call tests, the native-call tests or the Win64 structural tests to fail on it, and to pass without it |
+| `check-planted` | build the library with a planted backend defect (`SHR` and `SAR` swapped; every stack-map slot 8 bytes off; a live reference left out; and in the Windows flavour a callee-saved register used, no shadow space, an unwind table never registered; for calls, a reference left out of a call site's map, a callee-saved register clobbered, a native-stack check that omits the frame; for tail calls, a stack argument not copied, the hook's arguments area left out of its map, no padding; for calls to natives, the walk start stored after the call, the stack arguments not popped, their area not rounded, the native-stack check without it, an argument one word too high; for the integer operations, the verifier not requiring a division's guards, `idiv` reached on `MIN % -1`, an i32 shift count masked to 64, an i32 addition done in 64 bits, swapped operands of an i32 subtraction and comparison; the same defects of the arm64 convention, 20 to 29, and the arm64 numeric ones, 69 to 87 (69 to 86 are also caught on any host through the simulator in `tests/a64_sim.h`), are listed in `tools/arm64-plants.txt` and run, by their tests, by `suite/tools/xarch/jit-arm64.sh` under qemu; the Win64 float ones, 88 to 91, are caught by the structural and byte tests on any host and, with the shared defects of the integer, float and CPU-feature stories rerun on Win64, listed in `tools/win64-plants.txt` for `suite/tools/xwin/m1-controls.sh` under wine) and require the differential, the read-back, the call tests, the tail-call tests, the native-call tests or the Win64 structural tests to fail on it, and to pass without it |
 | `check-planted-calls` | plant, in a scratch copy of `runtime-core` or of this library, the defects of the call protocol (a frame missed in a rebuild, an early free, a short reservation, no status test after a pointer call, a reference left out of a call site's map, the walk start not stored, retired code entered, a token or an arity not checked, a refused rebuild ignored, a derived argument not recorded; for tail calls, a refused hook ignored, the walk start not stored before the hook, the return address left where it was, the verifier not needing the hook; for calls to natives, a status not tested, the status exit built from the state before the call, the result stored after the status test, the cause without the native bit, the stack area not rounded or not popped, an argument at the wrong offset, references or derived pointers left out of a native site's map, the stack check without the area or without the native's use, the verifier not checking an arity, a type or a state, and the two early frees run against the native tests alone; the narrowing of every hook's and the poll helper's 32-bit answer, in each place a function tests it; and, for the arm64 emitter, the indices and kinds of a call's, a tail call's and a native's sites and its large offsets, which the host runs through the metadata and the words it emits for arm64) and require a test to fail on each; first run it against edits of known outcome so that a missed one, a build failure and a hang each show as what they are, not as a catch. `--target=arm64` does the same for the mutations of `src/arm64/`, built with the cross compiler and run under qemu (in the container of `suite/tools/xarch/jit-arm64.sh`, which runs it); a catch by the pin test alone is PIN-ONLY, which is not one |
 | `bench` | run the benchmark harness in full; it prints a calibration result first |
 | `test-asan`, `test-tsan`, `test-valgrind-quiet` | the same tests under ASan+UBSan, ThreadSanitizer and Valgrind |
@@ -186,7 +192,7 @@ running a program that includes only the umbrella header.
 
 ## Status
 
-The IR (with `I32`, `F32`, `F64` and the integer and float operations, on x86-64 SysV), the verifier, the printer, the x86-64 and arm64 baseline
+The IR (with `I32`, `F32`, `F64` and the integer and float operations, on all three backends), the verifier, the printer, the x86-64 and arm64 baseline
 backends (the Windows one with its unwind registration) and their assemblers, the metadata, W^X code memory, the gates, the examples and the
 benchmark harness are in, and so are the parts that need an engine: wiring it
 into `lang-tang` (story 15), tier-up, compiled-code reference counting and the
