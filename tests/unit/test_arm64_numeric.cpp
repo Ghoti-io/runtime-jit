@@ -100,6 +100,10 @@ struct Prog {
   }
   Result run(uint64_t x0 = 0, uint64_t x1 = 0, uint64_t x2 = 0) {
     Config cfg;
+    // A few instructions use no stack, and the simulator fills the whole stack with a pattern on every run: the
+    // default 4 MiB made each of the tens of thousands of runs of the random sweeps cost a 4 MiB fill (minutes under
+    // TSan). 16 KiB is more than these programs touch (a stray access past it is still stopped by the simulator).
+    cfg.stack_bytes = 16u << 10;
     cfg.args[0] = x0;
     cfg.args[1] = x1;
     cfg.args[2] = x2;
