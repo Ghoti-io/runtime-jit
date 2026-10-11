@@ -37,7 +37,10 @@ inline const GRCORE_Key kSentinelKey = GRCORE_KEY_INIT("sentinel", GRCORE_CARDIN
  *
  * f(a: f64, b: f32, mode: i64, p: ptr) -> i64: every family of float operation, a store and a load of each width,
  * a helper that trashes the vector registers with a float live across it, a poll and a guard on `mode`. The result
- * folds every float (the inputs are finite and no operation makes a NaN, so the bits are fixed). */
+ * folds every float (the inputs are finite and no operation makes a NaN, so the bits are fixed).
+ *
+ * Precondition: a caller never passes `a == 0`. The sequence divides by `a` (`t3 / a`), and a zero would make the
+ * quotient a NaN and the folded bits depend on the host's default NaN. */
 inline GRJIT_Function * sentinel_function(const void * clobber, size_t fold_limit = SIZE_MAX) {
   using namespace floatfx;
   B b("sentinel", 2);
@@ -55,7 +58,7 @@ inline GRJIT_Function * sentinel_function(const void * clobber, size_t fold_limi
              u32 = b.reg(GRJIT_TYPE_I32), r32 = b.reg(GRJIT_TYPE_I32), tr = b.reg(GRJIT_TYPE_I32),
              l = b.reg(GRJIT_TYPE_I32), h = b.reg(GRJIT_TYPE_I32), ok = b.reg(GRJIT_TYPE_I32),
              ld32 = b.reg(GRJIT_TYPE_F32);
-  GRJIT_VReg acc = b.reg(GRJIT_TYPE_I64), w = b.reg(GRJIT_TYPE_I64);
+  GRJIT_VReg acc = b.reg(GRJIT_TYPE_I64);
   b.at(b.block());
   auto state = [&] {
     return std::vector<GRJIT_FrameSlot>{grjit_frame_slot_vreg(mode), grjit_frame_slot_vreg(a)};
@@ -164,7 +167,6 @@ inline GRJIT_Function * sentinel_function(const void * clobber, size_t fold_limi
   foldi(u32, true);
   foldi(r32, true);
   foldi(tr, true);
-  (void)w;
   b.ret(V(acc));
   return b.finish();
 }
