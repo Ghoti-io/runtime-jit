@@ -2283,9 +2283,15 @@ GRJIT_Result grjit_emit_function(const GRJIT_Function * f,
     bool win64, GRJIT_Features features, const GRJIT_LiveSites * live, GRJIT_Emit * e) {
   memset(e, 0, sizeof *e);
   e->win64 = win64;
-  /* The Win64 flavour refuses every operation that has a feature arm (story 5 emits them), so
-   * it is given no feature: nothing there can record one. */
+  /* The CPU-feature arms are plain x86 instructions with no ABI dependence, so the Win64 flavour takes the
+   * same arms as SysV under the same effective set, records the set it used and honours the caller's mask. */
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 91
+  /* Planted defect 91 (tests only): the Win64 flavour is given no feature again, as it was before it emitted its
+   * feature arms, so a host with the features never takes one there and records none. */
   e->features = win64 ? GRJIT_FEATURES_NONE : (features & GRJIT_FEATURES_ALL);
+#else
+  e->features = features & GRJIT_FEATURES_ALL;
+#endif
   e->abi = win64 ? &grjit_x86_abi_win64 : &grjit_x86_abi_sysv;
   grjit_emit_common_init(&e->c, f,
       e->abi->internal->reg_args,

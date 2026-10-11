@@ -821,7 +821,9 @@ endif
 # callee-saved xmm6 and xmm7 (caught here by the structural scan of the registers the assembler encoded and by
 # objdump's reading of the bytes, and under wine by the sentinels), and the helper's float arguments numbered by class
 # as SysV numbers them and its stack-passed ones stored without the shadow space's offset (caught here by the bytes of
-# the argument loads, and under wine by a probe in MinGW assembly). Defects 20 to 29 are the arm64
+# the argument loads, and under wine by a probe in MinGW assembly). Defect 91 gives the Win64 flavour no CPU feature
+# again, so it never takes an arm and records none (caught here by the emission test of its arms, and under wine by
+# the record tests that compile and run the code). Defects 20 to 29 are the arm64
 # emitter's own versions of the call, tail-call and native ones (the walk start stored
 # after a native call, a native's stack area not rounded or not popped, a callee that
 # does not pop, a tail call made as a call, the last stack argument of a tail call not
@@ -903,7 +905,8 @@ PLANT_DEFECTS := 1:testDifferential 2:testReadback 3:testReadback \
 	84:testArm64_numeric:Arm64SimCompiled.AHelperGets* 85:testArm64_numeric:Arm64SimCompiled.AHelperGets* \
 	86:testDifferential:Differential.GeneratedFloatProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluatedWithNansEqual 86:testArm64_numeric:Arm64Registers.NoCalleeSaved* \
 	88:testWin64_numeric:Win64Numeric.NoCalleeSavedVector* 88:testWin64:Win64Registers.TheDisassemblerAgreesThatNoCalleeSavedRegisterAppears \
-	89:testWin64_numeric:Win64Numeric.AHelperCall* 90:testWin64_numeric:Win64Numeric.AHelperCall*
+	89:testWin64_numeric:Win64Numeric.AHelperCall* 90:testWin64_numeric:Win64Numeric.AHelperCall* \
+	91:testCpu_features:CpuArms.TheWin64Flavour*
 
 # The controls the script runs are built by this make, as prerequisites, and
 # not by the script's own sub-make. Under `make -j test` the sibling goals

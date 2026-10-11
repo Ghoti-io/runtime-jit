@@ -150,6 +150,8 @@
 #  90  a helper's stack-passed (fifth and sixth)       -> the same
 #      arguments stored without the shadow space's
 #      offset (Win64)
+#  91  the Win64 flavour given no CPU feature again,   -> testCpu_features (the emission of its arms; under
+#      so it takes no arm and records none                wine, the record tests that run the code)
 #
 # An existing defect in a sequence only the fallback runs is 52 (nearest rounds halves away from zero): on a host
 # with SSE4.1 the v1 rounding is run only through a mask of ALL, which testFloat_ir's worked answers and boundary

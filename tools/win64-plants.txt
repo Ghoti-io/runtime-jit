@@ -20,3 +20,4 @@
 88|88|testWin64_numeric|Win64Sentinels.*|the SSE2 rounding sequence unreworked, naming the callee-saved xmm6 and xmm7: the caller's sentinels change
 89|89|testWin64_numeric|Win64Helpers.EveryMixOfIntegerAndFloatArgumentsArrivesInTheRegisterOfItsPositionAndTheFifthAndSixthOnTheStack|a helper's float arguments numbered by class, as SysV numbers them, not by position
 90|90|testWin64_numeric|Win64Helpers.EveryMixOfIntegerAndFloatArgumentsArrivesInTheRegisterOfItsPositionAndTheFifthAndSixthOnTheStack|a helper's fifth and sixth arguments stored without the shadow space's offset
+91|91|testCpu_features|CpuRecord.TheRecordedSetIsExactlyTheArmsEmittedUnderEverySubsetOfTheHostsFeatures|the Win64 flavour given no feature: it takes no arm and records none, on a host that has the features

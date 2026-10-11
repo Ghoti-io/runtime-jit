@@ -509,9 +509,16 @@ TEST(Win64Registers, TheDisassemblerAgreesThatNoCalleeSavedRegisterAppears) {
   for (const std::string & instr : floatfx::every_float_instruction()) {
     floatfx::FloatOp op = floatfx::build_any_op(instr);
     ASSERT_NE(op.function, nullptr) << instr;
-    Emit em(op.function);
-    ASSERT_TRUE(em.ok()) << instr;
-    blob.insert(blob.end(), em.e.bytes, em.e.bytes + em.e.size);
+    // With no feature (the v1 sequences, the Win64 rounding variant among them) and with all four (the arms).
+    for (GRJIT_Features set : {GRJIT_FEATURES_NONE, GRJIT_FEATURES_ALL}) {
+      GRJIT_Emitted e{};
+      ASSERT_EQ(grjit_emit_for_features(GRJIT_ARCH_X86_64_WIN64, op.function, grjit_allocator_default(), nullptr,
+                    nullptr, kRequestOffset, set, &e),
+          GRJIT_OK)
+          << instr;
+      blob.insert(blob.end(), e.bytes, e.bytes + e.size);
+      grjit_emitted_free(&e);
+    }
     grjit_function_destroy(op.function);
     float_functions++;
   }

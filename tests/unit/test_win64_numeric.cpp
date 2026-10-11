@@ -109,13 +109,22 @@ GRJIT_Function * call_with_mixed(size_t n) {
 TEST(Win64Numeric, NoCalleeSavedVectorRegisterIsEncodedForAnyFloatInstructionAndTheScratchOnesAreAllUsed) {
   uint32_t seen = 0;
   size_t checked = 0;
+  // Under no feature (the v1 sequences, the Win64 rounding variant among them) and under all four (the arms).
   auto scan = [&](const GRJIT_Function * f, const std::string & what) {
-    Emitted w(f, GRJIT_ARCH_X86_64_WIN64);
-    ASSERT_EQ(w.result, GRJIT_OK) << what;
-    EXPECT_EQ(w.e.fp_regs_used & kCalleeSavedXmm, 0u) << what << ": xmm6 or xmm7 was encoded";
-    EXPECT_EQ(w.e.regs_used & kCalleeSavedGpr, 0u) << what;
-    seen |= w.e.fp_regs_used;
-    checked++;
+    for (GRJIT_Features set : {GRJIT_FEATURES_NONE, GRJIT_FEATURES_ALL}) {
+      GRJIT_Emitted e{};
+      ASSERT_EQ(grjit_emit_for_features(GRJIT_ARCH_X86_64_WIN64, f, grjit_allocator_default(), nullptr, nullptr,
+                    kRequestOffset, set, &e),
+          GRJIT_OK)
+          << what;
+      EXPECT_EQ(e.fp_regs_used & kCalleeSavedXmm, 0u) << what << ": xmm6 or xmm7 was encoded (set " << set << ")";
+      EXPECT_EQ(e.regs_used & kCalleeSavedGpr, 0u) << what;
+      if (set == GRJIT_FEATURES_NONE) {
+        seen |= e.fp_regs_used;
+      }
+      grjit_emitted_free(&e);
+      checked++;
+    }
   };
   for (const std::string & instr : floatfx::every_float_instruction()) {
     Built b;
@@ -127,7 +136,7 @@ TEST(Win64Numeric, NoCalleeSavedVectorRegisterIsEncodedForAnyFloatInstructionAnd
     Fn f(call_with_mixed(n));
     scan(f, "a helper call with " + std::to_string(n) + " mixed arguments");
   }
-  EXPECT_GT(checked, 70u);
+  EXPECT_GT(checked, 140u);
   EXPECT_EQ(seen, 0x3Fu) << "xmm0 to xmm5 are what the Win64 flavour uses, each of them by something";
 }
 
@@ -150,9 +159,11 @@ TEST(Win64Numeric, TheSysVFlavourWithoutTheSse41ArmDoesNameXmm6AndXmm7SoTheScanC
           GRJIT_OK);
       sysv_sse41 |= e.fp_regs_used;
       grjit_emitted_free(&e);
-      Emitted w(b.op.function, GRJIT_ARCH_X86_64_WIN64);
-      ASSERT_EQ(w.result, GRJIT_OK);
-      win |= w.e.fp_regs_used;
+      ASSERT_EQ(grjit_emit_for_features(GRJIT_ARCH_X86_64_WIN64, b.op.function, grjit_allocator_default(), nullptr,
+                    nullptr, kRequestOffset, GRJIT_FEATURES_NONE, &e),
+          GRJIT_OK);
+      win |= e.fp_regs_used;
+      grjit_emitted_free(&e);
     }
   }
   EXPECT_EQ(sysv_v1 & kCalleeSavedXmm, kCalleeSavedXmm) << "the SysV v1 rounding uses xmm6 and xmm7";

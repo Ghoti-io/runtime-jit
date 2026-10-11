@@ -63,11 +63,9 @@ inline const char * feature_name(GRJIT_Features f) {
   }
 }
 
-/* The features the native backend can use: the host's detected set, except for the Win64 flavour, which is given no
- * feature until the commit of story 5 that emits its feature arms. */
-inline GRJIT_Features detected() {
-  return grjit_native_arch() == GRJIT_ARCH_X86_64_WIN64 ? GRJIT_FEATURES_NONE : grjit_features_detected();
-}
+/* The features the native backend can use: the host's detected set. (The Win64 flavour takes the same arms as SysV
+ * under the same set; arm64 detects none.) */
+inline GRJIT_Features detected() { return grjit_features_detected(); }
 
 /* The disabled masks that give each subset of the host's detected set as the effective one: up to
  * sixteen, the first (subset 0) being "everything disabled". */

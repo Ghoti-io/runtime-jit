@@ -19,14 +19,14 @@
 #include <sstream>
 #include <thread>
 
-#if defined(__x86_64__) && defined(__linux__)
+#if defined(__x86_64__) && (defined(__linux__) || defined(_WIN64))
 #define CPU_RUN_HERE 1
-#define CPU_ONLY_ON_X86_64_LINUX() ((void)0)
+#define CPU_ONLY_ON_X86_64() ((void)0)
 #else
 #define CPU_RUN_HERE 0
-#define CPU_ONLY_ON_X86_64_LINUX() \
-  GTEST_SKIP() << "compiled code with feature arms is run on x86-64 SysV (Linux) only; the pure and " \
-                  "emission-only tests of this file run everywhere"
+#define CPU_ONLY_ON_X86_64() \
+  GTEST_SKIP() << "compiled code with feature arms is run on x86-64 (SysV on Linux, Win64 under wine) only; the pure " \
+                  "and emission-only tests of this file run everywhere"
 #endif
 
 using namespace featfx;
@@ -478,47 +478,29 @@ TEST(CpuArms, NoOtherOperationChangesArmAndRecordsNothing) {
   EXPECT_GT(compared, 60u);
 }
 
-namespace {
-
-/* Whether a backend other than SysV emits the operation `name`: both do, at this commit. */
-bool arch_emits_feature_op(GRJIT_Arch, const std::string &) {
-  return true;
-}
-
-} // namespace
-
-TEST(CpuArms, Arm64AndWin64EmissionIgnoreTheSetAndTakeNoFeatureArm) {
-  // An integer-only function: emitted by all three backends, and the same bytes whatever set is named.
+TEST(CpuArms, Arm64EmissionIgnoresTheSetAndTakesNoFeatureArm) {
+  // An integer-only function and every operation that has a feature arm on x86-64: on arm64 the same bytes whatever
+  // set is named, and nothing recorded (clz, rbit, frint and cnt are baseline ARMv8-A).
   floatfx::FloatOp add = floatfx::build_any_op("i64.add");
   Fn f(add.function);
-  for (GRJIT_Arch arch : {GRJIT_ARCH_ARM64, GRJIT_ARCH_X86_64_WIN64}) {
-    const Emit none = emit_with(f.f, GRJIT_FEATURES_NONE, arch);
-    const Emit all = emit_with(f.f, GRJIT_FEATURES_ALL, arch);
-    ASSERT_EQ(none.result, GRJIT_OK) << arch;
-    ASSERT_EQ(all.result, GRJIT_OK) << arch;
-    EXPECT_EQ(none.bytes, all.bytes) << arch << ": the set changes nothing";
-    EXPECT_EQ(all.used, GRJIT_FEATURES_NONE) << arch << ": nothing is recorded";
+  {
+    const Emit none = emit_with(f.f, GRJIT_FEATURES_NONE, GRJIT_ARCH_ARM64);
+    const Emit all = emit_with(f.f, GRJIT_FEATURES_ALL, GRJIT_ARCH_ARM64);
+    ASSERT_EQ(none.result, GRJIT_OK);
+    ASSERT_EQ(all.result, GRJIT_OK);
+    EXPECT_EQ(none.bytes, all.bytes) << "the set changes nothing";
+    EXPECT_EQ(all.used, GRJIT_FEATURES_NONE) << "nothing is recorded";
   }
-  // The operations with a feature arm on x86-64: where the backend emits them, the same bytes under every set and
-  // nothing recorded; where it does not yet, the function is refused whole, with no record.
   for (const std::string & n : feature_ops()) {
     floatfx::FloatOp op = floatfx::build_any_op(n);
     Fn g(op.function);
-    for (GRJIT_Arch arch : {GRJIT_ARCH_ARM64, GRJIT_ARCH_X86_64_WIN64}) {
-      const Emit none = emit_with(g.f, GRJIT_FEATURES_NONE, arch);
-      const Emit all = emit_with(g.f, GRJIT_FEATURES_ALL, arch);
-      if (arch_emits_feature_op(arch, n)) {
-        ASSERT_EQ(none.result, GRJIT_OK) << n << " on arch " << arch;
-        ASSERT_EQ(all.result, GRJIT_OK) << n << " on arch " << arch;
-        EXPECT_EQ(none.bytes, all.bytes) << n << " on arch " << arch << ": the set changes nothing";
-        EXPECT_EQ(none.used, GRJIT_FEATURES_NONE) << n << " on arch " << arch;
-        EXPECT_EQ(all.used, GRJIT_FEATURES_NONE) << n << " on arch " << arch << ": nothing is recorded";
-      } else {
-        EXPECT_EQ(none.result, GRJIT_ERR_UNSUPPORTED) << n << " on arch " << arch;
-        EXPECT_EQ(all.result, GRJIT_ERR_UNSUPPORTED) << n << " on arch " << arch;
-        EXPECT_EQ(all.used, ~GRJIT_Features{0}) << "no record was made for a refused function";
-      }
-    }
+    const Emit none = emit_with(g.f, GRJIT_FEATURES_NONE, GRJIT_ARCH_ARM64);
+    const Emit all = emit_with(g.f, GRJIT_FEATURES_ALL, GRJIT_ARCH_ARM64);
+    ASSERT_EQ(none.result, GRJIT_OK) << n;
+    ASSERT_EQ(all.result, GRJIT_OK) << n;
+    EXPECT_EQ(none.bytes, all.bytes) << n << ": the set changes nothing";
+    EXPECT_EQ(none.used, GRJIT_FEATURES_NONE) << n;
+    EXPECT_EQ(all.used, GRJIT_FEATURES_NONE) << n << ": nothing is recorded";
   }
   // On an arm64 host the same is true of compiled code, mapped and recorded: any mask is accepted and ignored, the bytes
   // are the same, the recorded set is empty, and the stamp is arm64-v8 (nothing in the baseline ARMv8-A needs a feature).
@@ -546,6 +528,46 @@ TEST(CpuArms, Arm64AndWin64EmissionIgnoreTheSetAndTakeNoFeatureArm) {
     EXPECT_EQ(grjit_features_detected(), GRJIT_FEATURES_NONE);
     EXPECT_EQ(stamp_of(grjit_features_detected()), "arm64-v8");
   }
+}
+
+/* The Win64 flavour takes the same arms as SysV: the arm instructions are plain x86 with no ABI dependence, so under the
+ * same effective set it emits the same instruction for the operation, records exactly the feature it used, and honours
+ * the caller's mask. (The whole function differs from SysV's by its prologue, so the bytes are checked for the
+ * arm's instruction, the way the arm pins' contents are, and not compared whole.) */
+TEST(CpuArms, TheWin64FlavourTakesTheSameArmsAsSysVAndRecordsExactlyWhatItUsed) {
+  size_t checked = 0;
+  for (const cpupins::Pin & pin : cpupins::kPins) {
+    SCOPED_TRACE(pin.instr);
+    const std::string name = pin.instr;
+    const bool wide = name.rfind("i64", 0) == 0;
+    std::string key;
+    if (name.find(".clz") != std::string::npos) {
+      key = wide ? "f3480fbdc0" : "f30fbdc0";
+    } else if (name.find(".ctz") != std::string::npos) {
+      key = wide ? "f3480fbcc0" : "f30fbcc0";
+    } else if (name.find(".popcnt") != std::string::npos) {
+      key = wide ? "f3480fb8c0" : "f30fb8c0";
+    } else {
+      const bool dbl = name.rfind("f64", 0) == 0;
+      key = std::string(dbl ? "660f3a0bc0" : "660f3a0ac0") + (name.find(".ceil") != std::string::npos    ? "0a"
+                                                              : name.find(".floor") != std::string::npos ? "09"
+                                                              : name.find(".trunc") != std::string::npos ? "0b"
+                                                                                                          : "08");
+    }
+    floatfx::FloatOp op = floatfx::build_any_op(name);
+    Fn f(op.function);
+    for (GRJIT_Features set = 0; set <= GRJIT_FEATURES_ALL; set++) {
+      const Emit w = emit_with(f.f, set, GRJIT_ARCH_X86_64_WIN64);
+      const Emit sysv = emit_with(f.f, set, GRJIT_ARCH_X86_64);
+      ASSERT_EQ(w.result, GRJIT_OK) << set;
+      const GRJIT_Features want = set & pin.need;
+      EXPECT_EQ(w.used, want) << "set " << set << ": the recorded set is exactly the arm taken";
+      EXPECT_EQ(w.used, sysv.used) << "set " << set << ": the same decision as SysV";
+      EXPECT_EQ(contains(w.bytes, key.c_str()), want != GRJIT_FEATURES_NONE) << "set " << set << ": the arm's instruction";
+      checked++;
+    }
+  }
+  EXPECT_EQ(checked, size_t{14 * 16});
 }
 
 /* ---- Compiled code: the record, the reuse rule, the answers under every subset ------------------ */
@@ -591,7 +613,7 @@ struct Code {
 } // namespace
 
 TEST(CpuRecord, TheRecordedSetIsExactlyTheArmsEmittedUnderEverySubsetOfTheHostsFeatures) {
-  CPU_ONLY_ON_X86_64_LINUX();
+  CPU_ONLY_ON_X86_64();
   JitWorld w;
   Fn both(clz_and_ceil());
   Fn none(neither());
@@ -627,7 +649,7 @@ TEST(CpuRecord, TheRecordedSetIsExactlyTheArmsEmittedUnderEverySubsetOfTheHostsF
 }
 
 TEST(CpuRecord, AMaskOfReservedBitsChangesNothingAndAFullMaskIsV1) {
-  CPU_ONLY_ON_X86_64_LINUX();
+  CPU_ONLY_ON_X86_64();
   JitWorld w;
   Fn both(clz_and_ceil());
   Code plain(both.f, w, 0), reserved(both.f, w, 0xFFFFFFF0u), everything(both.f, w, 0xFFFFFFFFu),
@@ -740,7 +762,7 @@ TEST(CpuFixture, TheMaskVariableOfTheFixturesIsParsedStrictlyAndATypoAbortsThePr
 }
 
 TEST(CpuReuse, CodeRunsWhereItsRecordedSetIsASubsetOfTheRunningOneAndNowhereElse) {
-  CPU_ONLY_ON_X86_64_LINUX();
+  CPU_ONLY_ON_X86_64();
   GRJIT_REQUIRE_FEATURE(GRJIT_FEATURE_LZCNT);
   JitWorld w;
   floatfx::FloatOp clz = floatfx::build_any_op("i32.clz");
@@ -893,7 +915,7 @@ void expect_worked(const std::vector<Worked> & table, JitWorld & w, const std::v
 } // namespace
 
 TEST(CpuRun, TheWorkedAnswersOfTheIntegerOperationsAreTheSameUnderEverySubsetOfTheHostsFeatures) {
-  CPU_ONLY_ON_X86_64_LINUX();
+  CPU_ONLY_ON_X86_64();
   CPU_SKIP_IF_CROSSED();
   JitWorld w;
   size_t ran = 0;
@@ -902,7 +924,7 @@ TEST(CpuRun, TheWorkedAnswersOfTheIntegerOperationsAreTheSameUnderEverySubsetOfT
 }
 
 TEST(CpuRun, TheWorkedAnswersOfTheRoundingsAreTheSameUnderEverySubsetOfTheHostsFeatures) {
-  CPU_ONLY_ON_X86_64_LINUX();
+  CPU_ONLY_ON_X86_64();
   CPU_SKIP_IF_CROSSED();
   JitWorld w;
   size_t ran = 0;
@@ -911,7 +933,7 @@ TEST(CpuRun, TheWorkedAnswersOfTheRoundingsAreTheSameUnderEverySubsetOfTheHostsF
 }
 
 TEST(CpuRun, TheV1ArmGivesTheWorkedAnswersOnAHostThatHasTheFeaturesBecauseItsMaskedOff) {
-  CPU_ONLY_ON_X86_64_LINUX();
+  CPU_ONLY_ON_X86_64();
   CPU_SKIP_IF_CROSSED();
   JitWorld w;
   // The fallback sequences are run on every x86-64 host through a mask of ALL; the record shows it.
@@ -925,7 +947,7 @@ TEST(CpuRun, TheV1ArmGivesTheWorkedAnswersOnAHostThatHasTheFeaturesBecauseItsMas
 }
 
 TEST(CpuRun, EveryFeatureDependentOperationGivesTheEvaluatorsAnswersUnderEverySubsetAndEveryMaskAgrees) {
-  CPU_ONLY_ON_X86_64_LINUX();
+  CPU_ONLY_ON_X86_64();
   CPU_SKIP_IF_CROSSED();
   JitWorld w;
   const std::vector<GRJIT_Features> masks = every_subset_masks();
@@ -1024,7 +1046,7 @@ const char * env_or(const char * name, const char * dflt) {
 } // namespace
 
 TEST(CpuModel, TheDetectedSetIsTheOneTheRunExpectsAndTheNativeRunExpectsTheHostsOwn) {
-  CPU_ONLY_ON_X86_64_LINUX();
+  CPU_ONLY_ON_X86_64();
   const char * model = std::getenv("GRJIT_TEST_CPU_MODEL");
   const char * expect = std::getenv("GRJIT_TEST_EXPECT_FEATURES");
   if (model == nullptr) {
@@ -1048,7 +1070,7 @@ TEST(CpuModel, TheDetectedSetIsTheOneTheRunExpectsAndTheNativeRunExpectsTheHosts
 }
 
 TEST(CpuModel, CodeCompiledForTheDetectedSetIsRightWhereTheModelsInstructionsBehaveAsItsBitsSay) {
-  CPU_ONLY_ON_X86_64_LINUX();
+  CPU_ONLY_ON_X86_64();
   if (std::string(env_or("GRJIT_TEST_CPU_CROSSED", "0")) == "1") {
     GTEST_SKIP() << "model " << env_or("GRJIT_TEST_CPU_MODEL", "?")
                  << " crosses qemu's instruction gating and its CPUID bits (qemu 10.0.13): compiled code is not "
@@ -1081,7 +1103,7 @@ TEST(CpuModel, CodeCompiledForTheDetectedSetIsRightWhereTheModelsInstructionsBeh
 }
 
 TEST(CpuModel, AnArmForcedOntoACpuRunsAsTheInstructionTheCpuHasAndALackingOneRunsAsTheBitScan) {
-  CPU_ONLY_ON_X86_64_LINUX();
+  CPU_ONLY_ON_X86_64();
   // lzcnt and tzcnt do not fault where they are missing: they run as bsr and bsf. The arm is forced
   // through grjit_emit_for_features, which names the set, so the bytes are the feature's whatever the
   // host has. With GRJIT_TEST_LZCNT_AS / GRJIT_TEST_TZCNT_AS ("lzcnt"|"bsr", "tzcnt"|"bsf") a model run
@@ -1120,7 +1142,7 @@ TEST(CpuModel, AnArmForcedOntoACpuRunsAsTheInstructionTheCpuHasAndALackingOneRun
 }
 
 TEST(CpuModel, AForcedArmOfAFeatureTheHostHasRunsItsInstruction) {
-  CPU_ONLY_ON_X86_64_LINUX();
+  CPU_ONLY_ON_X86_64();
   GRJIT_REQUIRE_FEATURE(GRJIT_FEATURE_SSE4_1);
   GRJIT_REQUIRE_FEATURE(GRJIT_FEATURE_POPCNT);
   JitWorld w;
@@ -1137,7 +1159,7 @@ TEST(CpuModel, AForcedArmOfAFeatureTheHostHasRunsItsInstruction) {
 /* ---- Nothing was skipped for a missing feature on a host that has them all ---------------------- */
 
 TEST(CpuSkips, OnAHostWithEveryFeatureNothingWasSkippedForAMissingOne) {
-  CPU_ONLY_ON_X86_64_LINUX();
+  CPU_ONLY_ON_X86_64();
   if (detected() != GRJIT_FEATURES_ALL) {
     GTEST_SKIP() << "this host's set is " << set_name(detected()) << ", not every feature, so a skip for a missing "
                  << "one is expected here (" << g_skipped_for_missing_feature.load() << " so far)";
