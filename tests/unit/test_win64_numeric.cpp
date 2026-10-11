@@ -23,6 +23,7 @@
 #include "../../src/code/code_internal.h"
 #include "../../src/x86_64/asm_internal.h"
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -192,6 +193,42 @@ size_t count_bytes(const uint8_t * p, size_t n, std::initializer_list<uint8_t> p
   return found;
 }
 
+/* The number of stores of a general register (`mov [rsp + d], r`, opcode 89) or of a float (`movsd` / `movss`,
+ * 0F 11) to one of the four shadow-space words, [rsp + 0], [rsp + 8], [rsp + 16], [rsp + 24]. It reads the
+ * encoding: optional F2 / F3, optional REX, the opcode, a ModRM with rm = 4 (a SIB) and mod = 0 or 1, the SIB
+ * 0x24 (base rsp, no index) and the 8-bit displacement. */
+size_t shadow_space_stores(const uint8_t * p, size_t n) {
+  size_t found = 0;
+  for (size_t i = 0; i < n; i++) {
+    size_t j = i;
+    bool is_float = false;
+    if (p[j] == 0xF2 || p[j] == 0xF3) {
+      is_float = true;
+      j++;
+    }
+    if (j < n && p[j] >= 0x40 && p[j] <= 0x4F) {
+      j++;
+    }
+    if (j + 1 < n && p[j] == 0x0F && p[j + 1] == 0x11 && is_float) {
+      j += 2;
+    } else if (j < n && p[j] == 0x89 && !is_float) {
+      j++;
+    } else {
+      continue;
+    }
+    if (j + 1 >= n || (p[j] & 7) != 4 || p[j + 1] != 0x24) {
+      continue;
+    }
+    const unsigned mod = p[j] >> 6;
+    if (mod == 0) {
+      found++; // [rsp + 0]
+    } else if (mod == 1 && j + 2 < n && p[j + 2] < 32 && p[j + 2] % 8 == 0) {
+      found++;
+    }
+  }
+  return found;
+}
+
 } // namespace
 
 TEST(Win64Numeric, AHelperCallLoadsEachArgumentIntoTheRegisterOfItsPositionAndTheFifthAndSixthIntoTheStackWords) {
@@ -223,8 +260,20 @@ TEST(Win64Numeric, AHelperCallLoadsEachArgumentIntoTheRegisterOfItsPositionAndTh
   // the fifth and sixth go to [rsp + 32] and [rsp + 40]: mov [rsp + 32], rax is 48 89 44 24 20
   EXPECT_EQ(count_bytes(code, n, {0x48, 0x89, 0x44, 0x24, 0x20}), 1u) << "the fifth argument is at [rsp + 32]";
   EXPECT_EQ(count_bytes(code, n, {0x48, 0x89, 0x44, 0x24, 0x28}), 1u) << "the sixth argument is at [rsp + 40]";
-  EXPECT_EQ(count_bytes(code, n, {0x48, 0x89, 0x04, 0x24}) + count_bytes(code, n, {0x48, 0x89, 0x44, 0x24, 0x08}), 0u)
-      << "and none is stored where the shadow space is";
+  EXPECT_EQ(shadow_space_stores(code, n), 0u) << "and nothing is stored into the four shadow-space words [rsp + 0..24]";
+  // The scan must be able to fail: it sees a store of rax, of rcx, of a double and of a single there, and not one at
+  // [rsp + 32] or a load from [rsp + 8].
+  const uint8_t rax0[] = {0x48, 0x89, 0x04, 0x24}, rcx8[] = {0x48, 0x89, 0x4C, 0x24, 0x08},
+                d16[] = {0xF2, 0x0F, 0x11, 0x44, 0x24, 0x10}, s24[] = {0xF3, 0x0F, 0x11, 0x5C, 0x24, 0x18},
+                r9_8[] = {0x4C, 0x89, 0x4C, 0x24, 0x08}, at32[] = {0x48, 0x89, 0x44, 0x24, 0x20},
+                load8[] = {0x48, 0x8B, 0x4C, 0x24, 0x08};
+  EXPECT_EQ(shadow_space_stores(rax0, sizeof rax0), 1u);
+  EXPECT_EQ(shadow_space_stores(rcx8, sizeof rcx8), 1u);
+  EXPECT_EQ(shadow_space_stores(d16, sizeof d16), 1u);
+  EXPECT_EQ(shadow_space_stores(s24, sizeof s24), 1u);
+  EXPECT_EQ(shadow_space_stores(r9_8, sizeof r9_8), 1u);
+  EXPECT_EQ(shadow_space_stores(at32, sizeof at32), 0u);
+  EXPECT_EQ(shadow_space_stores(load8, sizeof load8), 0u);
 }
 
 /* ---- Under wine: the Microsoft x64 helper probe, a float result with junk above bit 31, the sentinels -----------
