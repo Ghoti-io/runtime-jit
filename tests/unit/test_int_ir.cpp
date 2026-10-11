@@ -29,14 +29,10 @@ using featfx::detected;
 using featfx::need_of;
 using featfx::two_arms;
 
-/* Every backend runs these where it has a native host: x86-64 SysV and arm64 here, Win64 under wine in
- * the commits that follow. */
-#if defined(_WIN32)
-#define INT_RUN_HERE() \
-  GTEST_SKIP() << "the Win64 flavour emits the integer operations in a later commit of story 5"
-#else
+/* Every backend runs these where it has a native host: x86-64 SysV and arm64 natively, Win64 under wine. A
+ * hardware fault in compiled code is turned into a result on POSIX hosts and not on Windows (there is no handler),
+ * so no test reaches an operation with its guard missing on Win64: the verifier refuses that shape first. */
 #define INT_RUN_HERE() GRJIT_REQUIRE_BACKEND()
-#endif
 
 namespace {
 
@@ -1173,15 +1169,14 @@ GRJIT_Function * one_of_each_kind(int which) {
   }
 }
 
-/* The backends that emit the integer operations. The Win64 flavour does not yet: it joins in the commit
- * that emits them for it, and until then it refuses by name. */
-bool emits_integers(GRJIT_Arch arch) {
-  return arch != GRJIT_ARCH_X86_64_WIN64;
+/* Every backend emits the integer operations. */
+bool emits_integers(GRJIT_Arch) {
+  return true;
 }
 
 } // namespace
 
-TEST(IntRefusal, EveryBackendEmitsEveryInstructionOfTheIntegerTablesOrRefusesItByName) {
+TEST(IntRefusal, EveryBackendEmitsEveryInstructionOfTheIntegerTables) {
   for (GRJIT_Arch arch : {GRJIT_ARCH_X86_64, GRJIT_ARCH_ARM64, GRJIT_ARCH_X86_64_WIN64}) {
     for (int which = 0; which < 7; which++) {
       SCOPED_TRACE(which);
@@ -1226,7 +1221,7 @@ TEST(IntRefusal, EveryBackendEmitsEveryInstructionOfTheIntegerTablesOrRefusesItB
     }
   }
   EXPECT_GT(table_size, 60u);
-  EXPECT_GE(emitted_count, 2 * table_size) << "the whole table was emitted by SysV and by arm64";
+  EXPECT_EQ(emitted_count, 3 * table_size) << "the whole table was emitted by SysV, by arm64 and by Win64";
 }
 
 TEST(IntRefusal, AFunctionWithoutTheNewTypeIsStillEmittedByAllThreeBackends) {

@@ -559,9 +559,6 @@ static bool same_as_evaluator(const GRJIT_Function * f, uint64_t seed, uint32_t 
 }
 
 TEST(Differential, GeneratedIntegerProgramsRunTheSameCompiledAndEvaluated) {
-#if defined(_WIN32)
-  GTEST_SKIP() << "the Win64 flavour emits the integer operations in a later commit of story 5";
-#endif
   GRJIT_REQUIRE_BACKEND();
   JitWorld w;
   size_t returned = 0, deopted = 0, divisions = 0, const_divisors = 0, const_dividends = 0,

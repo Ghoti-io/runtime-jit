@@ -1841,11 +1841,7 @@ static void emit_op(GRJIT_Emit * e, const GRJIT_Op * op, size_t block) {
     case GRJIT_OP_DIV_U:
     case GRJIT_OP_REM_S:
     case GRJIT_OP_REM_U:
-      if (e->win64) {
-        /* Story 5 of spec-runtime-float emits these for Win64; until then the flavour
-         * refuses, by name (the function-wide check in grjit_emit_function says so first). */
-        e->c.error = GRJIT_ERR_UNSUPPORTED;
-      } else if (op->kind == GRJIT_OP_ROTL || op->kind == GRJIT_OP_ROTR) {
+      if (op->kind == GRJIT_OP_ROTL || op->kind == GRJIT_OP_ROTR) {
         emit_rotate(e, op);
       } else if (op->kind >= GRJIT_OP_DIV_S && op->kind <= GRJIT_OP_REM_U) {
         emit_divide(e, op);
@@ -2248,11 +2244,11 @@ GRJIT_Result grjit_emit_function(const GRJIT_Function * f,
     const GRJIT_Allocator * allocator, size_t max_code_bytes,
     GRJIT_EntryHook hook, uint32_t request_offset, uint32_t frame_bytes,
     bool win64, GRJIT_Features features, const GRJIT_LiveSites * live, GRJIT_Emit * e) {
-  if (win64 && (grjit_function_needs_int_ext(f) || grjit_function_needs_float_ext(f))) {
-    /* The i32 type and the integer operations of numeric-operations.md are emitted for
-     * SysV; story 5 of spec-runtime-float brings them to Win64. Until then the flavour
-     * refuses the function by name instead of emitting a 64-bit operation for a 32-bit
-     * one. `e` is the caller's zeroed record, which ::grjit_emit_free accepts. */
+  if (win64 && grjit_function_needs_float_ext(f)) {
+    /* The float types and operations of numeric-operations.md are not emitted for Win64
+     * yet (the integer ones are); the flavour refuses the function by name instead of
+     * emitting an integer operation for a float. `e` is the caller's zeroed record, which
+     * ::grjit_emit_free accepts. */
     return GRJIT_ERR_UNSUPPORTED;
   }
   memset(e, 0, sizeof *e);
