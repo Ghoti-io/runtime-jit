@@ -564,7 +564,8 @@ TEST(Differential, GeneratedIntegerProgramsRunTheSameCompiledAndEvaluated) {
   size_t returned = 0, deopted = 0, divisions = 0, const_divisors = 0, const_dividends = 0,
          negative_i32_imms = 0, multi_block = 0, arm_programs = 0;
   const size_t masks = featfx::every_subset_masks().size();
-  for (uint64_t seed = 1; seed <= 3000; seed++) {
+  // Under TSan the sweep runs 1/kTsanDivisor of the programs and its thresholds shrink with it (see the float sweep).
+  for (uint64_t seed = 1; seed <= 3000 / kTsanDivisor; seed++) {
     IntGen g(seed * 0x9E3779B97F4A7C15ull);
     IntProgram prog = generate_int_program(g);
     Fn f(prog.f);
@@ -641,16 +642,16 @@ TEST(Differential, GeneratedIntegerProgramsRunTheSameCompiledAndEvaluated) {
               "%zu compiles took a feature arm\n", masks, arm_programs);
   // Thresholds at about nine tenths of what the fixed seeds give (12267, 5733, 23328, 5876, 5454, 6425, 2531),
   // the run counts once per mask.
-  EXPECT_GT(returned, 11000u * masks);
-  EXPECT_GT(deopted, 5000u * masks);
+  EXPECT_GT(returned, 11000u * masks / kTsanDivisor);
+  EXPECT_GT(deopted, 5000u * masks / kTsanDivisor);
   if (featfx::detected() != GRJIT_FEATURES_NONE) {
     EXPECT_GT(arm_programs, 0u) << "the integer programs reach clz, ctz or popcnt with a feature allowed";
   }
-  EXPECT_GT(divisions, 21000u);
-  EXPECT_GT(const_divisors, 5200u);
-  EXPECT_GT(const_dividends, 4900u);
-  EXPECT_GT(negative_i32_imms, 5700u);
-  EXPECT_GT(multi_block, 2200u);
+  EXPECT_GT(divisions, 21000u / kTsanDivisor);
+  EXPECT_GT(const_divisors, 5200u / kTsanDivisor);
+  EXPECT_GT(const_dividends, 4900u / kTsanDivisor);
+  EXPECT_GT(negative_i32_imms, 5700u / kTsanDivisor);
+  EXPECT_GT(multi_block, 2200u / kTsanDivisor);
 }
 
 /* The same programs, the same argument sets, against the same evaluator, with the arm64 code the emitter
@@ -977,7 +978,9 @@ TEST(Differential, GeneratedFloatProgramsRunTheSameCompiledAndEvaluatedWithNansE
   JitWorld w;
   size_t returned = 0, deopted = 0, truncs = 0, converts = 0, compares = 0, multi_block = 0, arm_programs = 0;
   const size_t masks = featfx::every_subset_masks().size();
-  for (uint64_t seed = 1; seed <= 3000; seed++) {
+  // Under TSan the sweep runs 1/kTsanDivisor of the programs (the same seeds, the first ones) and its thresholds
+  // shrink with it; every other build runs all 3000.
+  for (uint64_t seed = 1; seed <= 3000 / kTsanDivisor; seed++) {
     IntGen g(seed * 0x9E3779B97F4A7C15ull + 0xF10A7);
     FloatProgram prog = generate_float_program(g);
     Fn f(prog.f);
@@ -1050,15 +1053,15 @@ TEST(Differential, GeneratedFloatProgramsRunTheSameCompiledAndEvaluatedWithNansE
               "%zu compiles took a feature arm\n", masks, arm_programs);
   // Thresholds at about nine tenths of what the fixed seeds give (10649, 7351, 3937, 8222, 4108, 2196), the
   // run counts once per mask.
-  EXPECT_GT(returned, 9500u * masks);
-  EXPECT_GT(deopted, 6600u * masks);
+  EXPECT_GT(returned, 9500u * masks / kTsanDivisor);
+  EXPECT_GT(deopted, 6600u * masks / kTsanDivisor);
   if (featfx::detected() != GRJIT_FEATURES_NONE) {
     EXPECT_GT(arm_programs, 0u) << "the float programs reach a rounding with SSE4.1 allowed";
   }
-  EXPECT_GT(truncs, 3500u);
-  EXPECT_GT(converts, 7400u);
-  EXPECT_GT(compares, 3600u);
-  EXPECT_GT(multi_block, 1950u);
+  EXPECT_GT(truncs, 3500u / kTsanDivisor);
+  EXPECT_GT(converts, 7400u / kTsanDivisor);
+  EXPECT_GT(compares, 3600u / kTsanDivisor);
+  EXPECT_GT(multi_block, 1950u / kTsanDivisor);
 }
 
 /* The float programs again, with the arm64 code the emitter makes for each executed by the simulator (a dev

@@ -624,6 +624,22 @@ inline ChildOutcome run_in_child(const std::function<void()> & body, unsigned ti
 } // namespace grjit_test
 #endif
 
+/* Whether the build is under ThreadSanitizer, which runs the generated-program sweeps some 40 times slower, and the
+ * divisor a sweep applies to its program count (and to its thresholds) there so it stays well inside the watchdog:
+ * 1 in every other build, so the full counts run in the ordinary, ASan and Valgrind builds. */
+#if defined(__SANITIZE_THREAD__)
+#define GRJIT_TEST_UNDER_TSAN 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define GRJIT_TEST_UNDER_TSAN 1
+#endif
+#endif
+#ifdef GRJIT_TEST_UNDER_TSAN
+inline constexpr unsigned kTsanDivisor = 8;
+#else
+inline constexpr unsigned kTsanDivisor = 1;
+#endif
+
 /* A watchdog for every test: compiled code that is wrong can loop forever (a
  * frame base left pointing at the wrong frame does), and a hang is neither a
  * failure a test reports nor a result a harness can read as a catch. Each test
