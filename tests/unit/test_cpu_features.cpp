@@ -522,6 +522,32 @@ TEST(CpuArms, Arm64AndWin64EmissionIgnoreTheSetAndTakeNoFeatureArm) {
       }
     }
   }
+  // On an arm64 host the same is true of compiled code, mapped and recorded: any mask is accepted and ignored, the bytes
+  // are the same, the recorded set is empty, and the stamp is arm64-v8 (nothing in the baseline ARMv8-A needs a feature).
+  if (grjit_native_arch() == GRJIT_ARCH_ARM64 && grjit_backend_available()) {
+    JitWorld w;
+    size_t compiled = 0;
+    for (const std::string & n : feature_ops()) {
+      floatfx::FloatOp op = floatfx::build_any_op(n);
+      Fn g(op.function);
+      Compiled none(g.f, w.pages(), nullptr, nullptr, nullptr, GRJIT_FEATURES_NONE);
+      Compiled all(g.f, w.pages(), nullptr, nullptr, nullptr, GRJIT_FEATURES_ALL);
+      Compiled junk(g.f, w.pages(), nullptr, nullptr, nullptr, 0xFFFFFFF0u);
+      ASSERT_TRUE(none) << n;
+      ASSERT_TRUE(all) << n;
+      ASSERT_TRUE(junk) << n;
+      EXPECT_EQ(grjit_code_features(none.code), GRJIT_FEATURES_NONE) << n;
+      EXPECT_EQ(grjit_code_features(all.code), GRJIT_FEATURES_NONE) << n;
+      EXPECT_EQ(grjit_code_features(junk.code), GRJIT_FEATURES_NONE) << n;
+      ASSERT_EQ(grjit_code_size(none.code), grjit_code_size(all.code)) << n;
+      EXPECT_EQ(std::memcmp(grjit_code_address(none.code), grjit_code_address(all.code), grjit_code_size(none.code)), 0)
+          << n << ": the mask changes no byte";
+      compiled++;
+    }
+    EXPECT_GT(compiled, 10u);
+    EXPECT_EQ(grjit_features_detected(), GRJIT_FEATURES_NONE);
+    EXPECT_EQ(stamp_of(grjit_features_detected()), "arm64-v8");
+  }
 }
 
 /* ---- Compiled code: the record, the reuse rule, the answers under every subset ------------------ */

@@ -40,15 +40,24 @@
 
 using namespace intfx;
 
-/* The harness runs the compiled code where the integer and float operations are emitted: x86-64 SysV.
- * Elsewhere (arm64, Win64) the compile is refused by name (testInt_ir and testFloat_ir show it) and
- * what is left to do is the
- * reader, the mapping into the IR and the verifier's guard rule, which run wherever the suite is. */
-#if defined(__x86_64__) && defined(__linux__)
+/* The harness runs the compiled code where there is a native host for a backend that emits the integer and
+ * float operations: x86-64 SysV and arm64 (Linux), and Win64 under wine in the commits that follow. Elsewhere the
+ * compile still happens for the part that needs no execution: the reader, the mapping into the IR and the
+ * verifier's guard rule run wherever the suite is, and an assertion that needs the code run is counted as excluded
+ * with the reason below, never as passed. The backends with CPU-feature arms (x86-64) run each file twice, with the
+ * features the host has and with every optional feature masked off; arm64 has no feature arm, so it runs each file
+ * once and the recorded set of every compile is asserted empty. */
+#if (defined(__x86_64__) || defined(__aarch64__)) && defined(__linux__)
 constexpr bool kExecutes = true;
 #else
 constexpr bool kExecutes = false;
 #endif
+#if defined(__x86_64__) && defined(__linux__)
+constexpr bool kFeatureArms = true;
+#else
+constexpr bool kFeatureArms = false;
+#endif
+constexpr const char * kNotRunHere = "not run on this host (it has no backend that runs the integer and float operations)";
 
 namespace wast {
 
@@ -786,7 +795,7 @@ void Harness::assert_return(const Node & n) {
     return;
   }
   if (!kExecutes) {
-    exclude("not run on this host (the integer and float operations are emitted for x86-64 SysV)");
+    exclude(kNotRunHere);
     return;
   }
   Outcome o;
@@ -855,7 +864,7 @@ void Harness::assert_trap(const Node & n) {
     return;
   }
   if (!kExecutes) {
-    exclude("not run on this host (the integer and float operations are emitted for x86-64 SysV)");
+    exclude(kNotRunHere);
     return;
   }
   Outcome o;
@@ -914,7 +923,7 @@ Report Harness::run(const std::string & text) {
       } else if (e->excluded) {
         exclude("an invoke of an excluded function");
       } else if (!kExecutes) {
-        exclude("not run on this host (the integer and float operations are emitted for x86-64 SysV)");
+        exclude(kNotRunHere);
       } else {
         Outcome o;
         if (!call(e, args, &o)) {
@@ -1272,7 +1281,7 @@ TEST(Wast, TheSha256IsTheStandardOne) {
  * has them: the reader accepts the assertion, the comparison must refuse it. */
 TEST(Wast, TheComparisonIsOfTheWholeWordNotOfTheLowHalf) {
   if (!kExecutes) {
-    GTEST_SKIP() << "the compare is made on the result of running the code, which only x86-64 SysV does";
+    GTEST_SKIP() << "the compare is made on the result of running the code, which this host does not do";
   }
   auto wide = [](int64_t value) {
     B b("wide", 0);
@@ -1498,7 +1507,9 @@ TEST(Wast, TheFloatExpectationsPassWhenRightAndEachCorruptedOneFails) {
       {"-0 for +0", "(assert_return (invoke \"f32.neg\" (f32.const -0.0)) (f32.const -0.0))", true},
       {"a stated payload that is not the one", "(assert_return (invoke \"f32.abs\" (f32.const -nan:0x200001)) (f32.const nan:0x200002))", true},
       {"a stated payload with the wrong sign", "(assert_return (invoke \"f32.abs\" (f32.const -nan:0x200001)) (f32.const -nan:0x200001))", true},
-      {"a stated NaN where a canonical one is produced", "(assert_return (invoke \"f32.sqrt\" (f32.const -1.0)) (f32.const nan))", true},
+      // (A NaN of a stated payload, not a bare `nan`: which sign the hardware gives the default NaN differs (x86-64's is
+      // negative, arm64's positive), and a corrupted expectation must fail on either.)
+      {"a stated NaN where a canonical one is produced", "(assert_return (invoke \"f32.sqrt\" (f32.const -1.0)) (f32.const nan:0x400001))", true},
       {"a comparison answered wrongly", "(assert_return (invoke \"f64.eq\" (f64.const nan) (f64.const nan)) (i32.const 1))", true},
       {"the wrong trap for a NaN", "(assert_trap (invoke \"i32.trunc_f64_s\" (f64.const nan)) \"integer overflow\")", true},
       {"the wrong trap for a value out of range", "(assert_trap (invoke \"i32.trunc_f64_s\" (f64.const inf)) \"invalid conversion to integer\")", true},
@@ -1529,7 +1540,7 @@ TEST(Wast, TheFloatExpectationsPassWhenRightAndEachCorruptedOneFails) {
  * its low half says, and the NaN classes refuse such a word as well. */
 TEST(Wast, AnF32WithBitsAboveThirtyOneIsNotWhatTheSuiteExpects) {
   if (!kExecutes) {
-    GTEST_SKIP() << "the compare is made on the result of running the code, which only x86-64 SysV does";
+    GTEST_SKIP() << "the compare is made on the result of running the code, which this host does not do";
   }
   auto wide = [](int64_t value) {
     B b("wide", 0);
@@ -1605,8 +1616,7 @@ wast::Report run_suite_arm(const char * name, const std::string & text, GRJIT_Fe
     EXPECT_EQ(r.passed, want_passed) << "the number of assertions that ran and held, pinned to wg-3.0 (" << arm << ")";
   } else {
     EXPECT_EQ(r.passed, 0u);
-    want_excluded["not run on this host (the integer and float operations are emitted for x86-64 SysV)"] =
-        want_passed;
+    want_excluded[kNotRunHere] = want_passed;
   }
   // The excluded forms, by reason, exactly: a reason that appears or goes away is a change of what is checked.
   EXPECT_EQ(r.excluded, want_excluded) << arm;
@@ -1630,6 +1640,14 @@ void run_suite_file(const char * name, size_t want_passed, size_t want_traps,
       run_suite_arm(name, text, GRJIT_FEATURES_NONE, want_passed, want_traps, want_excluded, want_guard_checks);
   if (!kExecutes) {
     return; // nothing is compiled here, so there is no second arm to run
+  }
+  if (!kFeatureArms) {
+    // A backend with no feature arm: nothing to mask. The set every compile recorded is empty, the arm count zero, and
+    // the host's detected set is empty too.
+    EXPECT_EQ(detected_run.with_arm, 0u) << "a backend with no feature arm recorded one";
+    EXPECT_EQ(detected_run.expected_arm, 0u);
+    EXPECT_EQ(featfx::detected(), GRJIT_FEATURES_NONE) << "this host's detected feature set is not empty";
+    return;
   }
   wast::Report masked_run =
       run_suite_arm(name, text, GRJIT_FEATURES_ALL, want_passed, want_traps, want_excluded, want_guard_checks);
