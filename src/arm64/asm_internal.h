@@ -92,11 +92,58 @@ typedef enum GRJIT_A64Cond {
   GRJIT_A64_GE, GRJIT_A64_LT, GRJIT_A64_GT, GRJIT_A64_LE
 } GRJIT_A64Cond;
 
-/** The three-register data-processing instructions (64-bit). */
+/** The scalar floating-point / Advanced SIMD registers by number (`v0` to `v31`, used as `s`, `d`
+ *  or `b`). `v8` to `v15` are callee-saved in their low 64 bits by the procedure call standard;
+ *  the baseline emitter never encodes them, which the assembler records
+ *  (::grjit_a64_vregs_used) so a test can say so. */
+typedef enum GRJIT_A64VReg {
+  GRJIT_A64_V0 = 0, GRJIT_A64_V1, GRJIT_A64_V2, GRJIT_A64_V3, GRJIT_A64_V4, GRJIT_A64_V5,
+  GRJIT_A64_V6, GRJIT_A64_V7, GRJIT_A64_V8, GRJIT_A64_V9, GRJIT_A64_V10, GRJIT_A64_V11,
+  GRJIT_A64_V12, GRJIT_A64_V13, GRJIT_A64_V14, GRJIT_A64_V15, GRJIT_A64_V16, GRJIT_A64_V17,
+  GRJIT_A64_V18, GRJIT_A64_V19, GRJIT_A64_V20, GRJIT_A64_V21, GRJIT_A64_V22, GRJIT_A64_V23,
+  GRJIT_A64_V24, GRJIT_A64_V25, GRJIT_A64_V26, GRJIT_A64_V27, GRJIT_A64_V28, GRJIT_A64_V29,
+  GRJIT_A64_V30, GRJIT_A64_V31
+} GRJIT_A64VReg;
+
+/** A `v` register as the `rt` of a floating-point load or store (::GRJIT_A64_MEM_F32,
+ *  ::GRJIT_A64_MEM_F64), whose register argument is typed as a general one. */
+static inline GRJIT_A64Reg GRJIT_A64_VREG_AS_REG(GRJIT_A64VReg v) {
+  return (GRJIT_A64Reg)v;
+}
+
+/** The scalar width of a floating-point instruction: `s` (binary32) or `d` (binary64). */
+typedef enum GRJIT_A64FSize { GRJIT_A64_SINGLE, GRJIT_A64_DOUBLE } GRJIT_A64FSize;
+
+/** The three-register data-processing instructions. ::grjit_a64_alu is the 64-bit form,
+ *  ::grjit_a64_alu32 the 32-bit one (`w` registers, which clear the upper half of the
+ *  destination); `SDIV`, `UDIV` and `RORV` are new with the numeric operations, and a
+ *  division by zero gives zero and `MIN / -1` gives `MIN` (neither traps). */
 typedef enum GRJIT_A64Alu {
   GRJIT_A64_ADD, GRJIT_A64_SUB, GRJIT_A64_AND, GRJIT_A64_ORR, GRJIT_A64_EOR,
-  GRJIT_A64_MUL, GRJIT_A64_LSLV, GRJIT_A64_LSRV, GRJIT_A64_ASRV
+  GRJIT_A64_MUL, GRJIT_A64_LSLV, GRJIT_A64_LSRV, GRJIT_A64_ASRV,
+  GRJIT_A64_RORV, GRJIT_A64_SDIV, GRJIT_A64_UDIV, GRJIT_A64_BIC
 } GRJIT_A64Alu;
+
+/** The two-register bit instructions: count leading zeros, reverse bits. */
+typedef enum GRJIT_A64Bits { GRJIT_A64_CLZ, GRJIT_A64_RBIT } GRJIT_A64Bits;
+
+/** The sign extensions, `sxtb`, `sxth` and `sxtw` (the last 64-bit only). */
+typedef enum GRJIT_A64Ext { GRJIT_A64_SXTB, GRJIT_A64_SXTH, GRJIT_A64_SXTW } GRJIT_A64Ext;
+
+/** The binary scalar floating-point operations. `FMIN` and `FMAX` are the instructions with
+ *  IEEE 754-2019 `minimum` / `maximum` semantics (a NaN operand gives a NaN, `-0 < +0`), which is
+ *  WebAssembly's; `fminnm` / `fmaxnm` (a quiet NaN is ignored) are deliberately not here. */
+typedef enum GRJIT_A64FpBinary {
+  GRJIT_A64_FADD, GRJIT_A64_FSUB, GRJIT_A64_FMUL, GRJIT_A64_FDIV, GRJIT_A64_FMIN, GRJIT_A64_FMAX
+} GRJIT_A64FpBinary;
+
+/** The unary scalar floating-point operations. The rounding ones have the rounding direction in
+ *  the instruction (`n` nearest even, `p` up, `m` down, `z` toward zero); the forms that follow
+ *  FPCR (`frinti`, `frintx`) and ties-away (`frinta`) are deliberately not here. */
+typedef enum GRJIT_A64FpUnary {
+  GRJIT_A64_FSQRT, GRJIT_A64_FABS, GRJIT_A64_FNEG, GRJIT_A64_FRINTN, GRJIT_A64_FRINTP,
+  GRJIT_A64_FRINTM, GRJIT_A64_FRINTZ
+} GRJIT_A64FpUnary;
 
 /** What went wrong, if anything. */
 typedef enum GRJIT_A64Status {
@@ -132,6 +179,7 @@ typedef struct GRJIT_A64Asm {
   size_t limit;
   GRJIT_A64Status status;
   bool long_branches;      ///< Forward conditional branches use the long form.
+  uint32_t vregs_used;     ///< Bit `n` is set once `v`n has been encoded.
   size_t * label_at;       ///< Offset of each bound label, SIZE_MAX if unbound.
   size_t label_count;
   size_t label_capacity;
@@ -192,17 +240,34 @@ void grjit_a64_add_sp(GRJIT_A64Asm * a, uint32_t bytes);
 
 void grjit_a64_alu(GRJIT_A64Asm * a, GRJIT_A64Alu op, GRJIT_A64Reg rd,
     GRJIT_A64Reg rn, GRJIT_A64Reg rm);
+/** The 32-bit form of ::grjit_a64_alu: `w` registers, the upper half of the destination cleared. */
+void grjit_a64_alu32(GRJIT_A64Asm * a, GRJIT_A64Alu op, GRJIT_A64Reg rd,
+    GRJIT_A64Reg rn, GRJIT_A64Reg rm);
 void grjit_a64_neg(GRJIT_A64Asm * a, GRJIT_A64Reg rd, GRJIT_A64Reg rm);
 void grjit_a64_mvn(GRJIT_A64Asm * a, GRJIT_A64Reg rd, GRJIT_A64Reg rm);
 void grjit_a64_cmp(GRJIT_A64Asm * a, GRJIT_A64Reg rn, GRJIT_A64Reg rm);
+void grjit_a64_neg32(GRJIT_A64Asm * a, GRJIT_A64Reg rd, GRJIT_A64Reg rm);
+void grjit_a64_mvn32(GRJIT_A64Asm * a, GRJIT_A64Reg rd, GRJIT_A64Reg rm);
+void grjit_a64_cmp32(GRJIT_A64Asm * a, GRJIT_A64Reg rn, GRJIT_A64Reg rm);
+/** `msub rd, rn, rm, ra`: `rd = ra - rn * rm`, `wide` for the 64-bit form. */
+void grjit_a64_msub(GRJIT_A64Asm * a, GRJIT_A64Reg rd, GRJIT_A64Reg rn, GRJIT_A64Reg rm,
+    GRJIT_A64Reg ra, bool wide);
+/** `clz` / `rbit`, `wide` for the 64-bit form (a `clz` of zero is the width). */
+void grjit_a64_bits(GRJIT_A64Asm * a, GRJIT_A64Bits op, GRJIT_A64Reg rd, GRJIT_A64Reg rn, bool wide);
+/** `sxtb` / `sxth` / `sxtw` from the low bits of `rn` to the `w` or `x` form of `rd`; `SXTW` is
+ *  64-bit only. */
+void grjit_a64_sext(GRJIT_A64Asm * a, GRJIT_A64Ext kind, GRJIT_A64Reg rd, GRJIT_A64Reg rn, bool wide);
 /** `cset wd, cond`: 1 if the condition holds, else 0; the upper half is
  *  cleared. */
 void grjit_a64_cset(GRJIT_A64Asm * a, GRJIT_A64Reg rd, GRJIT_A64Cond cond);
 
-/** The widths a load or store takes. */
+/** The widths a load or store takes. `F32` and `F64` are the `s` and `d` registers: `rt` is then
+ *  a `v` register number (a ::GRJIT_A64VReg value), and the load clears the rest of the vector
+ *  register. */
 typedef enum GRJIT_A64Mem {
   GRJIT_A64_MEM_U8, GRJIT_A64_MEM_U16, GRJIT_A64_MEM_U32, GRJIT_A64_MEM_X64,
-  GRJIT_A64_MEM_S8, GRJIT_A64_MEM_S16, GRJIT_A64_MEM_S32
+  GRJIT_A64_MEM_S8, GRJIT_A64_MEM_S16, GRJIT_A64_MEM_S32,
+  GRJIT_A64_MEM_F32, GRJIT_A64_MEM_F64
 } GRJIT_A64Mem;
 
 /** The three addressing forms, one instruction each. Stores accept only the
@@ -246,6 +311,40 @@ void grjit_a64_cmp_imm(GRJIT_A64Asm * a, GRJIT_A64Reg rn, uint32_t imm12);
 /** Appends a 64-bit value as data, little-endian: the tag before an internal entry. */
 void grjit_a64_data64(GRJIT_A64Asm * a, uint64_t value);
 void grjit_a64_brk(GRJIT_A64Asm * a, uint16_t imm);
+
+/* ---- Scalar floating point and the bit count (spec-runtime-float, story 5) -------------------
+ *
+ * Only `v0` to `v7` and `v16` to `v31` are caller-saved in full; the emitter uses `v0` to `v7`
+ * only. Every function below that names a `v` register records it in ::grjit_a64_vregs_used. */
+
+/** The set of `v` registers encoded so far, bit `n` for `v`n. */
+uint32_t grjit_a64_vregs_used(const GRJIT_A64Asm * a);
+/** `fmov sd, wn` / `fmov dd, xn`: the bits of a general register into a vector register (a
+ *  `single` takes the low 32 bits and clears the rest). */
+void grjit_a64_fmov_from_gpr(GRJIT_A64Asm * a, GRJIT_A64FSize size, GRJIT_A64VReg vd, GRJIT_A64Reg rn);
+/** `fmov wd, sn` / `fmov xd, dn`: the bits of a vector register's `s` or `d` into a general one
+ *  (`single` clears the upper half of the general register). */
+void grjit_a64_fmov_to_gpr(GRJIT_A64Asm * a, GRJIT_A64FSize size, GRJIT_A64Reg rd, GRJIT_A64VReg vn);
+/** `fmov vd, vn`, `s` or `d`. */
+void grjit_a64_fmov_vv(GRJIT_A64Asm * a, GRJIT_A64FSize size, GRJIT_A64VReg vd, GRJIT_A64VReg vn);
+void grjit_a64_fp_binary(GRJIT_A64Asm * a, GRJIT_A64FpBinary op, GRJIT_A64FSize size,
+    GRJIT_A64VReg vd, GRJIT_A64VReg vn, GRJIT_A64VReg vm);
+void grjit_a64_fp_unary(GRJIT_A64Asm * a, GRJIT_A64FpUnary op, GRJIT_A64FSize size,
+    GRJIT_A64VReg vd, GRJIT_A64VReg vn);
+/** `fcmp vn, vm`; an unordered pair sets `NZCV = 0011`. */
+void grjit_a64_fcmp(GRJIT_A64Asm * a, GRJIT_A64FSize size, GRJIT_A64VReg vn, GRJIT_A64VReg vm);
+/** `fcvt`: to the `to` size from the other one. */
+void grjit_a64_fcvt(GRJIT_A64Asm * a, GRJIT_A64FSize to, GRJIT_A64VReg vd, GRJIT_A64VReg vn);
+/** `scvtf` / `ucvtf vd, rn` from a `w` (`wide` false) or `x` register to the `to` size. */
+void grjit_a64_cvt_to_fp(GRJIT_A64Asm * a, bool is_signed, GRJIT_A64FSize to, GRJIT_A64VReg vd,
+    GRJIT_A64Reg rn, bool wide);
+/** `fcvtzs` / `fcvtzu rd, vn` from the `from` size to a `w` (`wide` false) or `x` register:
+ *  toward zero, saturating, a NaN giving 0. */
+void grjit_a64_cvt_from_fp(GRJIT_A64Asm * a, bool is_signed, GRJIT_A64FSize from, GRJIT_A64Reg rd,
+    GRJIT_A64VReg vn, bool wide);
+/** `cnt vd.8b, vn.8b` and `addv bd, vn.8b`: the population count of a 64-bit value, in two steps. */
+void grjit_a64_cnt8b(GRJIT_A64Asm * a, GRJIT_A64VReg vd, GRJIT_A64VReg vn);
+void grjit_a64_addv8b(GRJIT_A64Asm * a, GRJIT_A64VReg vd, GRJIT_A64VReg vn);
 void grjit_a64_b(GRJIT_A64Asm * a, GRJIT_Label label);
 void grjit_a64_bcond(GRJIT_A64Asm * a, GRJIT_A64Cond cond, GRJIT_Label label);
 /** `cbz` / `cbnz` on the 64-bit register. */

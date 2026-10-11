@@ -479,24 +479,96 @@ void grjit_a64_add_sp(GRJIT_A64Asm * a, uint32_t bytes) {
 
 /* ---- Arithmetic --------------------------------------------------------------- */
 
+/* The 64-bit encoding of each three-register instruction; the 32-bit one is the same word with
+ * bit 31 (`sf`) clear. */
+static bool alu_base(GRJIT_A64Alu op, uint32_t * base) {
+  switch (op) {
+    case GRJIT_A64_ADD: *base = 0x8B000000u; return true;
+    case GRJIT_A64_SUB: *base = 0xCB000000u; return true;
+    case GRJIT_A64_AND: *base = 0x8A000000u; return true;
+    case GRJIT_A64_ORR: *base = 0xAA000000u; return true;
+    case GRJIT_A64_EOR: *base = 0xCA000000u; return true;
+    case GRJIT_A64_MUL: *base = 0x9B007C00u; return true; /* madd xd, xn, xm, xzr */
+    case GRJIT_A64_LSLV: *base = 0x9AC02000u; return true;
+    case GRJIT_A64_LSRV: *base = 0x9AC02400u; return true;
+    case GRJIT_A64_ASRV: *base = 0x9AC02800u; return true;
+    case GRJIT_A64_RORV: *base = 0x9AC02C00u; return true;
+    case GRJIT_A64_SDIV: *base = 0x9AC00C00u; return true;
+    case GRJIT_A64_UDIV: *base = 0x9AC00800u; return true;
+    case GRJIT_A64_BIC: *base = 0x8A200000u; return true;
+  }
+  return false;
+}
+
 void grjit_a64_alu(GRJIT_A64Asm * a, GRJIT_A64Alu op, GRJIT_A64Reg rd,
     GRJIT_A64Reg rn, GRJIT_A64Reg rm) {
   uint32_t base;
+  if (!alu_base(op, &base)) {
+    fail(a, GRJIT_A64_BAD);
+    return;
+  }
+  grjit_a64_word(a, base | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | (uint32_t)rd);
+}
+
+void grjit_a64_alu32(GRJIT_A64Asm * a, GRJIT_A64Alu op, GRJIT_A64Reg rd,
+    GRJIT_A64Reg rn, GRJIT_A64Reg rm) {
+  uint32_t base;
+  if (!alu_base(op, &base)) {
+    fail(a, GRJIT_A64_BAD);
+    return;
+  }
+  grjit_a64_word(a, (base & 0x7FFFFFFFu) | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | (uint32_t)rd);
+}
+
+void grjit_a64_neg32(GRJIT_A64Asm * a, GRJIT_A64Reg rd, GRJIT_A64Reg rm) {
+  grjit_a64_alu32(a, GRJIT_A64_SUB, rd, GRJIT_A64_XZR, rm);
+}
+
+void grjit_a64_mvn32(GRJIT_A64Asm * a, GRJIT_A64Reg rd, GRJIT_A64Reg rm) {
+  /* orn wd, wzr, wm */
+  grjit_a64_word(a, 0x2A2003E0u | ((uint32_t)rm << 16) | (uint32_t)rd);
+}
+
+void grjit_a64_cmp32(GRJIT_A64Asm * a, GRJIT_A64Reg rn, GRJIT_A64Reg rm) {
+  /* subs wzr, wn, wm */
+  grjit_a64_word(a, 0x6B00001Fu | ((uint32_t)rm << 16) | ((uint32_t)rn << 5));
+}
+
+void grjit_a64_msub(GRJIT_A64Asm * a, GRJIT_A64Reg rd, GRJIT_A64Reg rn, GRJIT_A64Reg rm,
+    GRJIT_A64Reg ra, bool wide) {
+  grjit_a64_word(a, (wide ? 0x9B008000u : 0x1B008000u) | ((uint32_t)rm << 16) |
+      ((uint32_t)ra << 10) | ((uint32_t)rn << 5) | (uint32_t)rd);
+}
+
+void grjit_a64_bits(GRJIT_A64Asm * a, GRJIT_A64Bits op, GRJIT_A64Reg rd, GRJIT_A64Reg rn, bool wide) {
+  uint32_t base;
   switch (op) {
-    case GRJIT_A64_ADD: base = 0x8B000000u; break;
-    case GRJIT_A64_SUB: base = 0xCB000000u; break;
-    case GRJIT_A64_AND: base = 0x8A000000u; break;
-    case GRJIT_A64_ORR: base = 0xAA000000u; break;
-    case GRJIT_A64_EOR: base = 0xCA000000u; break;
-    case GRJIT_A64_MUL: base = 0x9B007C00u; break; /* madd xd, xn, xm, xzr */
-    case GRJIT_A64_LSLV: base = 0x9AC02000u; break;
-    case GRJIT_A64_LSRV: base = 0x9AC02400u; break;
-    case GRJIT_A64_ASRV: base = 0x9AC02800u; break;
+    case GRJIT_A64_CLZ: base = 0x5AC01000u; break;
+    case GRJIT_A64_RBIT: base = 0x5AC00000u; break;
     default:
       fail(a, GRJIT_A64_BAD);
       return;
   }
-  grjit_a64_word(a, base | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | (uint32_t)rd);
+  grjit_a64_word(a, base | (wide ? 0x80000000u : 0u) | ((uint32_t)rn << 5) | (uint32_t)rd);
+}
+
+void grjit_a64_sext(GRJIT_A64Asm * a, GRJIT_A64Ext kind, GRJIT_A64Reg rd, GRJIT_A64Reg rn, bool wide) {
+  /* sbfm rd, rn, #0, #7 / #15 / #31; the 64-bit form sets N (bit 22) as well. */
+  uint32_t imms;
+  switch (kind) {
+    case GRJIT_A64_SXTB: imms = 7; break;
+    case GRJIT_A64_SXTH: imms = 15; break;
+    case GRJIT_A64_SXTW: imms = 31; break;
+    default:
+      fail(a, GRJIT_A64_BAD);
+      return;
+  }
+  if (kind == GRJIT_A64_SXTW && !wide) {
+    fail(a, GRJIT_A64_BAD);
+    return;
+  }
+  grjit_a64_word(a, (wide ? 0x93400000u : 0x13000000u) | (imms << 10) | ((uint32_t)rn << 5) |
+      (uint32_t)rd);
 }
 
 void grjit_a64_neg(GRJIT_A64Asm * a, GRJIT_A64Reg rd, GRJIT_A64Reg rm) {
@@ -530,6 +602,8 @@ static uint32_t load_base(GRJIT_A64Mem kind) {
     case GRJIT_A64_MEM_S8: return 0x38800000u;
     case GRJIT_A64_MEM_S16: return 0x78800000u;
     case GRJIT_A64_MEM_S32: return 0xB8800000u;
+    case GRJIT_A64_MEM_F32: return 0xBC400000u;
+    case GRJIT_A64_MEM_F64: return 0xFC400000u;
   }
   return 0;
 }
@@ -540,6 +614,8 @@ static uint32_t store_base(GRJIT_A64Mem kind) {
     case GRJIT_A64_MEM_U16: return 0x78000000u;
     case GRJIT_A64_MEM_U32: return 0xB8000000u;
     case GRJIT_A64_MEM_X64: return 0xF8000000u;
+    case GRJIT_A64_MEM_F32: return 0xBC000000u;
+    case GRJIT_A64_MEM_F64: return 0xFC000000u;
     default: return 0;
   }
 }
@@ -548,10 +624,21 @@ static unsigned mem_shift(GRJIT_A64Mem kind) {
   switch (kind) {
     case GRJIT_A64_MEM_U8: case GRJIT_A64_MEM_S8: return 0;
     case GRJIT_A64_MEM_U16: case GRJIT_A64_MEM_S16: return 1;
-    case GRJIT_A64_MEM_U32: case GRJIT_A64_MEM_S32: return 2;
-    case GRJIT_A64_MEM_X64: return 3;
+    case GRJIT_A64_MEM_U32: case GRJIT_A64_MEM_S32: case GRJIT_A64_MEM_F32: return 2;
+    case GRJIT_A64_MEM_X64: case GRJIT_A64_MEM_F64: return 3;
   }
   return 0;
+}
+
+static bool mem_is_fp(GRJIT_A64Mem kind) {
+  return kind == GRJIT_A64_MEM_F32 || kind == GRJIT_A64_MEM_F64;
+}
+
+/* A floating-point load or store names a `v` register in `rt`. */
+static void note_mem_v(GRJIT_A64Asm * a, GRJIT_A64Mem kind, GRJIT_A64Reg rt) {
+  if (mem_is_fp(kind)) {
+    a->vregs_used |= UINT32_C(1) << ((unsigned)rt & 31u);
+  }
 }
 
 static void mem_unscaled(GRJIT_A64Asm * a, uint32_t base, GRJIT_A64Reg rt,
@@ -589,31 +676,37 @@ static void mem_reg(GRJIT_A64Asm * a, uint32_t base, GRJIT_A64Reg rt,
 
 void grjit_a64_load_unscaled(GRJIT_A64Asm * a, GRJIT_A64Mem kind,
     GRJIT_A64Reg rt, GRJIT_A64Reg rn, int32_t imm9) {
+  note_mem_v(a, kind, rt);
   mem_unscaled(a, load_base(kind), rt, rn, imm9);
 }
 
 void grjit_a64_load_scaled(GRJIT_A64Asm * a, GRJIT_A64Mem kind, GRJIT_A64Reg rt,
     GRJIT_A64Reg rn, uint32_t uimm) {
+  note_mem_v(a, kind, rt);
   mem_scaled(a, load_base(kind), mem_shift(kind), rt, rn, uimm);
 }
 
 void grjit_a64_load_reg(GRJIT_A64Asm * a, GRJIT_A64Mem kind, GRJIT_A64Reg rt,
     GRJIT_A64Reg rn, GRJIT_A64Reg rm) {
+  note_mem_v(a, kind, rt);
   mem_reg(a, load_base(kind), rt, rn, rm);
 }
 
 void grjit_a64_store_unscaled(GRJIT_A64Asm * a, GRJIT_A64Mem kind,
     GRJIT_A64Reg rt, GRJIT_A64Reg rn, int32_t imm9) {
+  note_mem_v(a, kind, rt);
   mem_unscaled(a, store_base(kind), rt, rn, imm9);
 }
 
 void grjit_a64_store_scaled(GRJIT_A64Asm * a, GRJIT_A64Mem kind, GRJIT_A64Reg rt,
     GRJIT_A64Reg rn, uint32_t uimm) {
+  note_mem_v(a, kind, rt);
   mem_scaled(a, store_base(kind), mem_shift(kind), rt, rn, uimm);
 }
 
 void grjit_a64_store_reg(GRJIT_A64Asm * a, GRJIT_A64Mem kind, GRJIT_A64Reg rt,
     GRJIT_A64Reg rn, GRJIT_A64Reg rm) {
+  note_mem_v(a, kind, rt);
   mem_reg(a, store_base(kind), rt, rn, rm);
 }
 
@@ -633,11 +726,13 @@ static void mem_any(GRJIT_A64Asm * a, uint32_t base, unsigned shift,
 
 void grjit_a64_load(GRJIT_A64Asm * a, GRJIT_A64Mem kind, GRJIT_A64Reg rt,
     GRJIT_A64Reg rn, int32_t disp) {
+  note_mem_v(a, kind, rt);
   mem_any(a, load_base(kind), mem_shift(kind), rt, rn, disp);
 }
 
 void grjit_a64_store(GRJIT_A64Asm * a, GRJIT_A64Mem kind, GRJIT_A64Reg rt,
     GRJIT_A64Reg rn, int32_t disp) {
+  note_mem_v(a, kind, rt);
   mem_any(a, store_base(kind), mem_shift(kind), rt, rn, disp);
 }
 
@@ -677,4 +772,116 @@ void grjit_a64_data64(GRJIT_A64Asm * a, uint64_t value) {
 
 void grjit_a64_brk(GRJIT_A64Asm * a, uint16_t imm) {
   grjit_a64_word(a, 0xD4200000u | ((uint32_t)imm << 5));
+}
+
+/* ---- Scalar floating point and the bit count -------------------------------------------- */
+
+uint32_t grjit_a64_vregs_used(const GRJIT_A64Asm * a) {
+  return a->vregs_used;
+}
+
+static void note_v(GRJIT_A64Asm * a, GRJIT_A64VReg v) {
+  a->vregs_used |= UINT32_C(1) << ((unsigned)v & 31u);
+}
+
+/* The `type` field of the scalar floating-point encodings (bits 22 and 23): 00 single, 01 double. */
+static uint32_t fp_type(GRJIT_A64FSize size) {
+  return size == GRJIT_A64_DOUBLE ? 0x00400000u : 0u;
+}
+
+void grjit_a64_fmov_from_gpr(GRJIT_A64Asm * a, GRJIT_A64FSize size, GRJIT_A64VReg vd, GRJIT_A64Reg rn) {
+  note_v(a, vd);
+  grjit_a64_word(a, (size == GRJIT_A64_DOUBLE ? 0x9E670000u : 0x1E270000u) | ((uint32_t)rn << 5) |
+      (uint32_t)vd);
+}
+
+void grjit_a64_fmov_to_gpr(GRJIT_A64Asm * a, GRJIT_A64FSize size, GRJIT_A64Reg rd, GRJIT_A64VReg vn) {
+  note_v(a, vn);
+  grjit_a64_word(a, (size == GRJIT_A64_DOUBLE ? 0x9E660000u : 0x1E260000u) | ((uint32_t)vn << 5) |
+      (uint32_t)rd);
+}
+
+void grjit_a64_fmov_vv(GRJIT_A64Asm * a, GRJIT_A64FSize size, GRJIT_A64VReg vd, GRJIT_A64VReg vn) {
+  note_v(a, vd);
+  note_v(a, vn);
+  grjit_a64_word(a, 0x1E204000u | fp_type(size) | ((uint32_t)vn << 5) | (uint32_t)vd);
+}
+
+void grjit_a64_fp_binary(GRJIT_A64Asm * a, GRJIT_A64FpBinary op, GRJIT_A64FSize size,
+    GRJIT_A64VReg vd, GRJIT_A64VReg vn, GRJIT_A64VReg vm) {
+  uint32_t base;
+  switch (op) {
+    case GRJIT_A64_FADD: base = 0x1E202800u; break;
+    case GRJIT_A64_FSUB: base = 0x1E203800u; break;
+    case GRJIT_A64_FMUL: base = 0x1E200800u; break;
+    case GRJIT_A64_FDIV: base = 0x1E201800u; break;
+    case GRJIT_A64_FMIN: base = 0x1E205800u; break;
+    case GRJIT_A64_FMAX: base = 0x1E204800u; break;
+    default:
+      fail(a, GRJIT_A64_BAD);
+      return;
+  }
+  note_v(a, vd);
+  note_v(a, vn);
+  note_v(a, vm);
+  grjit_a64_word(a, base | fp_type(size) | ((uint32_t)vm << 16) | ((uint32_t)vn << 5) | (uint32_t)vd);
+}
+
+void grjit_a64_fp_unary(GRJIT_A64Asm * a, GRJIT_A64FpUnary op, GRJIT_A64FSize size,
+    GRJIT_A64VReg vd, GRJIT_A64VReg vn) {
+  uint32_t base;
+  switch (op) {
+    case GRJIT_A64_FSQRT: base = 0x1E21C000u; break;
+    case GRJIT_A64_FABS: base = 0x1E20C000u; break;
+    case GRJIT_A64_FNEG: base = 0x1E214000u; break;
+    case GRJIT_A64_FRINTN: base = 0x1E244000u; break;
+    case GRJIT_A64_FRINTP: base = 0x1E24C000u; break;
+    case GRJIT_A64_FRINTM: base = 0x1E254000u; break;
+    case GRJIT_A64_FRINTZ: base = 0x1E25C000u; break;
+    default:
+      fail(a, GRJIT_A64_BAD);
+      return;
+  }
+  note_v(a, vd);
+  note_v(a, vn);
+  grjit_a64_word(a, base | fp_type(size) | ((uint32_t)vn << 5) | (uint32_t)vd);
+}
+
+void grjit_a64_fcmp(GRJIT_A64Asm * a, GRJIT_A64FSize size, GRJIT_A64VReg vn, GRJIT_A64VReg vm) {
+  note_v(a, vn);
+  note_v(a, vm);
+  grjit_a64_word(a, 0x1E202000u | fp_type(size) | ((uint32_t)vm << 16) | ((uint32_t)vn << 5));
+}
+
+void grjit_a64_fcvt(GRJIT_A64Asm * a, GRJIT_A64FSize to, GRJIT_A64VReg vd, GRJIT_A64VReg vn) {
+  note_v(a, vd);
+  note_v(a, vn);
+  grjit_a64_word(a, (to == GRJIT_A64_SINGLE ? 0x1E624000u : 0x1E22C000u) | ((uint32_t)vn << 5) |
+      (uint32_t)vd);
+}
+
+void grjit_a64_cvt_to_fp(GRJIT_A64Asm * a, bool is_signed, GRJIT_A64FSize to, GRJIT_A64VReg vd,
+    GRJIT_A64Reg rn, bool wide) {
+  note_v(a, vd);
+  grjit_a64_word(a, (is_signed ? 0x1E220000u : 0x1E230000u) | (wide ? 0x80000000u : 0u) |
+      fp_type(to) | ((uint32_t)rn << 5) | (uint32_t)vd);
+}
+
+void grjit_a64_cvt_from_fp(GRJIT_A64Asm * a, bool is_signed, GRJIT_A64FSize from, GRJIT_A64Reg rd,
+    GRJIT_A64VReg vn, bool wide) {
+  note_v(a, vn);
+  grjit_a64_word(a, (is_signed ? 0x1E380000u : 0x1E390000u) | (wide ? 0x80000000u : 0u) |
+      fp_type(from) | ((uint32_t)vn << 5) | (uint32_t)rd);
+}
+
+void grjit_a64_cnt8b(GRJIT_A64Asm * a, GRJIT_A64VReg vd, GRJIT_A64VReg vn) {
+  note_v(a, vd);
+  note_v(a, vn);
+  grjit_a64_word(a, 0x0E205800u | ((uint32_t)vn << 5) | (uint32_t)vd);
+}
+
+void grjit_a64_addv8b(GRJIT_A64Asm * a, GRJIT_A64VReg vd, GRJIT_A64VReg vn) {
+  note_v(a, vd);
+  note_v(a, vn);
+  grjit_a64_word(a, 0x0E31B800u | ((uint32_t)vn << 5) | (uint32_t)vd);
 }
