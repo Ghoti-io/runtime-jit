@@ -41,18 +41,18 @@
 using namespace intfx;
 
 /* The harness runs the compiled code where there is a native host for a backend that emits the integer and
- * float operations: x86-64 SysV and arm64 (Linux), and Win64 under wine in the commits that follow. Elsewhere the
- * compile still happens for the part that needs no execution: the reader, the mapping into the IR and the
- * verifier's guard rule run wherever the suite is, and an assertion that needs the code run is counted as excluded
- * with the reason below, never as passed. The backends with CPU-feature arms (x86-64) run each file twice, with the
- * features the host has and with every optional feature masked off; arm64 has no feature arm, so it runs each file
- * once and the recorded set of every compile is asserted empty. */
-#if (defined(__x86_64__) || defined(__aarch64__)) && defined(__linux__)
+ * float operations: x86-64 SysV and arm64 (Linux), and Win64 (under wine). Elsewhere the compile still happens for
+ * the part that needs no execution: the reader, the mapping into the IR and the verifier's guard rule run wherever the
+ * suite is, and an assertion that needs the code run is counted as excluded with the reason below, never as passed.
+ * The backends with CPU-feature arms (x86-64, SysV and Win64) run each file twice, with the features the host has and
+ * with every optional feature masked off; arm64 has no feature arm, so it runs each file once and the recorded set of
+ * every compile is asserted empty. */
+#if ((defined(__x86_64__) || defined(__aarch64__)) && defined(__linux__)) || (defined(_WIN64) && defined(__x86_64__))
 constexpr bool kExecutes = true;
 #else
 constexpr bool kExecutes = false;
 #endif
-#if defined(__x86_64__) && defined(__linux__)
+#if defined(__x86_64__) && (defined(__linux__) || defined(_WIN64))
 constexpr bool kFeatureArms = true;
 #else
 constexpr bool kFeatureArms = false;

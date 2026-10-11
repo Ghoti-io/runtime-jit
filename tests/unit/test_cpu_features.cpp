@@ -1017,11 +1017,11 @@ struct Mapped {
   Mapped & operator=(const Mapped &) = delete;
   Mapped(JitWorld & w, GRJIT_Function * f, GRJIT_Features features) : pages(w.pages()) {
     GRJIT_Emitted e;
-    EXPECT_EQ(grjit_emit_for_features(GRJIT_ARCH_X86_64, f, grjit_allocator_default(), nullptr, nullptr, 0x40,
-                  features, &e),
+    // The native arch: the entry is called with this target's C ABI (SysV on Linux, Microsoft x64 on Windows).
+    const GRJIT_Arch arch = grjit_native_arch();
+    EXPECT_EQ(grjit_emit_for_features(arch, f, grjit_allocator_default(), nullptr, nullptr, 0x40, features, &e),
         GRJIT_OK);
-    EXPECT_EQ(grjit_memory_create(pages, GRJIT_ARCH_X86_64, e.bytes, e.size, &e.prologue, &mapping, &size, &unwind),
-        GRJIT_OK);
+    EXPECT_EQ(grjit_memory_create(pages, arch, e.bytes, e.size, &e.prologue, &mapping, &size, &unwind), GRJIT_OK);
     grjit_emitted_free(&e);
     std::memcpy(&entry, &mapping, sizeof entry);
   }

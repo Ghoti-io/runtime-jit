@@ -21,3 +21,27 @@
 89|89|testWin64_numeric|Win64Helpers.EveryMixOfIntegerAndFloatArgumentsArrivesInTheRegisterOfItsPositionAndTheFifthAndSixthOnTheStack|a helper's float arguments numbered by class, as SysV numbers them, not by position
 90|90|testWin64_numeric|Win64Helpers.EveryMixOfIntegerAndFloatArgumentsArrivesInTheRegisterOfItsPositionAndTheFifthAndSixthOnTheStack|a helper's fifth and sixth arguments stored without the shadow space's offset
 91|91|testCpu_features|CpuRecord.TheRecordedSetIsExactlyTheArmsEmittedUnderEverySubsetOfTheHostsFeatures|the Win64 flavour given no feature: it takes no arm and records none, on a host that has the features
+#
+# The existing shared defects of the integer, float and CPU-feature stories, run again under wine on the Win64 flavour
+# now that it emits those operations (spec-runtime-float, story 5). Each is in code the Win64 flavour shares with SysV or
+# reaches through its own variant, and each is caught by the test that runs the code there, in a tree of its own, with
+# its control passing first. Not here: 39 (`idiv` on MIN % -1 is a hardware fault, which wine reports as an unhandled
+# exception that kills the test program, and the test harness has no signal handler on Windows), and 48 and 49 (a probe
+# in SysV assembly). 52 is reached through the Win64 rounding variant (the v1 arm, run by a mask of all).
+38|38|testInt_ir|IntVerify.ADivisionOrRemainderWithNoGuardIsRefusedForEachOperationAtEachWidth|the verifier does not require the guards of a division or a remainder (the verifier's catch: nothing reaches `idiv` unguarded)
+40|40|testInt_ir|IntRun.EveryOperationGivesTheWorkedAnswerAndAnI32ResultIsZeroExtended|an i32 shift count masked to 64, not 32
+41|41|testInt_ir|IntRun.AnI32EntersAndLeavesAsItsLow32BitsWhateverTheCallerLeftAbove|an i32 addition done in 64 bits: the upper half is not zero
+42|42|testInt_ir|IntRun.EveryOperationGivesTheWorkedAnswerAndAnI32ResultIsZeroExtended|the operands of an i32 subtraction and ordered comparison swapped
+43|43|testFloat_ir|FloatRun.EveryOperationGivesTheWorkedAnswerFromTheCodeAndFromTheEvaluator|an unordered float comparison read as ordered (no test of PF)
+44|44|testFloat_ir|FloatVerify.ATruncationWithNoRangeGuardIsRefusedForEachOperationAndWidth|the verifier does not require the range guard of a truncation
+45|45|testFloat_ir|FloatRun.EveryOperationGivesTheWorkedAnswerFromTheCodeAndFromTheEvaluator|the operands of a float subtraction swapped
+46|46|testFloat_ir|FloatRun.EveryOperationGivesTheWorkedAnswerFromTheCodeAndFromTheEvaluator|the operands of a float division swapped
+47|47|testFloat_ir|FloatRun.EveryOperationGivesTheWorkedAnswerFromTheCodeAndFromTheEvaluator|the operands of an ordered float comparison swapped the wrong way
+50|50|testFloat_ir|FloatRun.EveryOperationGivesTheWorkedAnswerFromTheCodeAndFromTheEvaluator|min and max by the bare minsd and maxsd
+51|51|testFloat_ir|FloatRun.EveryOperationGivesTheWorkedAnswerFromTheCodeAndFromTheEvaluator|the unsigned 64-bit conversion with no sticky bit
+52|52|testFloat_ir|FloatRun.EveryOperationGivesTheWorkedAnswerFromTheCodeAndFromTheEvaluator|nearest rounds halves away from zero (in the Win64 rounding variant, run by a mask of all)
+53|53|testFloat_ir|FloatRun.EveryOperationGivesTheWorkedAnswerFromTheCodeAndFromTheEvaluator|neg and abs by arithmetic: a signalling NaN comes out quiet
+54|54|testFloat_ir|FloatRun.EveryOperationGivesTheWorkedAnswerFromTheCodeAndFromTheEvaluator|the saturating truncation of a NaN is not 0
+55|55|testFloat_ir|FloatRun.EveryOperationGivesTheWorkedAnswerFromTheCodeAndFromTheEvaluator|an f32 taken out of its register as 64 bits (not zero-extended)
+66|66|testCpu_features|CpuRun.TheV1ArmGivesTheWorkedAnswersOnAHostThatHasTheFeaturesBecauseItsMaskedOff|a wrong constant in the v1 popcnt only
+67|67|testCpu_features|CpuRun.TheV1ArmGivesTheWorkedAnswersOnAHostThatHasTheFeaturesBecauseItsMaskedOff|a wrong zero case in the v1 clz only
