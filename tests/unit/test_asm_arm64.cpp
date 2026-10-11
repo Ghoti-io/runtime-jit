@@ -1784,7 +1784,6 @@ TEST(AsmArm64, TheTagBetweenCodeIsTwoLittleEndianWordsOfTheValue) {
   EXPECT_EQ(hex(as.bytes()), "030000004e495247efcdab8967452301");
 }
 
-GRJIT_TEST_MAIN()
 
 /* ---- The floating-point forms (spec-runtime-float, story 5) -------------------------------- */
 
@@ -1853,3 +1852,5 @@ TEST(AsmArm64, AFloatingPointAccessScalesByItsWidthAndOneInstructionReachesAsFar
   grjit_a64_store(&odd.a, GRJIT_A64_MEM_F64, GRJIT_A64_VREG_AS_REG(GRJIT_A64_V0), GRJIT_A64_X1, 12);
   EXPECT_EQ(odd.words(), 1u) << "an offset that is not a multiple of eight, within ldur's reach, is one instruction";
 }
+
+GRJIT_TEST_MAIN()
