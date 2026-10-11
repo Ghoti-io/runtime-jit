@@ -970,10 +970,10 @@ FloatProgram generate_float_program(IntGen & g) {
 } // namespace
 
 TEST(Differential, GeneratedFloatProgramsRunTheSameCompiledAndEvaluatedWithNansEqual) {
-#if defined(_WIN32)
-  GTEST_SKIP() << "the Win64 flavour emits the float operations in a later commit of story 5";
-#endif
   GRJIT_REQUIRE_BACKEND();
+  if (!floatfx::host_fp_is_default()) {
+    GTEST_SKIP() << "the host's MXCSR / FPCR is not the default the compiled code assumes";
+  }
   JitWorld w;
   size_t returned = 0, deopted = 0, truncs = 0, converts = 0, compares = 0, multi_block = 0, arm_programs = 0;
   const size_t masks = featfx::every_subset_masks().size();

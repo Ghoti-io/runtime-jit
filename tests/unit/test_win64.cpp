@@ -21,6 +21,7 @@
 #include "test_helpers.h"
 
 #include "../ir_gen.h"
+#include "../float_fixture.h"
 
 #include "../../src/code/code_internal.h"
 #include "../../src/x86_64/asm_internal.h"
@@ -338,6 +339,41 @@ TEST(Win64Shape, TheProbeThresholdIsExactlyWhereTheFramePlusAReturnAddressPasses
   EXPECT_EQ(a.count(lea_page), 1u);
 }
 
+TEST(Win64Registers, TheDisassemblerSeesXmm6InTheSysVV1RoundingSoTheScanAboveCanFail) {
+#ifdef _WIN32
+  GTEST_SKIP() << "needs POSIX mkstemp/popen and a host objdump";
+#else
+  std::string why;
+  if (!host_objdump_reads_x86_64(&why)) {
+    GTEST_SKIP() << "no objdump that reads x86-64 here: " << why;
+  }
+  floatfx::FloatOp op = floatfx::build_any_op("f64.floor");
+  GRJIT_Emitted e{};
+  ASSERT_EQ(grjit_emit_for_features(GRJIT_ARCH_X86_64, op.function, grjit_allocator_default(), nullptr, nullptr,
+                kRequestOffset, GRJIT_FEATURES_NONE, &e),
+      GRJIT_OK);
+  char path[] = "/tmp/grjit-w64c-XXXXXX";
+  int fd = mkstemp(path);
+  ASSERT_GE(fd, 0);
+  ASSERT_EQ(write(fd, e.bytes, e.size), static_cast<ssize_t>(e.size));
+  close(fd);
+  std::string cmd = std::string("objdump -D -b binary -mi386:x86-64 -M intel ") + path + " 2>&1";
+  FILE * p = popen(cmd.c_str(), "r");
+  ASSERT_NE(p, nullptr);
+  std::string text;
+  char buf[512];
+  while (fgets(buf, sizeof buf, p) != nullptr) {
+    text += buf;
+  }
+  pclose(p);
+  unlink(path);
+  EXPECT_NE(text.find("xmm6"), std::string::npos) << "the SysV v1 rounding names xmm6 (MASK)";
+  EXPECT_NE(text.find("xmm7"), std::string::npos) << "and xmm7 (ONE)";
+  grjit_emitted_free(&e);
+  grjit_function_destroy(op.function);
+#endif
+}
+
 TEST(Win64Shape, TheProbeLoopDisassemblesAsTheSequenceItIsMeantToBe) {
 #ifdef _WIN32
   GTEST_SKIP() << "needs POSIX mkstemp/popen and a host objdump";
@@ -467,6 +503,19 @@ TEST(Win64Registers, TheDisassemblerAgreesThatNoCalleeSavedRegisterAppears) {
     ASSERT_TRUE(em.ok());
     blob.insert(blob.end(), em.e.bytes, em.e.bytes + em.e.size);
   }
+  /* The float functions too (spec-runtime-float, story 5): every instruction of the float tables, whose rounding
+   * sequence would name xmm6 and xmm7 if it were not the Win64 variant. */
+  size_t float_functions = 0;
+  for (const std::string & instr : floatfx::every_float_instruction()) {
+    floatfx::FloatOp op = floatfx::build_any_op(instr);
+    ASSERT_NE(op.function, nullptr) << instr;
+    Emit em(op.function);
+    ASSERT_TRUE(em.ok()) << instr;
+    blob.insert(blob.end(), em.e.bytes, em.e.bytes + em.e.size);
+    grjit_function_destroy(op.function);
+    float_functions++;
+  }
+  EXPECT_EQ(float_functions, 70u);
   char path[] = "/tmp/grjit-w64r-XXXXXX";
   int fd = mkstemp(path);
   ASSERT_GE(fd, 0);
@@ -487,7 +536,8 @@ TEST(Win64Registers, TheDisassemblerAgreesThatNoCalleeSavedRegisterAppears) {
    * a word at a time (a register name is a whole word). */
   const std::set<std::string> forbidden = {"rbx", "ebx", "bx", "bl", "rsi", "esi", "si", "sil",
       "rdi", "edi", "di", "dil", "r12", "r12d", "r12w", "r12b", "r13", "r13d", "r13w", "r13b",
-      "r14", "r14d", "r14w", "r14b", "r15", "r15d", "r15w", "r15b"};
+      "r14", "r14d", "r14w", "r14b", "r15", "r15d", "r15w", "r15b",
+      "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15"};
   size_t instructions = 0;
   size_t at = 0;
   while (at < text.size()) {

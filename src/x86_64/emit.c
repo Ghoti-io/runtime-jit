@@ -222,6 +222,7 @@ static void emit_binary(GRJIT_Emit * e, const GRJIT_Op * op) {
 
 /* ---- Float arguments of a helper call (SysV; spec-runtime-float, story 3) ---------------------
  *
+ * (Win64 numbers its four register slots by position, not by class: see emit_call.)
  * The integer-class arguments take `rdi rsi rdx rcx r8 r9` in order among themselves, the float
  * ones `xmm0` to `xmm7` in order among themselves. An f32 is in the low 32 bits of its register,
  * an f64 in its 64; a typed immediate goes through `rax`, which the call loads over afterwards. */
@@ -257,11 +258,6 @@ static bool call_has_float(const GRJIT_Emit * e, const GRJIT_Op * op) {
 
 static void emit_float_arguments(GRJIT_Emit * e, const GRJIT_Op * op) {
   GRJIT_Asm * a = &e->as;
-  if (e->win64) {
-    /* Win64 numbers its four argument slots jointly and shadows the float ones: story 5. */
-    e->c.error = GRJIT_ERR_UNSUPPORTED;
-    return;
-  }
   unsigned integer = 0;
   unsigned floating = 0;
   for (size_t i = 0; i < op->arg_count; i++) {
@@ -308,15 +304,55 @@ static void emit_call(GRJIT_Emit * e, const GRJIT_Op * op) {
   if (e->win64) {
     /* The stack arguments first, through rax: they are stores to the outgoing
      * area, and the register arguments are loads straight from slots, so no
-     * order between them can clobber an operand. */
+     * order between them can clobber an operand. Microsoft x64 numbers the four
+     * register slots by position: argument i is `rcx rdx r8 r9` for an integer and
+     * `xmm0`-`xmm3` for a float, the slot being the same number for both (so
+     * (i64, f64, i64, f32) is rcx, xmm1, r8, xmm3). The fifth and sixth arguments are
+     * stack words above the 32 bytes of shadow space, a float as its bit word whatever
+     * its class (a callee reads an f32 from the low 32 bits). A helper is non-variadic:
+     * a variadic callee would want a float repeated in the integer register, which is
+     * unsupported here as on SysV. */
     for (size_t i = e->abi->c_reg_args; i < op->arg_count; i++) {
       load_operand(e, GRJIT_RAX, &op->args[i]);
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 90
+      /* Planted defect 90 (tests only): a stack-passed argument is stored without the shadow space's
+       * offset, on top of the callee's shadow words. */
+      grjit_asm_store64(a, GRJIT_RSP, (int32_t)(8 * (i - e->abi->c_reg_args)), GRJIT_RAX);
+#else
       grjit_asm_store64(a, GRJIT_RSP,
           (int32_t)(e->abi->shadow_bytes + 8 * (i - e->abi->c_reg_args)), GRJIT_RAX);
+#endif
     }
+    unsigned integer = 0;
+    unsigned floating = 0;
     for (size_t i = 0; i < op->arg_count && i < e->abi->c_reg_args; i++) {
-      load_operand(e, C_ARG(e, i), &op->args[i]);
+      const GRJIT_Operand * o = &op->args[i];
+      if (!operand_is_float(e, o)) {
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 89
+        /* Planted defect 89 (tests only): the arguments are numbered by class, as SysV numbers them
+         * (integers among themselves, floats among themselves), not by position. */
+        load_operand(e, C_ARG(e, integer++), o);
+        continue;
+#else
+        load_operand(e, C_ARG(e, i), o);
+        continue;
+#endif
+      }
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 89
+      const GRJIT_Xmm x = (GRJIT_Xmm)floating++;
+#else
+      const GRJIT_Xmm x = (GRJIT_Xmm)i;
+      (void)floating;
+#endif
+      const bool dbl = operand_is_double(e, o);
+      if (o->kind == GRJIT_OPERAND_VREG) {
+        grjit_asm_movs_load(a, x, GRJIT_RBP, grjit_emit_slot(o->vreg), dbl);
+      } else {
+        grjit_asm_mov_ri(a, GRJIT_RAX, (uint64_t)o->imm);
+        grjit_asm_movd_xr(a, x, GRJIT_RAX, dbl);
+      }
     }
+    (void)integer;
   } else if (call_has_float(e, op)) {
     emit_float_arguments(e, op);
   } else {
@@ -1286,8 +1322,19 @@ static void emit_float_sign(GRJIT_Emit * e, const GRJIT_Op * op, bool dbl) {
  * otherwise. */
 static void emit_float_round(GRJIT_Emit * e, const GRJIT_Op * op, bool dbl) {
   GRJIT_Asm * a = &e->as;
+  /* MASK and ONE are written only after SIGN is built (ABS is dead from there: it is read to make MAG and SIGN) and
+   * after T is built (MAGIC is dead from there), so under Win64, where `xmm6`-`xmm15` are callee-saved and are never
+   * encoded, they take those two dead registers; the instructions are the same and the registers are the only
+   * difference. SysV keeps `xmm6` and `xmm7`, and its bytes do not change. */
   const GRJIT_Xmm X = GRJIT_XMM0, ABS = GRJIT_XMM2, MAGIC = GRJIT_XMM3, SIGN = GRJIT_XMM4,
-                  T = GRJIT_XMM5, MASK = GRJIT_XMM6, ONE = GRJIT_XMM7, MAG = GRJIT_XMM1;
+                  T = GRJIT_XMM5, MAG = GRJIT_XMM1;
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 88
+  /* Planted defect 88 (tests only): the Win64 flavour keeps the SysV registers, naming the callee-saved
+   * `xmm6` and `xmm7`. */
+  const GRJIT_Xmm MASK = GRJIT_XMM6, ONE = GRJIT_XMM7;
+#else
+  const GRJIT_Xmm MASK = e->win64 ? ABS : GRJIT_XMM6, ONE = e->win64 ? MAGIC : GRJIT_XMM7;
+#endif
   GRJIT_Label nan = grjit_asm_label(a);
   GRJIT_Label done = grjit_asm_label(a);
   load_float(e, X, &op->a, dbl);
@@ -1316,8 +1363,8 @@ static void emit_float_round(GRJIT_Emit * e, const GRJIT_Op * op, bool dbl) {
       grjit_asm_movaps(a, MASK, MAG);
       grjit_asm_sse_rr(a, GRJIT_SSE_SUB, MASK, T, dbl);
       grjit_asm_mov_ri(a, GRJIT_RAX, float_bits(0.5, dbl));
-      grjit_asm_movd_xr(a, ABS, GRJIT_RAX, dbl);
-      grjit_asm_cmps(a, GRJIT_SSEP_EQ, MASK, ABS, dbl);
+      grjit_asm_movd_xr(a, e->win64 ? X : ABS, GRJIT_RAX, dbl); /* (X is dead here and is the result after) */
+      grjit_asm_cmps(a, GRJIT_SSEP_EQ, MASK, e->win64 ? X : ABS, dbl);
       grjit_asm_sse_logic(a, GRJIT_SSE_AND, MASK, ONE);
       grjit_asm_sse_rr(a, GRJIT_SSE_ADD, T, MASK, dbl);
 #endif
@@ -1718,11 +1765,7 @@ static void emit_op(GRJIT_Emit * e, const GRJIT_Op * op, size_t block) {
       break;
     case GRJIT_OP_CMP:
       if (operand_is_float(e, &op->a) || operand_is_float(e, &op->b)) {
-        if (e->win64) {
-          e->c.error = GRJIT_ERR_UNSUPPORTED;
-        } else {
-          emit_float_cmp(e, op);
-        }
+        emit_float_cmp(e, op);
         break;
       }
       if (operand_is_i32(e, &op->a) || operand_is_i32(e, &op->b)) {
@@ -1872,13 +1915,7 @@ static void emit_op(GRJIT_Emit * e, const GRJIT_Op * op, size_t block) {
     case GRJIT_OP_DEMOTE:
     case GRJIT_OP_PROMOTE:
     case GRJIT_OP_REINTERPRET:
-      if (e->win64) {
-        /* Story 5 of spec-runtime-float emits these for Win64; until then the flavour refuses,
-         * by name (the function-wide check in grjit_emit_function says so first). */
-        e->c.error = GRJIT_ERR_UNSUPPORTED;
-      } else {
-        emit_float_op(e, op);
-      }
+      emit_float_op(e, op);
       break;
     case GRJIT_OP_COUNT:
       e->c.error = GRJIT_ERR_INTERNAL;
@@ -2244,13 +2281,6 @@ GRJIT_Result grjit_emit_function(const GRJIT_Function * f,
     const GRJIT_Allocator * allocator, size_t max_code_bytes,
     GRJIT_EntryHook hook, uint32_t request_offset, uint32_t frame_bytes,
     bool win64, GRJIT_Features features, const GRJIT_LiveSites * live, GRJIT_Emit * e) {
-  if (win64 && grjit_function_needs_float_ext(f)) {
-    /* The float types and operations of numeric-operations.md are not emitted for Win64
-     * yet (the integer ones are); the flavour refuses the function by name instead of
-     * emitting an integer operation for a float. `e` is the caller's zeroed record, which
-     * ::grjit_emit_free accepts. */
-    return GRJIT_ERR_UNSUPPORTED;
-  }
   memset(e, 0, sizeof *e);
   e->win64 = win64;
   /* The Win64 flavour refuses every operation that has a feature arm (story 5 emits them), so

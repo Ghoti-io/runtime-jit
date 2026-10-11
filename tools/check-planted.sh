@@ -143,6 +143,14 @@
 #  87  an i32 or f32 parameter not cut on entry to a   -> not on this host: a callable function's entry
 #      callable function                                  is not run by the simulator (tools/arm64-plants.txt)
 #
+#  88  the SSE2 rounding sequence unreworked for      -> testWin64_numeric (the registers the
+#      Win64: it names the callee-saved xmm6 and xmm7      assembler encoded), testWin64 (objdump)
+#  89  a helper's float arguments numbered by class    -> testWin64_numeric (the bytes of the argument
+#      as SysV numbers them, not by position (Win64)      loads)
+#  90  a helper's stack-passed (fifth and sixth)       -> the same
+#      arguments stored without the shadow space's
+#      offset (Win64)
+#
 # An existing defect in a sequence only the fallback runs is 52 (nearest rounds halves away from zero): on a host
 # with SSE4.1 the v1 rounding is run only through a mask of ALL, which testFloat_ir's worked answers and boundary
 # sweep, testWast and testDifferential (every subset of the host's features) do explicitly.

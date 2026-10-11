@@ -269,6 +269,7 @@ GRJIT_Result grjit_emit_for_features(GRJIT_Arch arch, const GRJIT_Function * fun
     out->prologue = x86.prologue;
     out->internal_offset = x86.internal_offset;
     out->regs_used = grjit_asm_regs_used(&x86.as);
+    out->fp_regs_used = grjit_asm_xmm_used(&x86.as);
     bytes = grjit_asm_bytes(&x86.as);
     code_bytes = grjit_asm_size(&x86.as);
     recs = x86.c.sites;

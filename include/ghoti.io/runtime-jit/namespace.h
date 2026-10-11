@@ -256,6 +256,7 @@
 #define grjit_asm_tzcnt GHOTIIO_RUNTIME_JIT(grjit_asm_tzcnt)
 #define grjit_asm_ucomis GHOTIIO_RUNTIME_JIT(grjit_asm_ucomis)
 #define grjit_asm_ud2 GHOTIIO_RUNTIME_JIT(grjit_asm_ud2)
+#define grjit_asm_xmm_used GHOTIIO_RUNTIME_JIT(grjit_asm_xmm_used)
 #define grjit_backend_available GHOTIIO_RUNTIME_JIT(grjit_backend_available)
 #define grjit_backend_calls_available GHOTIIO_RUNTIME_JIT(grjit_backend_calls_available)
 #define grjit_builder_binary GHOTIIO_RUNTIME_JIT(grjit_builder_binary)

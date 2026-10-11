@@ -41,12 +41,8 @@ using featfx::detected;
 using featfx::need_of;
 using featfx::two_arms;
 
-/* Every backend runs these where it has a native host: x86-64 SysV and arm64 here, Win64 under wine in
- * the commits that follow. */
-#if defined(_WIN32)
-#define FLOAT_RUN_HERE() \
-  GTEST_SKIP() << "the Win64 flavour emits the float operations in a later commit of story 5"
-#else
+/* Every backend runs these where it has a native host: x86-64 SysV and arm64 natively, Win64 under wine. The host's
+ * floating-point environment must be the default the compiled code assumes, or the test says so and skips by name. */
 #define FLOAT_RUN_HERE()                                                                   \
   do {                                                                                     \
     GRJIT_REQUIRE_BACKEND();                                                               \
@@ -54,8 +50,6 @@ using featfx::two_arms;
       GTEST_SKIP() << "the host's MXCSR / FPCR is not the default the compiled code assumes"; \
     }                                                                                      \
   } while (0)
-#endif
-
 
 /* Helpers written in assembly so that the test can see what the compiled code left in the registers
  * (which a C++ function cannot say: the compiler may use the arguments as it likes) and can return a
@@ -2485,15 +2479,14 @@ GRJIT_Function * float_call_function(int which) {
 
 namespace {
 
-/* The backends that emit the float operations. The Win64 flavour does not yet: it joins in the commit that emits
- * them for it, and until then it refuses by name. */
-bool emits_floats(GRJIT_Arch arch) {
-  return arch != GRJIT_ARCH_X86_64_WIN64;
+/* Every backend emits the float operations. */
+bool emits_floats(GRJIT_Arch) {
+  return true;
 }
 
 } // namespace
 
-TEST(FloatRefusal, EveryBackendEmitsEveryFloatInstructionOrRefusesTheFunctionByName) {
+TEST(FloatRefusal, EveryBackendEmitsEveryFloatInstructionOfTheTables) {
   for (GRJIT_Arch arch : {GRJIT_ARCH_X86_64, GRJIT_ARCH_ARM64, GRJIT_ARCH_X86_64_WIN64}) {
     const int id = static_cast<int>(arch);
     const GRJIT_Result want = emits_floats(arch) ? GRJIT_OK : GRJIT_ERR_UNSUPPORTED;

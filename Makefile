@@ -816,7 +816,12 @@ endif
 # signed instruction, an unsigned 64-bit conversion by `scvtf`, the second float argument of a helper in the wrong
 # register, an f32 result taken as `fmov x0, d0`, and a float sequence that changes d8): all caught here through the
 # simulator, and 86 also by the structural scan of the registers the assembler encoded. 87, an i32 or f32 parameter
-# not cut on entry to a callable function, is in the callable entry only and is caught by real arm64 code alone. Defects 20 to 29 are the arm64
+# not cut on entry to a callable function, is in the callable entry only and is caught by real arm64 code alone.
+# Defects 88 to 90 are the Win64 flavour's float operations: the SSE2 rounding sequence unreworked, naming the
+# callee-saved xmm6 and xmm7 (caught here by the structural scan of the registers the assembler encoded and by
+# objdump's reading of the bytes, and under wine by the sentinels), and the helper's float arguments numbered by class
+# as SysV numbers them and its stack-passed ones stored without the shadow space's offset (caught here by the bytes of
+# the argument loads, and under wine by a probe in MinGW assembly). Defects 20 to 29 are the arm64
 # emitter's own versions of the call, tail-call and native ones (the walk start stored
 # after a native call, a native's stack area not rounded or not popped, a callee that
 # does not pop, a tail call made as a call, the last stack argument of a tail call not
@@ -896,7 +901,9 @@ PLANT_DEFECTS := 1:testDifferential 2:testReadback 3:testReadback \
 	81:testArm64_numeric:Arm64SimCompiled.AnF32Result* 81:testFloat_ir:FloatRun.AnF32ResultIsAWholeWord* \
 	82:testDifferential:Differential.GeneratedFloatProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluatedWithNansEqual 83:testDifferential:Differential.GeneratedFloatProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluatedWithNansEqual \
 	84:testArm64_numeric:Arm64SimCompiled.AHelperGets* 85:testArm64_numeric:Arm64SimCompiled.AHelperGets* \
-	86:testDifferential:Differential.GeneratedFloatProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluatedWithNansEqual 86:testArm64_numeric:Arm64Registers.NoCalleeSaved*
+	86:testDifferential:Differential.GeneratedFloatProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluatedWithNansEqual 86:testArm64_numeric:Arm64Registers.NoCalleeSaved* \
+	88:testWin64_numeric:Win64Numeric.NoCalleeSavedVector* 88:testWin64:Win64Registers.TheDisassemblerAgreesThatNoCalleeSavedRegisterAppears \
+	89:testWin64_numeric:Win64Numeric.AHelperCall* 90:testWin64_numeric:Win64Numeric.AHelperCall*
 
 # The controls the script runs are built by this make, as prerequisites, and
 # not by the script's own sub-make. Under `make -j test` the sibling goals

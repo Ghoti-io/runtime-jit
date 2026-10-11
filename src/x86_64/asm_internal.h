@@ -133,6 +133,7 @@ typedef struct GRJIT_Asm {
   size_t fixup_count;
   size_t fixup_capacity;
   uint32_t regs_used;  ///< Bit `r` is set once register `r` has been encoded.
+  uint32_t xmm_used;   ///< Bit `n` is set once `xmm`n has been encoded by an SSE instruction.
 } GRJIT_Asm;
 
 /** Starts an assembler whose output may not exceed `limit` bytes. */
@@ -146,6 +147,8 @@ GRJIT_AsmStatus grjit_asm_status(const GRJIT_Asm * a);
  *  callee-saved register (`rbx`, `rsi`, `rdi`, `r12`-`r15`) is never touched,
  *  without disassembling anything. */
 uint32_t grjit_asm_regs_used(const GRJIT_Asm * a);
+/** The `xmm` registers encoded so far, bit `n` for `xmm`n. */
+uint32_t grjit_asm_xmm_used(const GRJIT_Asm * a);
 /** The bytes emitted so far. */
 const uint8_t * grjit_asm_bytes(const GRJIT_Asm * a);
 /** Their count: also the offset of the next instruction. */
@@ -246,7 +249,8 @@ void grjit_asm_movzx_r8(GRJIT_Asm * a, GRJIT_Reg dst, GRJIT_Reg src);
 /* The SSE2 forms of the float operations (spec-runtime-float, story 3). SSE2 only: no
  * instruction here is newer than x86-64-v1. `dbl` selects the double (`sd`) form, the single
  * (`ss`) otherwise. A register operand that is an `xmm` is never recorded in
- * ::grjit_asm_regs_used (it shares no numbering with the general registers). */
+ * ::grjit_asm_regs_used (it shares no numbering with the general registers): it is recorded in
+ * ::grjit_asm_xmm_used. */
 /** `movss`/`movsd xmm, [base + disp]`: loads 32 or 64 bits and clears the rest of the register. */
 void grjit_asm_movs_load(GRJIT_Asm * a, GRJIT_Xmm dst, GRJIT_Reg base, int32_t disp, bool dbl);
 /** `movss`/`movsd [base + disp], xmm`: stores 32 or 64 bits. */
