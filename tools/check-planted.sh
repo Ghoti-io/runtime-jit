@@ -122,6 +122,26 @@
 #      emitter                                           a zero divisor gives 0 and no trap)
 #  75  `rem_s` with the dividend and the divisor       -> the same
 #      swapped in its `msub` in the arm64 emitter
+#  76  the operands of a float subtraction swapped     -> testDifferential (the arm64 code, simulated)
+#      in the arm64 emitter
+#  77  the operands of a float division swapped        -> the same
+#  78  float lt and le with the integer lt and le      -> the same (a NaN compares true)
+#      conditions in the arm64 emitter
+#  79  min and max by `fminnm` and `fmaxnm`            -> the same (a quiet NaN is ignored)
+#  80  nearest by `frinta` (halves away from zero)     -> the same
+#  81  an f32 result stored with `str s`: the upper    -> testArm64_numeric (the simulator, over a
+#      half of its slot keeps what it held                stack full of a pattern), testFloat_ir
+#  82  the saturating unsigned truncation by the       -> testDifferential (simulated)
+#      signed instruction
+#  83  an unsigned 64-bit conversion by `scvtf`        -> the same
+#  84  the second float argument of a helper in the    -> testArm64_numeric (the simulator's typed
+#      wrong register (numbered jointly)                  helper call)
+#  85  an f32 helper result taken as `fmov x0, d0`     -> the same
+#  86  a float sequence that changes d8 and does not   -> testDifferential (the simulator's check of the
+#      restore it                                         callee-saved registers), testArm64_numeric (the
+#                                                         structural scan of the registers encoded)
+#  87  an i32 or f32 parameter not cut on entry to a   -> not on this host: a callable function's entry
+#      callable function                                  is not run by the simulator (tools/arm64-plants.txt)
 #
 # An existing defect in a sequence only the fallback runs is 52 (nearest rounds halves away from zero): on a host
 # with SSE4.1 the v1 rounding is run only through a mask of ALL, which testFloat_ir's worked answers and boundary

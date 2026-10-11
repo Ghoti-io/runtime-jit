@@ -62,6 +62,8 @@ typedef struct GRJIT_Emitted {
   GRJIT_Prologue prologue; ///< x86-64 only: where the prologue's instructions end.
   uint32_t internal_offset; ///< A callable function's internal entry (x86-64 and arm64).
   uint32_t regs_used;      ///< x86-64 only: bit r set if register r was encoded.
+  uint32_t fp_regs_used;   ///< The floating-point registers encoded: bit n for `v`n on arm64 (`v0` to `v31`);
+                           ///< x86-64 records its `xmm` registers here from the Win64 float commit.
   GRJIT_Features features_used; ///< The features whose arm was emitted (a subset of the set the
                            ///< emit was given; empty off SysV x86-64).
 } GRJIT_Emitted;

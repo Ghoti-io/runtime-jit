@@ -331,7 +331,9 @@ class Cpu {
  public:
   A64_SIM_NO_FUNCTION_CHECK Result run(Config & cfg) {
     Result res;
-    std::vector<uint8_t> stack(cfg.stack_bytes + 64, 0);
+    // Filled with a pattern, not zeros: a slot the code reads before it wrote it (a bug) would then show, and a slot
+    // written with fewer bits than its word has (an f32 stored as 32) keeps garbage above them, as it does on hardware.
+    std::vector<uint8_t> stack(cfg.stack_bytes + 64, 0xA5);
     uintptr_t top = (reinterpret_cast<uintptr_t>(stack.data()) + cfg.stack_bytes) & ~uintptr_t{15};
     uintptr_t floor = reinterpret_cast<uintptr_t>(stack.data());
     for (int i = 0; i < 32; i++) {

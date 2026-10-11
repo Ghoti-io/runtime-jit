@@ -3,10 +3,12 @@
  *
  * The float IR (spec-runtime-float, story 3): the `F32` and `F64` types and the float, conversion
  * and reinterpretation operations of numeric-operations.md, their typing rules, the verifier's rule
- * that a float-to-integer truncation is preceded by its range guard, and their x86-64 SysV code run
- * against hand-worked answers and the test evaluator. Floats through helper calls (the SysV
- * classification), through calls and tail calls between compiled functions, and in frame states.
- * The other backends refuse the types and the operations by name, which is tested everywhere.
+ * that a float-to-integer truncation is preceded by its range guard, and the code of each backend run
+ * against hand-worked answers and the test evaluator: natively on x86-64 SysV and on arm64 (under
+ * qemu-aarch64 or on a Raspberry Pi), under wine for Win64. Floats through helper calls (the SysV
+ * classification is checked against an assembly probe here, the AAPCS64 and Microsoft x64 ones in
+ * test_arm64_numeric.cpp and test_win64_numeric.cpp), through calls and tail calls between compiled
+ * functions, and in frame states.
  *
  * The comparison rule, here and in the evaluator: floats are compared by their bits, with any two
  * NaNs equal. A NaN never equals a number, and +0 and -0 differ. A worked answer that is a NaN says
@@ -39,12 +41,19 @@ using featfx::detected;
 using featfx::need_of;
 using featfx::two_arms;
 
-#if defined(__x86_64__) && defined(__linux__)
-#define FLOAT_ONLY_ON_X86_64() GRJIT_REQUIRE_BACKEND()
+/* Every backend runs these where it has a native host: x86-64 SysV and arm64 here, Win64 under wine in
+ * the commits that follow. */
+#if defined(_WIN32)
+#define FLOAT_RUN_HERE() \
+  GTEST_SKIP() << "the Win64 flavour emits the float operations in a later commit of story 5"
 #else
-#define FLOAT_ONLY_ON_X86_64() \
-  GTEST_SKIP() << "the float operations are emitted for x86-64 SysV only (story 5 of " \
-                  "spec-runtime-float brings arm64 and Win64); the refusals are tested instead"
+#define FLOAT_RUN_HERE()                                                                   \
+  do {                                                                                     \
+    GRJIT_REQUIRE_BACKEND();                                                               \
+    if (!floatfx::host_fp_is_default()) {                                                  \
+      GTEST_SKIP() << "the host's MXCSR / FPCR is not the default the compiled code assumes"; \
+    }                                                                                      \
+  } while (0)
 #endif
 
 
@@ -1354,7 +1363,7 @@ TEST(FloatVerify, AnAllocationThatFailsInTheRangeAnalysisIsOutOfMemoryAndLeaksNo
 /* ---- Running the code: the answers ------------------------------------------------------------ */
 
 TEST(FloatRun, EveryOperationGivesTheWorkedAnswerFromTheCodeAndFromTheEvaluator) {
-  FLOAT_ONLY_ON_X86_64();
+  FLOAT_RUN_HERE();
   JitWorld w;
   size_t nan_cases = 0;
   for (GRJIT_Features disabled : two_arms()) {
@@ -1463,7 +1472,7 @@ size_t sweep_one(JitWorld & w, const std::string & instr, const std::vector<uint
 } // namespace
 
 TEST(FloatRun, EveryOperationAtEveryWidthAgreesWithTheEvaluatorOnTheBoundaryValues) {
-  FLOAT_ONLY_ON_X86_64();
+  FLOAT_RUN_HERE();
   JitWorld w;
   const std::vector<uint64_t> f64s = f64_values(), f32s = f32_values();
   size_t compared = 0, traps = 0;
@@ -1508,7 +1517,7 @@ TEST(FloatRun, EveryOperationAtEveryWidthAgreesWithTheEvaluatorOnTheBoundaryValu
 }
 
 TEST(FloatRun, ATruncationNamesTheNanGuardTheRangeGuardOrReturnsTheTruncatedValue) {
-  FLOAT_ONLY_ON_X86_64();
+  FLOAT_RUN_HERE();
   JitWorld w;
   const std::string NAN_T = "trap: invalid conversion to integer", OVF = "trap: integer overflow";
   struct Case {
@@ -1581,7 +1590,7 @@ TEST(FloatRun, ATruncationNamesTheNanGuardTheRangeGuardOrReturnsTheTruncatedValu
 }
 
 TEST(FloatRun, AnF32EntersAndLeavesAsItsLow32BitsWhateverTheCallerLeftAbove) {
-  FLOAT_ONLY_ON_X86_64();
+  FLOAT_RUN_HERE();
   JitWorld w;
   {
     // f(x: f32) = x: the entry masks the argument; the return is zero-extended.
@@ -1618,7 +1627,7 @@ TEST(FloatRun, AnF32EntersAndLeavesAsItsLow32BitsWhateverTheCallerLeftAbove) {
 }
 
 TEST(FloatRun, AFloatLoadedFromMemoryAndStoredToItIsItsBitsAtItsOwnWidth) {
-  FLOAT_ONLY_ON_X86_64();
+  FLOAT_RUN_HERE();
   JitWorld w;
   for (bool dbl : {false, true}) {
     SCOPED_TRACE(dbl);
@@ -1657,7 +1666,7 @@ TEST(FloatRun, AFloatLoadedFromMemoryAndStoredToItIsItsBitsAtItsOwnWidth) {
 }
 
 TEST(FloatRun, AConstantAndAMoveOfAnF32AreZeroExtendedAndAnF64ConstantIsAnyPattern) {
-  FLOAT_ONLY_ON_X86_64();
+  FLOAT_RUN_HERE();
   JitWorld w;
   B b("k", 0);
   GRJIT_VReg a = b.reg(GRJIT_TYPE_F32), c = b.reg(GRJIT_TYPE_F32), d = b.reg(GRJIT_TYPE_F64),
@@ -1687,7 +1696,7 @@ TEST(FloatRun, AConstantAndAMoveOfAnF32AreZeroExtendedAndAnF64ConstantIsAnyPatte
 }
 
 TEST(FloatRun, TheOperationsAreRoundedOneAtATimeAndSubnormalsSurviveUnderTheDefaultMxcsr) {
-  FLOAT_ONLY_ON_X86_64();
+  FLOAT_RUN_HERE();
   JitWorld w;
   // a * b + c as two operations: the product rounds to 1, so the sum is 0. A fused multiply-add
   // would give -2^-60 (-2^-26 for f32).
@@ -1725,10 +1734,16 @@ TEST(FloatRun, TheOperationsAreRoundedOneAtATimeAndSubnormalsSurviveUnderTheDefa
     ireval::Result e = ireval::eval(f, w.ctx, nullptr, {B32(x), B32(y), B32(-1.0f)});
     EXPECT_EQ(e.out[0], B32(0.0f));
   }
+  // The compiled code assumes the default MXCSR / FPCR (round to nearest, no flush to zero, no trap) and never
+  // writes it.
 #if defined(__SSE__)
-  // The compiled code assumes the default MXCSR and never writes it.
   const unsigned before = _mm_getcsr();
   EXPECT_EQ(before & 0xE040u, 0u) << "the host runs the tests with round-to-nearest, flush-to-zero and denormals-are-zero off";
+#elif defined(__aarch64__)
+  uint64_t before;
+  asm volatile("mrs %0, fpcr" : "=r"(before));
+  EXPECT_EQ(before & 0x07C09F00u, 0u) << "the host runs the tests with the default FPCR (RMode, FZ, DN, AHP and the trap enables clear)";
+#endif
   Built b;
   ASSERT_EQ(compile(&b, "f64.mul", w), GRJIT_OK);
   Outcome o = run(b.code, w.ctx, {0x0010000000000000ull, B64(0.5)});
@@ -1739,7 +1754,12 @@ TEST(FloatRun, TheOperationsAreRoundedOneAtATimeAndSubnormalsSurviveUnderTheDefa
   Built d;
   ASSERT_EQ(compile(&d, "f64.nearest", w), GRJIT_OK);
   run(d.code, w.ctx, {B64(2.5)});
+#if defined(__SSE__)
   EXPECT_EQ(_mm_getcsr(), before) << "MXCSR is untouched";
+#elif defined(__aarch64__)
+  uint64_t after;
+  asm volatile("mrs %0, fpcr" : "=r"(after));
+  EXPECT_EQ(after, before) << "FPCR is untouched";
 #endif
 }
 
@@ -1940,6 +1960,26 @@ TEST(FloatHelpers, AFloatResultIsTakenFromXmm0ByItsOwnWidthWhateverIsAboveBit31)
   EXPECT_EQ(run(code.code, w.ctx, {}).out[0], uint64_t{0x40400000});
 }
 
+#else // not x86-64 Linux: the SysV probes, skipped by name
+
+TEST(FloatHelpers, EveryMixOfIntegerAndFloatArgumentsArrivesInItsRegisterBySysVClassification) {
+  GTEST_SKIP() << "the SysV classification is checked against an x86-64 assembly probe, on x86-64 Linux only; "
+                  "the AAPCS64 and Microsoft x64 ones have probes of their own (test_arm64_numeric.cpp, "
+                  "test_win64_numeric.cpp)";
+}
+
+TEST(FloatHelpers, TheNamedClassificationFromTheStoryComesOutAsStated) {
+  GTEST_SKIP() << "x86-64 Linux only (a SysV probe)";
+}
+
+TEST(FloatHelpers, AFloatResultIsTakenFromXmm0ByItsOwnWidthWhateverIsAboveBit31) {
+  GTEST_SKIP() << "x86-64 Linux only (a SysV probe)";
+}
+
+#endif // x86-64 Linux
+
+/* ---- Floats through a helper call, on every backend ---------------------------------------------- */
+
 namespace {
 
 struct Seen {
@@ -1960,7 +2000,7 @@ double h_mixed(int64_t a, double b, int64_t c, float e) {
 } // namespace
 
 TEST(FloatHelpers, ACompiledCallOfARealCppHelperGetsItsArgumentsAndGivesItsResultExactly) {
-  GRJIT_REQUIRE_BACKEND();
+  FLOAT_RUN_HERE();
   JitWorld w;
   {
     B b("mixed", 0);
@@ -2040,7 +2080,7 @@ double gc_point_helper(double a, int64_t n) {
 } // namespace
 
 TEST(FloatHelpers, ACallThatCanReachAGcPointTakesAndReturnsFloatsAndKeepsThemOutOfTheStackMap) {
-  GRJIT_REQUIRE_BACKEND();
+  FLOAT_RUN_HERE();
   JitWorld w;
   B b("gcfloat", 3);
   GRJIT_CallHooks h{};
@@ -2079,40 +2119,14 @@ TEST(FloatHelpers, ACallThatCanReachAGcPointTakesAndReturnsFloatsAndKeepsThemOut
   EXPECT_EQ(f64of(o.out[0]), 13.0);
 }
 
-#else // not x86-64 Linux: the same tests, skipped by name
 
-TEST(FloatHelpers, EveryMixOfIntegerAndFloatArgumentsArrivesInItsRegisterBySysVClassification) {
-  GTEST_SKIP() << "the float helper ABI is checked against an assembly probe on x86-64 Linux only";
-}
-
-TEST(FloatHelpers, TheNamedClassificationFromTheStoryComesOutAsStated) {
-  GTEST_SKIP() << "x86-64 Linux only";
-}
-
-TEST(FloatHelpers, AFloatResultIsTakenFromXmm0ByItsOwnWidthWhateverIsAboveBit31) {
-  GTEST_SKIP() << "x86-64 Linux only";
-}
-
-TEST(FloatHelpers, ACompiledCallOfARealCppHelperGetsItsArgumentsAndGivesItsResultExactly) {
-  GTEST_SKIP() << "x86-64 Linux only";
-}
-
-TEST(FloatHelpers, ACallOverTheLimitIsRefusedAsBeforeAndANativeTakesNoFloat) {
-  GTEST_SKIP() << "x86-64 Linux only";
-}
-
-TEST(FloatHelpers, ACallThatCanReachAGcPointTakesAndReturnsFloatsAndKeepsThemOutOfTheStackMap) {
-  GTEST_SKIP() << "x86-64 Linux only";
-}
-
-#endif // x86-64 Linux
 
 
 
 /* ---- Frame states and stack maps -------------------------------------------------------------- */
 
 TEST(FloatRun, AFloatInAFrameStateIsRecordedWithItsRepresentationAndRawNeverAReference) {
-  FLOAT_ONLY_ON_X86_64();
+  FLOAT_RUN_HERE();
   JitWorld w;
   B b("state", 5);
   GRJIT_VReg x = b.param(GRJIT_TYPE_F32), y = b.param(GRJIT_TYPE_F64), z = b.param(GRJIT_TYPE_I64),
@@ -2157,7 +2171,7 @@ uint32_t float_no_poll(void *, uint64_t, uint64_t) { return 0; }
 /* A float live across a poll, a call that can collect and a native call is a raw frame-state value,
  * never a stack-map entry: the live list of each site holds the reference and nothing else. */
 TEST(FloatRun, AFloatLiveAcrossAPollACallAndANativeIsRawInTheFrameStateAndNeverInTheStackMap) {
-  FLOAT_ONLY_ON_X86_64();
+  FLOAT_RUN_HERE();
   JitWorld w;
   NativeTab tab;
   uint32_t native = tab.add(reinterpret_cast<const void *>(&float_live_native), {GRJIT_TYPE_I64}, GRJIT_TYPE_I64);
@@ -2291,7 +2305,7 @@ int add_caller(fx::Engine & e, int n, int callee, bool tail) {
 } // namespace
 
 TEST(FloatCalls, AFloatGoesThroughACallInARegisterAndOnTheStackAndComesBackExact) {
-  FLOAT_ONLY_ON_X86_64();
+  FLOAT_RUN_HERE();
   fx::Engine e;
   for (int n : {1, 2, 4, 6, 7, 9, 12}) {
     SCOPED_TRACE(n);
@@ -2341,7 +2355,7 @@ TEST(FloatCalls, AFloatGoesThroughACallInARegisterAndOnTheStackAndComesBackExact
 }
 
 TEST(FloatCalls, FloatArithmeticInTheCallerFeedsTheCalleeAndTheResultComesBack) {
-  FLOAT_ONLY_ON_X86_64();
+  FLOAT_RUN_HERE();
   fx::Engine e;
   for (int n : {3, 5, 8, 11}) {
     SCOPED_TRACE(n);
@@ -2378,7 +2392,7 @@ TEST(FloatCalls, FloatArithmeticInTheCallerFeedsTheCalleeAndTheResultComesBack) 
 }
 
 TEST(FloatCalls, AFloatGoesThroughATailCallInARegisterAndOnTheStack) {
-  FLOAT_ONLY_ON_X86_64();
+  FLOAT_RUN_HERE();
   fx::Engine e;
   for (int n : {2, 6, 8, 11}) {
     SCOPED_TRACE(n);
@@ -2406,7 +2420,7 @@ TEST(FloatCalls, AFloatGoesThroughATailCallInARegisterAndOnTheStack) {
 }
 
 TEST(FloatCalls, AFloatGoesThroughACallPtrAndATailCallPtrInARegisterAndOnTheStack) {
-  FLOAT_ONLY_ON_X86_64();
+  FLOAT_RUN_HERE();
   fx::Engine e;
   for (int n : {2, 9}) {
     SCOPED_TRACE(n);
@@ -2452,32 +2466,6 @@ TEST(FloatCalls, AFloatGoesThroughACallPtrAndATailCallPtrInARegisterAndOnTheStac
 
 namespace {
 
-std::vector<std::string> every_float_instruction() {
-  std::vector<std::string> v;
-  for (const char * ty : {"f32", "f64"}) {
-    for (const char * n : {"add", "sub", "mul", "div", "min", "max", "copysign", "eq", "ne", "lt", "gt",
-             "le", "ge", "neg", "abs", "sqrt", "ceil", "floor", "trunc", "nearest", "convert_i32_s",
-             "convert_i32_u", "convert_i64_s", "convert_i64_u"}) {
-      v.push_back(std::string(ty) + "." + n);
-    }
-  }
-  v.push_back("f32.demote_f64");
-  v.push_back("f64.promote_f32");
-  v.push_back("f32.reinterpret_i32");
-  v.push_back("f64.reinterpret_i64");
-  v.push_back("i32.reinterpret_f32");
-  v.push_back("i64.reinterpret_f64");
-  for (const char * to : {"i32", "i64"}) {
-    for (const char * from : {"f32", "f64"}) {
-      for (const char * sign : {"s", "u"}) {
-        v.push_back(std::string(to) + ".trunc_" + from + "_" + sign);
-        v.push_back(std::string(to) + ".trunc_sat_" + from + "_" + sign);
-      }
-    }
-  }
-  return v;
-}
-
 /* Functions that use a float only in a call: an f64 register argument, a typed immediate, a float result. */
 GRJIT_Function * float_call_function(int which) {
   B b("callf", 0);
@@ -2495,18 +2483,31 @@ GRJIT_Function * float_call_function(int which) {
 
 } // namespace
 
-TEST(FloatRefusal, Arm64AndWin64RefuseEveryFunctionThatUsesAFloatTypeOrOperationByName) {
-  for (GRJIT_Arch arch : {GRJIT_ARCH_ARM64, GRJIT_ARCH_X86_64_WIN64}) {
-    const char * name = arch == GRJIT_ARCH_ARM64 ? "arm64" : "win64";
+namespace {
+
+/* The backends that emit the float operations. The Win64 flavour does not yet: it joins in the commit that emits
+ * them for it, and until then it refuses by name. */
+bool emits_floats(GRJIT_Arch arch) {
+  return arch != GRJIT_ARCH_X86_64_WIN64;
+}
+
+} // namespace
+
+TEST(FloatRefusal, EveryBackendEmitsEveryFloatInstructionOrRefusesTheFunctionByName) {
+  for (GRJIT_Arch arch : {GRJIT_ARCH_X86_64, GRJIT_ARCH_ARM64, GRJIT_ARCH_X86_64_WIN64}) {
+    const int id = static_cast<int>(arch);
+    const GRJIT_Result want = emits_floats(arch) ? GRJIT_OK : GRJIT_ERR_UNSUPPORTED;
     size_t checked = 0;
     for (const std::string & instr : every_float_instruction()) {
       Built b;
       b.op = build_any_op(instr);
       ASSERT_NE(b.op.function, nullptr) << instr;
       GRJIT_Emitted emitted;
-      EXPECT_EQ(grjit_emit_for(arch, b.op.function, grjit_allocator_default(), nullptr, nullptr, 0, &emitted),
-          GRJIT_ERR_UNSUPPORTED)
-          << name << " " << instr;
+      EXPECT_EQ(grjit_emit_for(arch, b.op.function, grjit_allocator_default(), nullptr, nullptr, 0, &emitted), want)
+          << "arch " << id << " " << instr;
+      if (want == GRJIT_OK) {
+        EXPECT_GT(emitted.size, 0u) << instr;
+      }
       grjit_emitted_free(&emitted);
       checked++;
     }
@@ -2515,9 +2516,8 @@ TEST(FloatRefusal, Arm64AndWin64RefuseEveryFunctionThatUsesAFloatTypeOrOperation
     for (int which = 0; which < 3; which++) {
       Fn f(float_call_function(which));
       GRJIT_Emitted emitted;
-      EXPECT_EQ(grjit_emit_for(arch, f, grjit_allocator_default(), nullptr, nullptr, 0, &emitted),
-          GRJIT_ERR_UNSUPPORTED)
-          << name << " call " << which;
+      EXPECT_EQ(grjit_emit_for(arch, f, grjit_allocator_default(), nullptr, nullptr, 0, &emitted), want)
+          << "arch " << id << " call " << which;
       grjit_emitted_free(&emitted);
     }
     // A float in a load, a store, a move, a constant, a compare and a return only.
@@ -2533,11 +2533,61 @@ TEST(FloatRefusal, Arm64AndWin64RefuseEveryFunctionThatUsesAFloatTypeOrOperation
       b.ret(V(y));
       Fn f(b.finish());
       GRJIT_Emitted emitted;
-      EXPECT_EQ(grjit_emit_for(arch, f, grjit_allocator_default(), nullptr, nullptr, 0, &emitted),
-          GRJIT_ERR_UNSUPPORTED)
-          << name << " a float that only moves";
+      EXPECT_EQ(grjit_emit_for(arch, f, grjit_allocator_default(), nullptr, nullptr, 0, &emitted), want)
+          << "arch " << id << " a float that only moves";
       grjit_emitted_free(&emitted);
     }
+  }
+}
+
+/* What no backend emits is refused before any of them is asked: by the verifier, which is shared code. Each of
+ * these is a function the verifier rejects, so a compile of it on any target is refused with the same reason. */
+TEST(FloatRefusal, WhatIsStillRefusedIsRefusedByTheVerifierWhicheverBackendWouldEmitIt) {
+  {
+    // a float register as an argument of a native call
+    NativeTab t;
+    uint32_t id = t.add(reinterpret_cast<const void *>(&h_f32_result), {GRJIT_TYPE_I64}, GRJIT_TYPE_I64);
+    B n("native", 0);
+    GRJIT_CallHooks h{};
+    h.deopt = [](void *, uint64_t) -> uint32_t { return 0; };
+    n.callable(h);
+    n.natives(t);
+    GRJIT_VReg fx = n.param(GRJIT_TYPE_F64), r = n.reg(GRJIT_TYPE_I64);
+    n.at(n.block());
+    n.call_native(r, id, {V(fx)}, {1, 1}, {});
+    n.ret(V(r));
+    Fn f(n.finish());
+    EXPECT_NE(refused(f.f), "") << "a float register is not the i64 a native takes";
+  }
+  {
+    // an unsigned condition on floats
+    B b("ucmp", 0);
+    GRJIT_VReg x = b.param(GRJIT_TYPE_F64), c = b.reg(GRJIT_TYPE_I32);
+    b.at(b.block());
+    b.cmp(GRJIT_CMP_ULT, c, V(x), V(x));
+    b.ret(V(c));
+    Fn f(b.finish());
+    EXPECT_NE(refused(f.f), "");
+  }
+  {
+    // a float as an address
+    B b("addr", 0);
+    GRJIT_VReg x = b.param(GRJIT_TYPE_F64), r = b.reg(GRJIT_TYPE_I64);
+    b.at(b.block());
+    b.load(r, x, 0, 64);
+    b.ret(V(r));
+    Fn f(b.finish());
+    EXPECT_NE(refused(f.f), "");
+  }
+  {
+    // a bitcast out of a float
+    B b("bitcast", 0);
+    GRJIT_VReg x = b.param(GRJIT_TYPE_F64), r = b.reg(GRJIT_TYPE_I64);
+    b.at(b.block());
+    b.bitcast(r, x);
+    b.ret(V(r));
+    Fn f(b.finish());
+    EXPECT_NE(refused(f.f), "");
   }
 }
 
@@ -2556,7 +2606,7 @@ TEST(FloatRefusal, AFunctionWithoutAFloatIsStillEmittedByAllThreeBackends) {
   }
 }
 
-TEST(FloatRefusal, SysVEmitsEveryFloatInstructionAndANativeCompileIsRefusedByNameElsewhere) {
+TEST(FloatRefusal, ANativeCompileEmitsEveryFloatInstructionWhereTheBackendDoes) {
   const GRJIT_Arch native = grjit_native_arch();
   if (!grjit_backend_available()) {
     GTEST_SKIP() << "no native code backend on this target";
@@ -2568,20 +2618,60 @@ TEST(FloatRefusal, SysVEmitsEveryFloatInstructionAndANativeCompileIsRefusedByNam
     b.op = build_any_op(instr);
     ASSERT_NE(b.op.function, nullptr);
     Compiled c(b.op.function, w.pages());
-    if (native == GRJIT_ARCH_X86_64) {
-      EXPECT_EQ(c.result, GRJIT_OK) << "x86-64 SysV emits the float operations";
+    if (emits_floats(native)) {
+      EXPECT_EQ(c.result, GRJIT_OK);
+      EXPECT_TRUE(c);
     } else {
-      EXPECT_EQ(c.result, GRJIT_ERR_UNSUPPORTED) << "arm64 and Win64 refuse them until story 5";
+      EXPECT_EQ(c.result, GRJIT_ERR_UNSUPPORTED);
       EXPECT_FALSE(c);
     }
   }
+}
+
+namespace {
+
+/* Leaves 32 KiB of the stack below this frame full of ones, so that a function entered next finds garbage in
+ * every slot it has not written. */
+__attribute__((noinline)) void dirty_the_stack() {
+  volatile uint64_t scratch[4096];
+  for (size_t i = 0; i < 4096; i++) {
+    scratch[i] = ~uint64_t{0};
+  }
+  __asm__ volatile("" : : "r"(scratch) : "memory");
+}
+
+} // namespace
+
+/* An f32 result is a whole word with the upper half zero, however it got there: the register file's upper half after
+ * a scalar single operation is not always zero, and a slot is not zero before it is written. Run over a stack full of
+ * ones, every operation that makes an f32 returns a word whose bits 32-63 are clear. */
+TEST(FloatRun, AnF32ResultIsAWholeWordWithTheUpperHalfZeroOverAStackThatHeldGarbage) {
+  FLOAT_RUN_HERE();
+  JitWorld w;
+  size_t checked = 0;
+  for (const std::string & instr : every_float_instruction()) {
+    Built b;
+    ASSERT_EQ(compile(&b, instr, w), GRJIT_OK) << instr;
+    if (b.op.result != GRJIT_TYPE_F32) {
+      continue;
+    }
+    SCOPED_TRACE(instr);
+    for (uint64_t x : {uint64_t{0x3FC00000}, uint64_t{0x40490FDB}, uint64_t{0x80000000}, uint64_t{7}}) {
+      dirty_the_stack();
+      Outcome o = run(b.code, w.ctx, {x, 0x3F800000u});
+      ASSERT_EQ(o.exit, uint32_t{GRJIT_EXIT_RETURNED}) << said(b.code, o);
+      EXPECT_EQ(o.out[0] >> 32, 0u) << "bits 32-63 of an f32 result word: " << hex(o.out[0]);
+      checked++;
+    }
+  }
+  EXPECT_GT(checked, 70u) << "every f32-producing instruction was run";
 }
 
 /* A typed float immediate is accepted wherever a float operation takes an immediate of its own width:
  * on either side of FADD and of a float CMP, as the source of a MOVE, and as the bounds of a truncation
  * guard. The code and the evaluator agree, and a typed immediate of the other width is refused. */
 TEST(FloatRun, ATypedFloatImmediateWorksOnEitherSideOfAnOperationAMoveAndATruncationGuard) {
-  FLOAT_ONLY_ON_X86_64();
+  FLOAT_RUN_HERE();
   JitWorld w;
   for (bool dbl : {false, true}) {
     SCOPED_TRACE(dbl);

@@ -810,7 +810,13 @@ endif
 # compare on the whole register, `ctz` without `rbit`, an unsigned division emitted signed, a guard emitted as
 # nothing, a remainder's `msub` with the dividend and divisor swapped): the arm64 code the emitter makes is
 # executed by the simulator on this host, so the differential catches them here, and the same defects are caught
-# by real arm64 code in tools/arm64-plants.txt. Defects 20 to 29 are the arm64
+# by real arm64 code in tools/arm64-plants.txt. Defects 76 to 86 are the arm64 emitter's float operations (the operands
+# of a subtraction and of a division swapped, a float compare with the integer lt and le conditions, min and max by
+# `fminnm` and `fmaxnm`, nearest by `frinta`, an f32 stored with `str s`, the saturating unsigned truncation by the
+# signed instruction, an unsigned 64-bit conversion by `scvtf`, the second float argument of a helper in the wrong
+# register, an f32 result taken as `fmov x0, d0`, and a float sequence that changes d8): all caught here through the
+# simulator, and 86 also by the structural scan of the registers the assembler encoded. 87, an i32 or f32 parameter
+# not cut on entry to a callable function, is in the callable entry only and is caught by real arm64 code alone. Defects 20 to 29 are the arm64
 # emitter's own versions of the call, tail-call and native ones (the walk start stored
 # after a native call, a native's stack area not rounded or not popped, a callee that
 # does not pop, a tail call made as a call, the last stack argument of a tail call not
@@ -884,7 +890,13 @@ PLANT_DEFECTS := 1:testDifferential 2:testReadback 3:testReadback \
 	72:testDifferential:Differential.GeneratedIntegerProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluated \
 	73:testDifferential:Differential.GeneratedIntegerProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluated \
 	74:testDifferential:Differential.GeneratedIntegerProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluated \
-	75:testDifferential:Differential.GeneratedIntegerProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluated
+	75:testDifferential:Differential.GeneratedIntegerProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluated \
+	76:testDifferential:Differential.GeneratedFloatProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluatedWithNansEqual 77:testDifferential:Differential.GeneratedFloatProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluatedWithNansEqual 78:testDifferential:Differential.GeneratedFloatProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluatedWithNansEqual \
+	79:testDifferential:Differential.GeneratedFloatProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluatedWithNansEqual 80:testDifferential:Differential.GeneratedFloatProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluatedWithNansEqual \
+	81:testArm64_numeric:Arm64SimCompiled.AnF32Result* 81:testFloat_ir:FloatRun.AnF32ResultIsAWholeWord* \
+	82:testDifferential:Differential.GeneratedFloatProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluatedWithNansEqual 83:testDifferential:Differential.GeneratedFloatProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluatedWithNansEqual \
+	84:testArm64_numeric:Arm64SimCompiled.AHelperGets* 85:testArm64_numeric:Arm64SimCompiled.AHelperGets* \
+	86:testDifferential:Differential.GeneratedFloatProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluatedWithNansEqual 86:testArm64_numeric:Arm64Registers.NoCalleeSaved*
 
 # The controls the script runs are built by this make, as prerequisites, and
 # not by the script's own sub-make. Under `make -j test` the sibling goals

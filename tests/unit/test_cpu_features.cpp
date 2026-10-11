@@ -481,10 +481,10 @@ TEST(CpuArms, NoOtherOperationChangesArmAndRecordsNothing) {
 namespace {
 
 /* Whether a backend other than SysV emits the operation `name` at this commit of story 5: arm64 emits the
- * integer operations, and the floats follow; the Win64 flavour follows both. */
+ * integer and the float operations; the Win64 flavour follows. */
 bool arch_emits_feature_op(GRJIT_Arch arch, const std::string & name) {
-  const bool is_float = !name.empty() && name[0] == 'f';
-  return arch == GRJIT_ARCH_ARM64 && !is_float;
+  (void)name;
+  return arch == GRJIT_ARCH_ARM64;
 }
 
 } // namespace

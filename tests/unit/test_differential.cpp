@@ -973,11 +973,10 @@ FloatProgram generate_float_program(IntGen & g) {
 } // namespace
 
 TEST(Differential, GeneratedFloatProgramsRunTheSameCompiledAndEvaluatedWithNansEqual) {
-#if defined(__x86_64__) && defined(__linux__)
-  GRJIT_REQUIRE_BACKEND();
-#else
-  GTEST_SKIP() << "the float operations are emitted for x86-64 SysV only; the arm64 and Win64 refusals are tested in testFloat_ir";
+#if defined(_WIN32)
+  GTEST_SKIP() << "the Win64 flavour emits the float operations in a later commit of story 5";
 #endif
+  GRJIT_REQUIRE_BACKEND();
   JitWorld w;
   size_t returned = 0, deopted = 0, truncs = 0, converts = 0, compares = 0, multi_block = 0, arm_programs = 0;
   const size_t masks = featfx::every_subset_masks().size();
@@ -1056,11 +1055,60 @@ TEST(Differential, GeneratedFloatProgramsRunTheSameCompiledAndEvaluatedWithNansE
   // run counts once per mask.
   EXPECT_GT(returned, 9500u * masks);
   EXPECT_GT(deopted, 6600u * masks);
-  EXPECT_GT(arm_programs, 0u) << "the float programs reach a rounding with SSE4.1 allowed";
+  if (featfx::detected() != GRJIT_FEATURES_NONE) {
+    EXPECT_GT(arm_programs, 0u) << "the float programs reach a rounding with SSE4.1 allowed";
+  }
   EXPECT_GT(truncs, 3500u);
   EXPECT_GT(converts, 7400u);
   EXPECT_GT(compares, 3600u);
   EXPECT_GT(multi_block, 1950u);
+}
+
+/* The float programs again, with the arm64 code the emitter makes for each executed by the simulator (a dev
+ * loop on any host; the native test above is the verdict on an arm64 host, under qemu-aarch64 or on a Pi). The
+ * same programs and argument sets as the native test draws. */
+TEST(Differential, GeneratedFloatProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluatedWithNansEqual) {
+  JitWorld w;
+  size_t returned = 0, deopted = 0;
+  for (uint64_t seed = 1; seed <= 3000; seed++) {
+    IntGen g(seed * 0x9E3779B97F4A7C15ull + 0xF10A7);
+    FloatProgram prog = generate_float_program(g);
+    Fn f(prog.f);
+    char why[256] = {0};
+    ASSERT_EQ(grjit_function_verify(f, nullptr, why, sizeof why), GRJIT_OK)
+        << describe(f, seed, std::string("the generator made a function the verifier refuses: ") + why);
+    static const std::vector<uint64_t> e32 = floatfx::f32_values(), e64 = floatfx::f64_values();
+    static const std::vector<uint64_t> i32e = floatfx::int_values(true), i64e = floatfx::int_values(false);
+    std::vector<std::vector<uint64_t>> arg_sets;
+    for (int run = 0; run < 6; run++) {
+      std::vector<uint64_t> args;
+      for (size_t i = 0; i < prog.params; i++) {
+        uint64_t v;
+        if (i < 3) {
+          v = e32[g.pick(e32.size())] | (g.pick(2) == 0 ? (g.rng() | 1) << 32 : 0); // garbage above bit 31
+        } else if (i < 6) {
+          v = e64[g.pick(e64.size())];
+        } else if (i < 8) {
+          v = i32e[g.pick(i32e.size())] | (g.pick(2) == 0 ? (g.rng() | 1) << 32 : 0);
+        } else {
+          v = i64e[g.pick(i64e.size())];
+        }
+        args.push_back(v);
+      }
+      arg_sets.push_back(args);
+    }
+    SimTarget c(f, w);
+    ASSERT_TRUE(c.ok()) << describe(f, seed, c.why());
+    for (const std::vector<uint64_t> & args : arg_sets) {
+      SimTarget::Run run = c.run(w, args);
+      ireval::Result eval = ireval::eval(f, w.ctx, nullptr, args);
+      ASSERT_TRUE(same_as_evaluator(f, seed, run.exit, run.out, eval, c.meta(), 2, &returned, &deopted))
+          << "(the arm64 code, simulated)";
+    }
+  }
+  std::printf("float differential, arm64 simulated: %zu returned, %zu guard exits\n", returned, deopted);
+  EXPECT_GT(returned, 9500u);
+  EXPECT_GT(deopted, 6600u);
 }
 
 GRJIT_TEST_MAIN()

@@ -258,6 +258,7 @@ GRJIT_Result grjit_emit_for_features(GRJIT_Arch arch, const GRJIT_Function * fun
     bytes = grjit_a64_bytes(&a64.as);
     code_bytes = grjit_a64_size(&a64.as);
     out->internal_offset = a64.internal_offset;
+    out->fp_regs_used = grjit_a64_vregs_used(&a64.as);
     recs = a64.c.sites;
     rec_count = a64.c.site_count;
   } else {

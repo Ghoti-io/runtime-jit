@@ -18,6 +18,9 @@
 
 #include <cmath>
 #include <cstdint>
+#if defined(__SSE__)
+#include <xmmintrin.h>
+#endif
 #include <limits>
 #include <map>
 #include <string>
@@ -29,6 +32,22 @@ using intfx::Outcome;
 using intfx::kTrapFunction;
 using intfx::kSiteIntegerOverflow;
 using intfx::run;
+
+/* Whether the host runs with the default floating-point environment the compiled code assumes: round to
+ * nearest, no flush to zero or denormals-are-zero, no trap enabled (MXCSR on x86-64, FPCR on arm64). A test of
+ * float results that finds otherwise says so and skips by name, as the library never writes the register and
+ * does not claim to be right under another setting. */
+inline bool host_fp_is_default() {
+#if defined(__aarch64__) && defined(__GNUC__)
+  uint64_t fpcr;
+  asm volatile("mrs %0, fpcr" : "=r"(fpcr));
+  return (fpcr & 0x07C09F00u) == 0; // RMode, FZ, DN, AHP and the trap enables
+#elif defined(__SSE__)
+  return (_mm_getcsr() & 0xE040u) == 0; // rounding control, FTZ, DAZ
+#else
+  return true;
+#endif
+}
 
 /* The identity of the NaN guard of a truncation: WebAssembly's "invalid conversion to integer". */
 constexpr uint64_t kSiteInvalidConversion = 3;
@@ -322,6 +341,34 @@ inline std::vector<uint64_t> int_values(bool narrow) {
   return v;
 }
 
+
+/* Every instruction of the float tables of numeric-operations.md (70): the arithmetic, comparison, rounding and
+ * conversion ones at both widths, demote, promote, the four reinterpretations and the truncations. */
+inline std::vector<std::string> every_float_instruction() {
+  std::vector<std::string> v;
+  for (const char * ty : {"f32", "f64"}) {
+    for (const char * n : {"add", "sub", "mul", "div", "min", "max", "copysign", "eq", "ne", "lt", "gt",
+             "le", "ge", "neg", "abs", "sqrt", "ceil", "floor", "trunc", "nearest", "convert_i32_s",
+             "convert_i32_u", "convert_i64_s", "convert_i64_u"}) {
+      v.push_back(std::string(ty) + "." + n);
+    }
+  }
+  v.push_back("f32.demote_f64");
+  v.push_back("f64.promote_f32");
+  v.push_back("f32.reinterpret_i32");
+  v.push_back("f64.reinterpret_i64");
+  v.push_back("i32.reinterpret_f32");
+  v.push_back("i64.reinterpret_f64");
+  for (const char * to : {"i32", "i64"}) {
+    for (const char * from : {"f32", "f64"}) {
+      for (const char * sign : {"s", "u"}) {
+        v.push_back(std::string(to) + ".trunc_" + from + "_" + sign);
+        v.push_back(std::string(to) + ".trunc_sat_" + from + "_" + sign);
+      }
+    }
+  }
+  return v;
+}
 
 } // namespace floatfx
 

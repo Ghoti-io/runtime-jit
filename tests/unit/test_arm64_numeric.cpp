@@ -18,15 +18,25 @@
  * Copyright 2026 by Corey Pennycuff
  */
 
+#define FX_ASM_SENTINELS
+#define FX_ASM_CLOBBER
+#include "../calls_asm.h"
 #include "test_helpers.h"
 
+#include "../float_fixture.h"
 #include "../a64_sim.h"
+#include "../ir_eval.h"
 #include "../../src/arm64/asm_internal.h"
+#include "../../src/code/code_internal.h"
 
 #include <cmath>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
+#include <map>
 #include <random>
+#include <unistd.h>
 
 namespace {
 
@@ -785,5 +795,889 @@ TEST(Arm64Sim, ConversionsAgreeWithTheHostOnRandomOperands) {
     ASSERT_EQ(p.run(0, bits(x)).x0, static_cast<uint64_t>(trunc_s64(x))) << x;
   }
 }
+
+/* ---- What was encoded: no callee-saved vector register, for any instruction of the tables ----------
+ *
+ * Only the low 64 bits of v8-v15 are callee-saved under AAPCS64, and the compiled code does not use them at
+ * all. The assembler records the vector registers it encodes; this asks the emitter for arm64, on any host,
+ * for every instruction of the integer and float tables, the helper calls, and a function whose slots are
+ * beyond the short offset forms, and reads the record. The record is also shown able to see: a planted use of
+ * d8 (defect 86) and the assembler tests in test_asm_arm64.cpp that name a high register. */
+
+namespace {
+
+constexpr uint32_t kCalleeSavedV = 0x0000FF00u; // v8 .. v15
+
+/* One instruction as an IR function, owned. */
+struct Built {
+  floatfx::FloatOp op;
+  ~Built() { grjit_function_destroy(op.function); }
+};
+
+/* A function with a helper call of the given float argument pattern and result, so a register past v1 is used. */
+GRJIT_Function * call_with_floats(size_t floats) {
+  B b("callf", 0);
+  std::vector<GRJIT_VReg> p;
+  for (size_t i = 0; i < floats; i++) {
+    p.push_back(b.param(i % 2 == 0 ? GRJIT_TYPE_F64 : GRJIT_TYPE_F32));
+  }
+  GRJIT_VReg r = b.reg(GRJIT_TYPE_F64);
+  b.at(b.block());
+  std::vector<GRJIT_Operand> args;
+  for (GRJIT_VReg v : p) {
+    args.push_back(V(v));
+  }
+  b.call(r, reinterpret_cast<const void *>(&h_six_doubles), args);
+  b.ret(V(r));
+  return b.finish();
+}
+
+/* n F64 registers, each assigned and all summed: slots far past the 32 an `ldur` reaches. */
+GRJIT_Function * many_floats(size_t n) {
+  B b("manyf", 0);
+  GRJIT_VReg x = b.param(GRJIT_TYPE_F64);
+  std::vector<GRJIT_VReg> r;
+  for (size_t i = 0; i < n; i++) {
+    r.push_back(b.reg(GRJIT_TYPE_F64));
+  }
+  GRJIT_VReg acc = b.reg(GRJIT_TYPE_F64);
+  b.at(b.block());
+  for (size_t i = 0; i < n; i++) {
+    b.bin(GRJIT_OP_FADD, r[i], V(x), I(static_cast<int64_t>(floatfx::f64bits(static_cast<double>(i) + 0.25))));
+  }
+  b.mov(acc, I(static_cast<int64_t>(floatfx::f64bits(0.0))));
+  for (size_t i = 0; i < n; i++) {
+    b.bin(GRJIT_OP_FADD, acc, V(acc), V(r[i]));
+  }
+  b.ret(V(acc));
+  return b.finish();
+}
+
+} // namespace
+
+TEST(Arm64Registers, NoCalleeSavedVectorRegisterIsEncodedForAnyInstructionOfTheTablesAndTheScratchOnesAreAllUsed) {
+  uint32_t seen = 0;
+  size_t functions = 0;
+  auto scan = [&](const GRJIT_Function * f, const std::string & what) {
+    GRJIT_Emitted e;
+    ASSERT_EQ(grjit_emit_for(GRJIT_ARCH_ARM64, f, grjit_allocator_default(), nullptr, nullptr, 0, &e), GRJIT_OK)
+        << what;
+    EXPECT_EQ(e.fp_regs_used & kCalleeSavedV, 0u) << what << ": a callee-saved vector register is encoded";
+    EXPECT_EQ(e.fp_regs_used & ~uint32_t{0xFF}, 0u) << what << ": the emitter names v0 to v7 only";
+    seen |= e.fp_regs_used;
+    functions++;
+    grjit_emitted_free(&e);
+  };
+  for (const std::string & instr : floatfx::every_float_instruction()) {
+    Built b;
+    b.op = floatfx::build_any_op(instr);
+    ASSERT_NE(b.op.function, nullptr) << instr;
+    scan(b.op.function, instr);
+  }
+  for (const char * ty : {"i32", "i64"}) {
+    for (const std::string & instr : intfx::all_int_ops(ty)) {
+      intfx::WasmOp op = intfx::build_wasm_op(instr);
+      Fn f(op.function);
+      scan(f, instr);
+    }
+  }
+  for (size_t n = 0; n <= 6; n++) {
+    Fn f(call_with_floats(n));
+    scan(f, "a helper call with " + std::to_string(n) + " float arguments");
+  }
+  {
+    Fn f(many_floats(120));
+    scan(f, "120 float registers");
+  }
+  EXPECT_GT(functions, 140u);
+  EXPECT_EQ(seen, 0x3Fu) << "v0 to v5 are what the emitter uses (six float arguments reach v5), each of them by something";
+}
+
+TEST(Arm64Registers, TheDisassemblerAgreesThatNoCalleeSavedVectorRegisterAppearsInAnyFloatFunction) {
+  const char * tool = std::getenv("GRJIT_AARCH64_OBJDUMP");
+  if (tool == nullptr || *tool == 0) {
+    GTEST_SKIP() << "GRJIT_AARCH64_OBJDUMP is not set: the structural scan above reads the assembler's record; this "
+                    "reads the bytes with the real disassembler, where suite/tools/xarch/jit-arm64.sh sets it";
+  }
+  auto has_callee_saved_vector = [](const std::string & text) {
+    // a token b, h, s, d, q or v followed by 8 to 15 and not part of a longer word
+    for (size_t i = 0; i + 1 < text.size(); i++) {
+      const char c = text[i];
+      if ((c == 'b' || c == 'h' || c == 's' || c == 'd' || c == 'q' || c == 'v') &&
+          (i == 0 || !(std::isalnum(static_cast<unsigned char>(text[i - 1])) || text[i - 1] == '_'))) {
+        size_t j = i + 1;
+        unsigned n = 0, digits = 0;
+        while (j < text.size() && std::isdigit(static_cast<unsigned char>(text[j])) && digits < 3) {
+          n = n * 10 + static_cast<unsigned>(text[j] - '0');
+          j++;
+          digits++;
+        }
+        if (digits > 0 && n >= 8 && n <= 15 && (j == text.size() || !std::isalnum(static_cast<unsigned char>(text[j])))) {
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+  // The checker must be able to fail: it sees d8 and v12.8b, and not x29, #0x8 or 0xd8.
+  EXPECT_TRUE(has_callee_saved_vector("fmov d8, d0"));
+  EXPECT_TRUE(has_callee_saved_vector("cnt v12.8b, v0.8b"));
+  EXPECT_FALSE(has_callee_saved_vector("ldur d0, [x29, #-8]; mov x0, #0xd8; mov w1, #8; fadd d1, d0, d7"));
+  size_t checked = 0;
+  for (const std::string & instr : floatfx::every_float_instruction()) {
+    Built b;
+    b.op = floatfx::build_any_op(instr);
+    GRJIT_Emitted e;
+    ASSERT_EQ(grjit_emit_for(GRJIT_ARCH_ARM64, b.op.function, grjit_allocator_default(), nullptr, nullptr, 0, &e),
+        GRJIT_OK);
+    char path[] = "/tmp/grjit-a64v-XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT_GE(fd, 0);
+    ASSERT_EQ(write(fd, e.bytes, e.size), static_cast<ssize_t>(e.size));
+    close(fd);
+    std::string cmd = std::string(tool) + " -D -b binary -m aarch64 --no-show-raw-insn " + path;
+    FILE * pipe = popen(cmd.c_str(), "r");
+    ASSERT_NE(pipe, nullptr);
+    char line[512];
+    std::string all;
+    while (std::fgets(line, sizeof line, pipe) != nullptr) {
+      std::string l(line);
+      auto colon = l.find(":\t");
+      if (colon != std::string::npos && l.back() != ':') {
+        all += l.substr(colon + 2);
+      }
+    }
+    EXPECT_EQ(pclose(pipe), 0);
+    unlink(path);
+    EXPECT_FALSE(has_callee_saved_vector(all)) << instr << ":\n" << all;
+    EXPECT_FALSE(all.empty()) << instr << ": the disassembly read nothing";
+    grjit_emitted_free(&e);
+    checked++;
+  }
+  EXPECT_EQ(checked, 70u);
+}
+
+/* ---- Compiled functions run by the simulator, on any host -------------------------------------
+ *
+ * The simulator is given a stack full of a pattern, the callee's float result register with noise above bit 31 and
+ * the caller-saved vector registers trashed after a call: an f32 stored with fewer bits than its word, a float
+ * result taken whole, a helper argument in the wrong register each show. These are the tests defects 81, 84 and 85
+ * are caught by on a host that cannot run arm64 code. */
+
+namespace {
+
+struct SimRun {
+  uint32_t exit = 99;
+  std::vector<uint64_t> out;
+};
+
+SimRun sim_function(const GRJIT_Function * f, JitWorld & w, std::vector<uint64_t> args,
+    const std::map<uint64_t, a64sim::Sig> & sigs = {}) {
+  SimRun r;
+  GRJIT_Emitted e{};
+  EXPECT_EQ(grjit_emit_for(GRJIT_ARCH_ARM64, f, grjit_allocator_default(), nullptr, nullptr,
+                grcore_jit_layout()->request_word_offset, &e),
+      GRJIT_OK);
+  r.out.assign(grjit_function_interp_slot_count(f) + 1, 0xDEADBEEFu);
+  args.resize(std::max<size_t>(args.size(), grjit_function_param_count(f)));
+  Config cfg;
+  cfg.code = e.bytes;
+  cfg.size = e.size;
+  cfg.stack_bytes = 1u << 18;
+  cfg.args[0] = reinterpret_cast<uint64_t>(w.ctx);
+  cfg.args[1] = reinterpret_cast<uint64_t>(args.data());
+  cfg.args[2] = reinterpret_cast<uint64_t>(r.out.data());
+  cfg.sigs = sigs;
+  Cpu cpu;
+  Result res = cpu.run(cfg);
+  EXPECT_TRUE(res.ok) << res.error;
+  r.exit = static_cast<uint32_t>(res.x0);
+  grjit_emitted_free(&e);
+  return r;
+}
+
+} // namespace
+
+TEST(Arm64SimCompiled, AnF32ResultIsAWholeWordWithTheUpperHalfZeroOverAStackThatHeldGarbage) {
+  JitWorld w;
+  size_t checked = 0;
+  for (const std::string & instr : floatfx::every_float_instruction()) {
+    Built b;
+    b.op = floatfx::build_any_op(instr);
+    ASSERT_NE(b.op.function, nullptr) << instr;
+    if (b.op.result != GRJIT_TYPE_F32) {
+      continue;
+    }
+    SCOPED_TRACE(instr);
+    for (uint64_t x : {uint64_t{0x3FC00000}, uint64_t{0x40490FDB}, uint64_t{0x80000000}, uint64_t{7}}) {
+      SimRun r = sim_function(b.op.function, w, {x, 0x3F800000u});
+      ASSERT_EQ(r.exit, uint32_t{GRJIT_EXIT_RETURNED});
+      EXPECT_EQ(r.out[0] >> 32, 0u) << "bits 32-63 of an f32 result word";
+      ireval::Result e = ireval::eval(b.op.function, w.ctx, nullptr, {x, 0x3F800000u});
+      EXPECT_TRUE(ireval::same_float(32, r.out[0], e.out[0])) << std::hex << r.out[0] << " vs " << e.out[0];
+      checked++;
+    }
+  }
+  EXPECT_GT(checked, 70u);
+}
+
+TEST(Arm64SimCompiled, AHelperGetsEachFloatAndIntegerArgumentInItsAapcs64RegisterAndAFloatResultIsTakenByItsWidth) {
+  if (!a64sim::kSignatures) {
+    GTEST_SKIP() << "the simulator calls a host function with a signature only where the host's C ABI classifies as AAPCS64 does";
+  }
+  JitWorld w;
+  // h_mix(i64, f64, i64, f32) -> f64: x0, d0, x1, s1
+  {
+    B b("mixed", 0);
+    GRJIT_VReg a = b.param(GRJIT_TYPE_I64), x = b.param(GRJIT_TYPE_F64), c = b.param(GRJIT_TYPE_I64),
+               e = b.param(GRJIT_TYPE_F32), r = b.reg(GRJIT_TYPE_F64);
+    b.at(b.block());
+    b.call(r, reinterpret_cast<const void *>(&h_mix), {V(a), V(x), V(c), V(e)});
+    b.ret(V(r));
+    Fn f(b.finish());
+    std::map<uint64_t, a64sim::Sig> sigs;
+    sigs[reinterpret_cast<uint64_t>(&h_mix)] = sig("idif", 'd');
+    SimRun r2 = sim_function(f, w, {3, floatfx::f64bits(5.0), 7, floatfx::f32bits(0.5f)}, sigs);
+    ASSERT_EQ(r2.exit, uint32_t{GRJIT_EXIT_RETURNED});
+    EXPECT_EQ(dbl(r2.out[0]), 3.0 * 1000 + 5.0 * 100 + 7.0 * 10 + 0.5);
+  }
+  // an f32 result with noise in bits 32-63 of d0 comes out as the low 32 bits only
+  {
+    B b("f32res", 0);
+    GRJIT_VReg a = b.param(GRJIT_TYPE_F32), r = b.reg(GRJIT_TYPE_F32);
+    b.at(b.block());
+    b.call(r, reinterpret_cast<const void *>(&h_float_result), {V(a)});
+    b.ret(V(r));
+    Fn f(b.finish());
+    std::map<uint64_t, a64sim::Sig> sigs;
+    sigs[reinterpret_cast<uint64_t>(&h_float_result)] = sig("f", 'f');
+    SimRun r2 = sim_function(f, w, {floatfx::f32bits(1.25f)}, sigs);
+    ASSERT_EQ(r2.exit, uint32_t{GRJIT_EXIT_RETURNED});
+    EXPECT_EQ(r2.out[0], floatfx::f32bits(2.5f)) << "the word is the float and nothing above it";
+  }
+  // typed immediates as the arguments
+  {
+    B b("imm", 0);
+    GRJIT_VReg r = b.reg(GRJIT_TYPE_F64);
+    b.at(b.block());
+    b.call(r, reinterpret_cast<const void *>(&h_mix),
+        {I(40), grjit_operand_f64_imm(floatfx::f64bits(1.25)), I(2), grjit_operand_f32_imm(static_cast<uint32_t>(floatfx::f32bits(0.5f)))});
+    b.ret(V(r));
+    Fn f(b.finish());
+    std::map<uint64_t, a64sim::Sig> sigs;
+    sigs[reinterpret_cast<uint64_t>(&h_mix)] = sig("idif", 'd');
+    SimRun r2 = sim_function(f, w, {}, sigs);
+    ASSERT_EQ(r2.exit, uint32_t{GRJIT_EXIT_RETURNED});
+    EXPECT_EQ(dbl(r2.out[0]), 40.0 * 1000 + 1.25 * 100 + 2.0 * 10 + 0.5);
+  }
+  // an i32 result with noise in the upper half of x0 is cut
+  {
+    B b("u32", 0);
+    GRJIT_VReg a = b.param(GRJIT_TYPE_I64), r = b.reg(GRJIT_TYPE_I32);
+    b.at(b.block());
+    b.call(r, reinterpret_cast<const void *>(&h_u32), {V(a)});
+    b.ret(V(r));
+    Fn f(b.finish());
+    std::map<uint64_t, a64sim::Sig> sigs;
+    sigs[reinterpret_cast<uint64_t>(&h_u32)] = sig("i", 'w');
+    SimRun r2 = sim_function(f, w, {0x41}, sigs);
+    EXPECT_EQ(r2.out[0], 0x42u) << "the callee leaves noise above bit 31; the slot does not hold it";
+  }
+}
+
+/* ---- Slots beyond the short offset forms, run by the simulator on any host ------------------------ */
+
+TEST(Arm64Offsets, ManyFloatRegistersAreAddressedThroughTheRegisterFormAndEveryValueIsExact) {
+  const size_t n = 120;
+  Fn f(many_floats(n));
+  GRJIT_Emitted e;
+  ASSERT_EQ(grjit_emit_for(GRJIT_ARCH_ARM64, f, grjit_allocator_default(), nullptr, nullptr, 0, &e), GRJIT_OK);
+  // The slots past the first 32 are out of ldur's reach (-256): the register form `ldr d, [x29, x17]` appears.
+  size_t register_forms = 0;
+  for (size_t i = 0; i + 4 <= e.size; i += 4) {
+    uint32_t w;
+    std::memcpy(&w, e.bytes + i, 4);
+    register_forms += (w & 0xFFE0FC00u) == 0xFC606800u && ((w >> 16) & 31) == 17; // ldr/str d, [xn, x17]
+  }
+  EXPECT_GT(register_forms, n) << "a slot beyond the short forms is read through x17";
+  // Run by the simulator, against the evaluator.
+  JitWorld w;
+  Config cfg;
+  std::vector<uint64_t> args = {floatfx::f64bits(1.5)};
+  std::vector<uint64_t> out(grjit_function_interp_slot_count(f) + 1, 0);
+  cfg.code = e.bytes;
+  cfg.size = e.size;
+  cfg.args[0] = reinterpret_cast<uint64_t>(w.ctx);
+  cfg.args[1] = reinterpret_cast<uint64_t>(args.data());
+  cfg.args[2] = reinterpret_cast<uint64_t>(out.data());
+  Cpu cpu;
+  Result r = cpu.run(cfg);
+  ASSERT_TRUE(r.ok) << r.error;
+  ireval::Result want = ireval::eval(f, w.ctx, nullptr, args);
+  ASSERT_EQ(static_cast<uint32_t>(r.x0), want.exit);
+  EXPECT_EQ(out[0], want.out[0]);
+  double expect = 0;
+  for (size_t i = 0; i < n; i++) {
+    expect += 1.5 + (static_cast<double>(i) + 0.25);
+  }
+  EXPECT_EQ(dbl(out[0]), expect);
+  grjit_emitted_free(&e);
+}
+
+/* ---- Real arm64: the AAPCS64 helper probe, the float result with junk above bit 31, FPCR -------- */
+
+#if defined(__aarch64__) && defined(__linux__)
+
+extern "C" {
+uint64_t grjit_test_a64_regs[16]; // x0 to x7, then the low 64 bits of d0 to d7
+uint64_t grjit_test_a64_probe(void);
+float grjit_test_a64_junk_float(void);
+float grjit_test_a64_f32(void);
+double grjit_test_a64_f64(void);
+}
+asm(R"(
+  .text
+  .globl grjit_test_a64_probe
+  .type grjit_test_a64_probe,%function
+grjit_test_a64_probe:
+  adrp x16, grjit_test_a64_regs
+  add x16, x16, :lo12:grjit_test_a64_regs
+  stp x0, x1, [x16, #0]
+  stp x2, x3, [x16, #16]
+  stp x4, x5, [x16, #32]
+  stp x6, x7, [x16, #48]
+  str d0, [x16, #64]
+  str d1, [x16, #72]
+  str d2, [x16, #80]
+  str d3, [x16, #88]
+  str d4, [x16, #96]
+  str d5, [x16, #104]
+  str d6, [x16, #112]
+  str d7, [x16, #120]
+  mov x0, xzr
+  ret
+  .size grjit_test_a64_probe, .-grjit_test_a64_probe
+
+  .globl grjit_test_a64_junk_float
+  .type grjit_test_a64_junk_float,%function
+grjit_test_a64_junk_float:
+  movz x0, #0x3FC0, lsl #16
+  movk x0, #0xBEEF, lsl #32
+  movk x0, #0xDEAD, lsl #48
+  fmov d0, x0
+  ret
+  .size grjit_test_a64_junk_float, .-grjit_test_a64_junk_float
+
+  .globl grjit_test_a64_f32
+  .type grjit_test_a64_f32,%function
+grjit_test_a64_f32:
+  movz x0, #0x4020, lsl #16
+  movk x0, #0xBEEF, lsl #32
+  movk x0, #0xDEAD, lsl #48
+  fmov d0, x0
+  ret
+  .size grjit_test_a64_f32, .-grjit_test_a64_f32
+
+  .globl grjit_test_a64_f64
+  .type grjit_test_a64_f64,%function
+grjit_test_a64_f64:
+  movz x0, #0x0001
+  movk x0, #0xC00C, lsl #48
+  fmov d0, x0
+  ret
+  .size grjit_test_a64_f64, .-grjit_test_a64_f64
+  .section .note.GNU-stack,"",%progbits
+  .text
+)");
+
+namespace {
+
+enum class Arg { I64, F64, F32, I64Imm, F64Imm, F32Imm };
+
+bool is_float_arg(Arg a) { return a == Arg::F64 || a == Arg::F32 || a == Arg::F64Imm || a == Arg::F32Imm; }
+
+uint64_t arg_value(Arg a, size_t i) {
+  switch (a) {
+    case Arg::I64:
+    case Arg::I64Imm: return 0x1111000000000000ull + 0x0101010101ull * (i + 1) + 0x7;
+    case Arg::F64:
+    case Arg::F64Imm: return 0x4000000000000000ull + 0x0001000100010001ull * (i + 1);
+    default: return 0x40000000ull + 0x00010101ull * (i + 1);
+  }
+}
+
+/* Builds f(params...) { call probe(args...) ; ret 0 } for the kinds, runs it, and compares the registers with the
+ * AAPCS64 classification worked out here: integer-class arguments in x0-x5 among themselves, float-class ones in
+ * d0-d7 among themselves (an f32 in the low 32 bits of its register). */
+::testing::AssertionResult probe_pattern(JitWorld & w, const std::vector<Arg> & kinds) {
+  B b("probe", 0);
+  std::vector<GRJIT_VReg> params;
+  std::vector<GRJIT_Operand> args;
+  std::vector<uint64_t> words;
+  for (size_t i = 0; i < kinds.size(); i++) {
+    const uint64_t v = arg_value(kinds[i], i);
+    switch (kinds[i]) {
+      case Arg::I64: params.push_back(b.param(GRJIT_TYPE_I64)); words.push_back(v); break;
+      case Arg::F64: params.push_back(b.param(GRJIT_TYPE_F64)); words.push_back(v); break;
+      case Arg::F32: params.push_back(b.param(GRJIT_TYPE_F32)); words.push_back(v); break;
+      default: break;
+    }
+  }
+  GRJIT_VReg r = b.reg(GRJIT_TYPE_I64);
+  b.at(b.block());
+  size_t next_param = 0;
+  for (size_t i = 0; i < kinds.size(); i++) {
+    const uint64_t v = arg_value(kinds[i], i);
+    switch (kinds[i]) {
+      case Arg::I64Imm: args.push_back(I(static_cast<int64_t>(v))); break;
+      case Arg::F64Imm: args.push_back(grjit_operand_f64_imm(v)); break;
+      case Arg::F32Imm: args.push_back(grjit_operand_f32_imm(static_cast<uint32_t>(v))); break;
+      default: args.push_back(V(params[next_param++])); break;
+    }
+  }
+  b.call(r, reinterpret_cast<const void *>(&grjit_test_a64_probe), args);
+  b.ret(V(r));
+  Fn f(b.finish());
+  char why[256] = {0};
+  if (grjit_function_verify(f, nullptr, why, sizeof why) != GRJIT_OK) {
+    return ::testing::AssertionFailure() << "the verifier refuses the probe: " << why;
+  }
+  Compiled code(f, w.pages());
+  if (!code) {
+    return ::testing::AssertionFailure() << "the compile failed: " << grjit_result_string(code.result);
+  }
+  std::memset(grjit_test_a64_regs, 0xEE, sizeof grjit_test_a64_regs);
+  floatfx::Outcome o = floatfx::run(code.code, w.ctx, words);
+  if (o.fault != 0 || o.exit != GRJIT_EXIT_RETURNED) {
+    return ::testing::AssertionFailure() << "the probe did not return";
+  }
+  size_t ints = 0, floats = 0;
+  char buf[200];
+  for (size_t i = 0; i < kinds.size(); i++) {
+    const uint64_t v = arg_value(kinds[i], i);
+    if (is_float_arg(kinds[i])) {
+      const bool single = kinds[i] == Arg::F32 || kinds[i] == Arg::F32Imm;
+      const uint64_t got = grjit_test_a64_regs[8 + floats];
+      const uint64_t mask = single ? 0xFFFFFFFFull : ~uint64_t{0};
+      if ((got & mask) != (v & mask)) {
+        std::snprintf(buf, sizeof buf, "float argument %zu should be in d%zu as 0x%llx but d%zu holds 0x%llx", i,
+            floats, static_cast<unsigned long long>(v), floats, static_cast<unsigned long long>(got));
+        return ::testing::AssertionFailure() << buf;
+      }
+      floats++;
+    } else {
+      if (grjit_test_a64_regs[ints] != v) {
+        std::snprintf(buf, sizeof buf, "integer argument %zu should be in x%zu as 0x%llx but it holds 0x%llx", i,
+            ints, static_cast<unsigned long long>(v), static_cast<unsigned long long>(grjit_test_a64_regs[ints]));
+        return ::testing::AssertionFailure() << buf;
+      }
+      ints++;
+    }
+  }
+  return ::testing::AssertionSuccess();
+}
+
+} // namespace
+
+TEST(Arm64Helpers, EveryMixOfIntegerAndFloatArgumentsArrivesInItsRegisterByAapcs64Classification) {
+  GRJIT_REQUIRE_BACKEND();
+  JitWorld w;
+  size_t patterns = 0;
+  for (size_t n = 0; n <= 6; n++) {
+    size_t total = 1;
+    for (size_t i = 0; i < n; i++) {
+      total *= 3;
+    }
+    for (size_t code = 0; code < total; code++) {
+      std::vector<Arg> kinds;
+      size_t c = code;
+      for (size_t i = 0; i < n; i++) {
+        kinds.push_back(c % 3 == 0 ? Arg::I64 : c % 3 == 1 ? Arg::F64 : Arg::F32);
+        c /= 3;
+      }
+      ASSERT_TRUE(probe_pattern(w, kinds)) << "pattern " << patterns;
+      patterns++;
+    }
+  }
+  for (size_t n = 1; n <= 4; n++) {
+    size_t total = 1;
+    for (size_t i = 0; i < n; i++) {
+      total *= 6;
+    }
+    for (size_t code = 0; code < total; code++) {
+      std::vector<Arg> kinds;
+      size_t c = code;
+      for (size_t i = 0; i < n; i++) {
+        kinds.push_back(static_cast<Arg>(c % 6));
+        c /= 6;
+      }
+      ASSERT_TRUE(probe_pattern(w, kinds)) << "pattern " << patterns;
+      patterns++;
+    }
+  }
+  std::printf("float helper ABI (arm64): %zu argument patterns checked against the AAPCS64 classification\n", patterns);
+  EXPECT_GT(patterns, 2000u);
+}
+
+TEST(Arm64Helpers, TheNamedClassificationFromTheStoryComesOutAsStated) {
+  GRJIT_REQUIRE_BACKEND();
+  JitWorld w;
+  // (i64, f64, i64, f32) is x0, d0, x1, s1.
+  ASSERT_TRUE(probe_pattern(w, {Arg::I64, Arg::F64, Arg::I64, Arg::F32}));
+  EXPECT_EQ(grjit_test_a64_regs[0], arg_value(Arg::I64, 0));
+  EXPECT_EQ(grjit_test_a64_regs[8], arg_value(Arg::F64, 1));
+  EXPECT_EQ(grjit_test_a64_regs[1], arg_value(Arg::I64, 2));
+  EXPECT_EQ(grjit_test_a64_regs[9] & 0xFFFFFFFFull, arg_value(Arg::F32, 3));
+  ASSERT_TRUE(probe_pattern(w, {Arg::F64, Arg::F64, Arg::F64, Arg::F64, Arg::F64, Arg::F64}));
+  ASSERT_TRUE(probe_pattern(w, {Arg::F64, Arg::F32, Arg::F64, Arg::F32, Arg::F64, Arg::F32}));
+  ASSERT_TRUE(probe_pattern(w, {Arg::F32Imm, Arg::F64Imm, Arg::F32Imm, Arg::F64Imm, Arg::I64Imm, Arg::F64}));
+}
+
+TEST(Arm64Helpers, AFloatResultIsTakenFromD0ByItsOwnWidthWhateverIsAboveBit31) {
+  GRJIT_REQUIRE_BACKEND();
+  JitWorld w;
+  struct Case {
+    const void * fn;
+    GRJIT_Type result;
+    uint64_t want;
+  };
+  const Case cases[] = {
+      {reinterpret_cast<const void *>(&grjit_test_a64_junk_float), GRJIT_TYPE_F32, 0x3FC00000u},
+      {reinterpret_cast<const void *>(&grjit_test_a64_f32), GRJIT_TYPE_F32, 0x40200000u},
+      {reinterpret_cast<const void *>(&grjit_test_a64_f64), GRJIT_TYPE_F64, 0xC00C000000000001ull},
+  };
+  for (const Case & c : cases) {
+    SCOPED_TRACE(c.result);
+    B b("result", 0);
+    GRJIT_VReg r = b.reg(c.result);
+    b.at(b.block());
+    b.call(r, c.fn, {});
+    b.ret(V(r)); // the call's own result word is returned: a MOVE would cut an f32 and hide a result taken whole
+    Fn f(b.finish());
+    Compiled code(f, w.pages());
+    ASSERT_TRUE(code);
+    EXPECT_EQ(floatfx::run(code.code, w.ctx, {}).out[0], c.want) << "an f32 is its low 32 bits, zero-extended";
+  }
+  B b("sum", 0);
+  GRJIT_VReg r = b.reg(GRJIT_TYPE_F32), t = b.reg(GRJIT_TYPE_F32);
+  b.at(b.block());
+  b.call(r, reinterpret_cast<const void *>(&grjit_test_a64_junk_float), {});
+  b.bin(GRJIT_OP_FADD, t, V(r), V(r));
+  b.ret(V(t));
+  Fn f(b.finish());
+  Compiled code(f, w.pages());
+  ASSERT_TRUE(code);
+  EXPECT_EQ(floatfx::run(code.code, w.ctx, {}).out[0], uint64_t{0x40400000});
+}
+
+TEST(Arm64Fpcr, TheHostRunsWithTheDefaultFpcrAndCompiledFloatCodeLeavesItAlone) {
+  GRJIT_REQUIRE_BACKEND();
+  uint64_t before, after;
+  asm volatile("mrs %0, fpcr" : "=r"(before));
+  EXPECT_EQ(before & 0x07C09F00u, 0u) << "RMode, FZ, DN, AHP and the trap enables are clear: the default the compiled code assumes";
+  JitWorld w;
+  Built b;
+  b.op = floatfx::build_any_op("f64.sqrt");
+  Compiled code(b.op.function, w.pages());
+  ASSERT_TRUE(code);
+  floatfx::Outcome o = floatfx::run(code.code, w.ctx, {floatfx::f64bits(2.25)});
+  EXPECT_EQ(o.out[0], floatfx::f64bits(1.5));
+  asm volatile("mrs %0, fpcr" : "=r"(after));
+  EXPECT_EQ(after, before) << "compiled code never writes FPCR";
+}
+
+#else // not arm64 Linux: the same tests, skipped by name
+
+TEST(Arm64Helpers, EveryMixOfIntegerAndFloatArgumentsArrivesInItsRegisterByAapcs64Classification) {
+  GTEST_SKIP() << "the AAPCS64 helper ABI is checked against an AArch64 assembly probe, on arm64 Linux only";
+}
+
+TEST(Arm64Helpers, TheNamedClassificationFromTheStoryComesOutAsStated) {
+  GTEST_SKIP() << "arm64 Linux only (an AAPCS64 probe)";
+}
+
+TEST(Arm64Helpers, AFloatResultIsTakenFromD0ByItsOwnWidthWhateverIsAboveBit31) {
+  GTEST_SKIP() << "arm64 Linux only (an AAPCS64 probe)";
+}
+
+TEST(Arm64Fpcr, TheHostRunsWithTheDefaultFpcrAndCompiledFloatCodeLeavesItAlone) {
+  GTEST_SKIP() << "FPCR is read on an arm64 host only";
+}
+
+#endif // arm64 Linux
+
+/* ---- The callee-saved vector registers: sentinels ---------------------------------------------------
+ *
+ * A caller sets the low halves of d8-d15 (and x19-x29) to known values, runs compiled code that uses every family
+ * of float operation, and reads them back. Only the low 64 bits are asserted: the upper halves of the v registers
+ * are caller-saved, and a test that compared 128 bits would fail on correct code. The runs: a return, a guard exit,
+ * a poll whose slow path runs, a poll the helper refuses, and a helper that trashes every caller-saved vector
+ * register (a conforming callee: it saves and restores the callee-saved ones it uses) with a value live across it,
+ * which is exact because it is in a slot. A sentinel cannot show that code never uses a callee-saved register, only
+ * that it did not change one on the paths run; the structural scan above shows never, and the sentinel shows the scan
+ * is looking at the right registers (defect 86 is caught by both). */
+
+#if FX_HAVE_CALLS_ASM && FX_ASM_AARCH64
+
+namespace {
+
+/* Takes a double, trashes every caller-saved vector register, saves and restores the callee-saved ones it
+ * clobbers (the compiler does, being told), and returns the double. */
+__attribute__((noinline)) double fp_clobber(double x) {
+  double r = x;
+  asm volatile(
+      "movi v0.16b, #0x5A\n movi v1.16b, #0x5A\n movi v2.16b, #0x5A\n movi v3.16b, #0x5A\n"
+      "movi v4.16b, #0x5A\n movi v5.16b, #0x5A\n movi v6.16b, #0x5A\n movi v7.16b, #0x5A\n"
+      "movi v8.16b, #0x5A\n movi v9.16b, #0x5A\n movi v10.16b, #0x5A\n movi v11.16b, #0x5A\n"
+      "movi v12.16b, #0x5A\n movi v13.16b, #0x5A\n movi v14.16b, #0x5A\n movi v15.16b, #0x5A\n"
+      "movi v16.16b, #0x5A\n movi v17.16b, #0x5A\n movi v18.16b, #0x5A\n movi v19.16b, #0x5A\n"
+      "movi v20.16b, #0x5A\n movi v21.16b, #0x5A\n movi v22.16b, #0x5A\n movi v23.16b, #0x5A\n"
+      "movi v24.16b, #0x5A\n movi v25.16b, #0x5A\n movi v26.16b, #0x5A\n movi v27.16b, #0x5A\n"
+      "movi v28.16b, #0x5A\n movi v29.16b, #0x5A\n movi v30.16b, #0x5A\n movi v31.16b, #0x5A\n"
+      :
+      :
+      : "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15", "v16",
+        "v17", "v18", "v19", "v20", "v21", "v22", "v23", "v24", "v25", "v26", "v27", "v28", "v29", "v30", "v31",
+        "memory");
+  return r;
+}
+
+uint32_t g_answer = 0;
+int g_polls = 0;
+uint32_t sentinel_poll(void * ctx, uint64_t, uint64_t) {
+  g_polls++;
+  (void)ctx;
+  return g_answer;
+}
+
+const GRCORE_Key kSentinelKey = GRCORE_KEY_INIT("a64sentinel", GRCORE_CARDINALITY_MANY, GRCORE_PHASE_NONE, nullptr,
+    nullptr, nullptr, nullptr, nullptr);
+
+/* f(a: f64, b: f32, mode: i64, p: ptr) -> i64: every family of float operation, a store and a load of each width,
+ * a helper that trashes the vector registers with a float live across it, a poll and a guard on `mode`. The result
+ * folds every float (the inputs are finite and no operation makes a NaN, so the bits are fixed). */
+GRJIT_Function * sentinel_function() {
+  using namespace floatfx;
+  B b("sentinel", 2);
+  b.poll_helper(sentinel_poll);
+  GRJIT_VReg a = b.param(GRJIT_TYPE_F64), f32 = b.param(GRJIT_TYPE_F32), mode = b.param(GRJIT_TYPE_I64),
+             p = b.param(GRJIT_TYPE_PTR);
+  auto F = [&] { return b.reg(GRJIT_TYPE_F64); };
+  auto S = [&] { return b.reg(GRJIT_TYPE_F32); };
+  GRJIT_VReg t1 = F(), t2 = F(), t3 = F(), t4 = F(), m1 = F(), m2 = F(), cs = F(), ng = F(), ab = F(), sq = F(),
+             c1 = F(), c2 = F(), c3 = F(), c4 = F(), j = F(), pro = F(), rf = F(), kept = F(), after = F(), ld = F();
+  GRJIT_VReg s1 = S(), s2 = S(), s3 = S(), s4 = S(), n1 = S(), n2 = S(), dem = S(), k = S(), sl = S(), sq32 = S(),
+             sc = S(), sf = S(), st = S(), sn = S();
+  GRJIT_VReg lt = b.reg(GRJIT_TYPE_I32), ge = b.reg(GRJIT_TYPE_I32), i = b.reg(GRJIT_TYPE_I64),
+             u = b.reg(GRJIT_TYPE_I64), ri = b.reg(GRJIT_TYPE_I64), i32 = b.reg(GRJIT_TYPE_I32),
+             u32 = b.reg(GRJIT_TYPE_I32), r32 = b.reg(GRJIT_TYPE_I32), tr = b.reg(GRJIT_TYPE_I32),
+             l = b.reg(GRJIT_TYPE_I32), h = b.reg(GRJIT_TYPE_I32), ok = b.reg(GRJIT_TYPE_I32),
+             ld32 = b.reg(GRJIT_TYPE_F32);
+  GRJIT_VReg acc = b.reg(GRJIT_TYPE_I64), w = b.reg(GRJIT_TYPE_I64);
+  b.at(b.block());
+  auto state = [&] {
+    return std::vector<GRJIT_FrameSlot>{grjit_frame_slot_vreg(mode), grjit_frame_slot_vreg(a)};
+  };
+  // arithmetic, min, max, copysign, neg, abs, sqrt, the four roundings
+  b.bin(GRJIT_OP_FADD, t1, V(a), V(a));
+  b.bin(GRJIT_OP_FSUB, t2, V(t1), V(a));
+  b.bin(GRJIT_OP_FMUL, t3, V(t2), V(a));
+  b.bin(GRJIT_OP_FDIV, t4, V(t3), V(a));
+  b.bin(GRJIT_OP_FMIN, m1, V(t4), V(a));
+  b.bin(GRJIT_OP_FMAX, m2, V(t4), V(a));
+  b.bin(GRJIT_OP_FCOPYSIGN, cs, V(m1), V(a));
+  b.un(GRJIT_OP_FNEG, ng, V(cs));
+  b.un(GRJIT_OP_FABS, ab, V(ng));
+  b.un(GRJIT_OP_FSQRT, sq, V(ab));
+  b.un(GRJIT_OP_FCEIL, c1, V(sq));
+  b.un(GRJIT_OP_FFLOOR, c2, V(sq));
+  b.un(GRJIT_OP_FTRUNC, c3, V(sq));
+  b.un(GRJIT_OP_FNEAREST, c4, V(sq));
+  // the single-precision twins
+  b.bin(GRJIT_OP_FADD, s1, V(f32), V(f32));
+  b.bin(GRJIT_OP_FSUB, s2, V(s1), V(f32));
+  b.bin(GRJIT_OP_FMUL, s3, V(s2), V(f32));
+  b.bin(GRJIT_OP_FDIV, s4, V(s3), V(f32));
+  b.bin(GRJIT_OP_FMIN, n1, V(s4), V(f32));
+  b.bin(GRJIT_OP_FMAX, n2, V(s4), V(f32));
+  b.bin(GRJIT_OP_FCOPYSIGN, sc, V(n1), V(f32));
+  b.un(GRJIT_OP_FSQRT, sq32, V(n2));
+  b.un(GRJIT_OP_FNEAREST, sn, V(sq32));
+  b.un(GRJIT_OP_FNEG, sf, V(sc));
+  b.un(GRJIT_OP_FABS, st, V(sf));
+  b.un(GRJIT_OP_FFLOOR, sl, V(st));
+  // comparisons, conversions both ways, demote, promote, reinterpret, the saturating and the guarded truncation
+  b.cmp(GRJIT_CMP_LT, lt, V(a), V(t1));
+  b.cmp(GRJIT_CMP_GE, ge, V(f32), V(s1));
+  b.un(GRJIT_OP_TRUNC_SAT_S, i, V(a));
+  b.un(GRJIT_OP_CONVERT_S, j, V(i));
+  b.un(GRJIT_OP_TRUNC_SAT_U, u, V(f32));
+  b.un(GRJIT_OP_CONVERT_U, k, V(u));
+  b.un(GRJIT_OP_DEMOTE, dem, V(a));
+  b.un(GRJIT_OP_PROMOTE, pro, V(f32));
+  b.un(GRJIT_OP_REINTERPRET, ri, V(a));
+  b.un(GRJIT_OP_REINTERPRET, rf, V(ri));
+  b.un(GRJIT_OP_TRUNC_SAT_S, i32, V(f32));
+  b.un(GRJIT_OP_CONVERT_U, after, V(i32));
+  b.un(GRJIT_OP_TRUNC_SAT_U, u32, V(a));
+  b.un(GRJIT_OP_REINTERPRET, r32, V(f32));
+  b.cmp(GRJIT_CMP_GT, l, V(a), grjit_operand_f64_imm(f64bits(-2147483649.0)));
+  b.cmp(GRJIT_CMP_LT, h, V(a), grjit_operand_f64_imm(f64bits(2147483648.0)));
+  b.bin(GRJIT_OP_AND, ok, V(l), V(h));
+  b.guard(V(ok), {kTrapFunction, kSiteIntegerOverflow}, state());
+  b.un(GRJIT_OP_TRUNC_S, tr, V(a));
+  // a store and a load of each width
+  b.store(p, 0, 64, V(c4));
+  b.store(p, 8, 32, V(sn));
+  b.load(ld, p, 0, 64);
+  b.load(ld32, p, 8, 32);
+  // a float live across a helper that trashes every caller-saved vector register
+  b.mov(kept, V(t4));
+  b.call(c1, reinterpret_cast<const void *>(&fp_clobber), {V(c1)});
+  // a poll, whose slow path calls the helper, and a guard on the mode
+  b.poll({7, 1}, state());
+  b.guard(V(mode), {7, 2}, state());
+  // fold: every register through its bits
+  auto fold64 = [&](GRJIT_VReg f) {
+    GRJIT_VReg bits = b.reg(GRJIT_TYPE_I64);
+    b.un(GRJIT_OP_REINTERPRET, bits, V(f));
+    b.bin(GRJIT_OP_ROTL, acc, V(acc), I(5));
+    b.bin(GRJIT_OP_XOR, acc, V(acc), V(bits));
+  };
+  auto fold32 = [&](GRJIT_VReg f) {
+    GRJIT_VReg bits = b.reg(GRJIT_TYPE_I32), wide = b.reg(GRJIT_TYPE_I64);
+    b.un(GRJIT_OP_REINTERPRET, bits, V(f));
+    b.un(GRJIT_OP_EXTEND_U, wide, V(bits));
+    b.bin(GRJIT_OP_ROTL, acc, V(acc), I(7));
+    b.bin(GRJIT_OP_XOR, acc, V(acc), V(wide));
+  };
+  auto foldi = [&](GRJIT_VReg v, bool wide32) {
+    GRJIT_VReg x = v;
+    if (wide32) {
+      x = b.reg(GRJIT_TYPE_I64);
+      b.un(GRJIT_OP_EXTEND_U, x, V(v));
+    }
+    b.bin(GRJIT_OP_ROTL, acc, V(acc), I(3));
+    b.bin(GRJIT_OP_XOR, acc, V(acc), V(x));
+  };
+  b.cnst(acc, 0);
+  for (GRJIT_VReg f : {t1, t2, t3, t4, m1, m2, cs, ng, ab, sq, c1, c2, c3, c4, j, pro, rf, kept, after, ld}) {
+    fold64(f);
+  }
+  for (GRJIT_VReg f : {s1, s2, s3, s4, n1, n2, dem, k, sl, sq32, sc, sf, st, sn, ld32}) {
+    fold32(f);
+  }
+  foldi(i, false);
+  foldi(u, false);
+  foldi(ri, false);
+  foldi(lt, true);
+  foldi(ge, true);
+  foldi(i32, true);
+  foldi(u32, true);
+  foldi(r32, true);
+  foldi(tr, true);
+  (void)w;
+  b.ret(V(acc));
+  return b.finish();
+}
+
+struct SentinelWorld : JitWorld {
+  GRCORE_RequestKind kind = 0;
+  GRCORE_Port * port = nullptr;
+  SentinelWorld() {
+    EXPECT_EQ(grcore_context_request_kind(ctx, &kSentinelKey, &kind), GRCORE_OK);
+    EXPECT_EQ(grcore_context_port(ctx, &port), GRCORE_OK);
+    g_polls = 0;
+    g_answer = 0;
+  }
+  ~SentinelWorld() { grcore_port_release(port); }
+  void post() { EXPECT_EQ(grcore_port_post(port, kind), GRCORE_OK); }
+};
+
+struct SentinelRun {
+  uint32_t exit = 99;
+  std::vector<uint64_t> out;
+  bool intact = true;
+};
+
+/* Runs `code` through the sentinel trampoline and checks every sentinel (x19-x29 and the low halves of d8-d15). */
+SentinelRun run_with_sentinels(JitWorld & w, const GRJIT_Code * code, std::vector<uint64_t> args, const char * what) {
+  SentinelRun r;
+  r.out.assign(grjit_code_out_words(code), 0xDEADBEEFu);
+  args.resize(std::max<size_t>(args.size(), grjit_code_param_count(code)));
+  uint64_t regs[fx::kSentinelCount];
+  for (size_t i = 0; i < fx::kSentinelCount; i++) {
+    regs[i] = fx::sentinel_value(i);
+  }
+  r.exit = fx_call_with_sentinels(grjit_code_entry(code), w.ctx, args.data(), r.out.data(), regs);
+  for (size_t i = 0; i < fx::kSentinelCount; i++) {
+    if (regs[i] != fx::sentinel_value(i)) {
+      r.intact = false;
+      ADD_FAILURE() << fx::sentinel_name(i) << " changed after " << what << ": " << std::hex << regs[i]
+                    << ", it was " << fx::sentinel_value(i);
+    }
+  }
+  return r;
+}
+
+} // namespace
+
+TEST(Arm64Sentinels, FloatCodeLeavesEveryCalleeSavedRegisterAloneOnAReturnAGuardExitAPollAndATrashingHelper) {
+  GRJIT_REQUIRE_BACKEND();
+  SentinelWorld w;
+  Fn f(sentinel_function());
+  char why[256] = {0};
+  ASSERT_EQ(grjit_function_verify(f, nullptr, why, sizeof why), GRJIT_OK) << why;
+  Compiled c(f, w.pages());
+  ASSERT_TRUE(c) << grjit_result_string(c.result);
+  alignas(16) uint8_t mem[64] = {0};
+  const std::vector<uint64_t> args = {floatfx::f64bits(2.75), floatfx::f32bits(1.5f), 1,
+      reinterpret_cast<uint64_t>(mem)};
+  // 1. a return, with the poll fast path: the answer is the evaluator's
+  {
+    SentinelRun r = run_with_sentinels(w, c.code, args, "a return");
+    ASSERT_EQ(r.exit, uint32_t{GRJIT_EXIT_RETURNED});
+    EXPECT_TRUE(r.intact);
+    alignas(16) uint8_t mem2[64] = {0};
+    std::vector<uint64_t> same = args;
+    same[3] = reinterpret_cast<uint64_t>(mem2);
+    ireval::Result e = ireval::eval(f, w.ctx, nullptr, same);
+    ASSERT_EQ(e.exit, uint32_t{GRJIT_EXIT_RETURNED});
+    EXPECT_EQ(r.out[0], e.out[0]) << "the helper that trashed the vector registers cost the live float nothing";
+    EXPECT_EQ(g_polls, 0);
+  }
+  // 2. a guard exit (mode 0)
+  {
+    std::vector<uint64_t> zero = args;
+    zero[2] = 0;
+    SentinelRun r = run_with_sentinels(w, c.code, zero, "a guard exit");
+    EXPECT_EQ(r.exit, uint32_t{GRJIT_EXIT_DEOPT});
+    EXPECT_TRUE(r.intact);
+  }
+  // 3. the poll's slow path runs (a request pending) and the helper lets the function go on
+  {
+    w.post();
+    SentinelRun r = run_with_sentinels(w, c.code, args, "a poll's slow path");
+    EXPECT_EQ(r.exit, uint32_t{GRJIT_EXIT_RETURNED});
+    EXPECT_TRUE(r.intact);
+    EXPECT_EQ(g_polls, 1) << "the slow path ran";
+  }
+  // 4. the helper refuses
+  {
+    g_answer = 7;
+    SentinelRun r = run_with_sentinels(w, c.code, args, "a poll refusal");
+    EXPECT_EQ(r.exit, uint32_t{GRJIT_EXIT_REFUSED});
+    EXPECT_TRUE(r.intact);
+    EXPECT_EQ(g_polls, 2);
+  }
+}
+
+#else
+
+TEST(Arm64Sentinels, FloatCodeLeavesEveryCalleeSavedRegisterAloneOnAReturnAGuardExitAPollAndATrashingHelper) {
+  GTEST_SKIP() << "the sentinel caller loads and reads d8-d15 and x19-x29: arm64 Linux only";
+}
+
+#endif // FX_HAVE_CALLS_ASM && FX_ASM_AARCH64
 
 GRJIT_TEST_MAIN()

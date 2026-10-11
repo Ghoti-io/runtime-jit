@@ -24,3 +24,15 @@
 73|73|testInt_ir|IntRun.EveryOperationGivesTheWorkedAnswerAndAnI32ResultIsZeroExtended||div_u and rem_u emitted signed
 74|74|testInt_ir|IntRun.DivideByZeroAndSignedOverflowFireTheirGuardsAndMinRemMinusOneIsZero||a guard emitted as nothing: arm64 never faults, so a zero divisor gives 0 and the trap never fires
 75|75|testInt_ir|IntRun.EveryOperationGivesTheWorkedAnswerAndAnI32ResultIsZeroExtended||rem_s with the dividend and the divisor swapped in its msub
+76|76|testFloat_ir|FloatRun.EveryOperationGivesTheWorkedAnswerFromTheCodeAndFromTheEvaluator||the operands of a float subtraction swapped
+77|77|testFloat_ir|FloatRun.EveryOperationGivesTheWorkedAnswerFromTheCodeAndFromTheEvaluator||the operands of a float division swapped
+78|78|testFloat_ir|FloatRun.EveryOperationGivesTheWorkedAnswerFromTheCodeAndFromTheEvaluator||float lt and le compared with the integer lt and le conditions (true for a NaN)
+79|79|testFloat_ir|FloatRun.EveryOperationGivesTheWorkedAnswerFromTheCodeAndFromTheEvaluator||min and max by fminnm and fmaxnm (a quiet NaN is ignored)
+80|80|testFloat_ir|FloatRun.EveryOperationGivesTheWorkedAnswerFromTheCodeAndFromTheEvaluator||nearest by frinta (halves away from zero)
+81|81|testFloat_ir|FloatRun.AnF32ResultIsAWholeWordWithTheUpperHalfZeroOverAStackThatHeldGarbage||an f32 result stored with str s: the upper half of its slot keeps what it held
+82|82|testFloat_ir|FloatRun.EveryOperationGivesTheWorkedAnswerFromTheCodeAndFromTheEvaluator||trunc_sat_u by the signed conversion
+83|83|testFloat_ir|FloatRun.EveryOperationGivesTheWorkedAnswerFromTheCodeAndFromTheEvaluator||convert_u from 64 bits by scvtf
+84|84|testArm64_numeric|Arm64Helpers.EveryMixOfIntegerAndFloatArgumentsArrivesInItsRegisterByAapcs64Classification||the float and integer arguments of a helper numbered jointly, as Win64 numbers them
+85|85|testArm64_numeric|Arm64Helpers.AFloatResultIsTakenFromD0ByItsOwnWidthWhateverIsAboveBit31||an f32 helper result taken as fmov x0, d0 (the junk above bit 31 lands in the slot)
+86|86|testArm64_numeric|Arm64Sentinels.FloatCodeLeavesEveryCalleeSavedRegisterAloneOnAReturnAGuardExitAPollAndATrashingHelper||a float sequence that changes d8 and does not restore it
+87|87|testFloat_ir|FloatCalls.AFloatGoesThroughACallInARegisterAndOnTheStackAndComesBackExact||an i32 or f32 parameter not cut to 32 bits on entry to a callable function
