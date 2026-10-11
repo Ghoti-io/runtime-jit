@@ -156,6 +156,7 @@ struct SimTarget {
     a64sim::Config cfg;
     cfg.code = e.bytes;
     cfg.size = e.size;
+    cfg.stack_bytes = 1u << 18; // the generated functions are small and shallow: a fresh stack per run
     cfg.args[0] = reinterpret_cast<uint64_t>(w.ctx);
     cfg.args[1] = reinterpret_cast<uint64_t>(args.data());
     cfg.args[2] = reinterpret_cast<uint64_t>(r.out.data());
@@ -516,12 +517,52 @@ IntProgram generate_int_program(IntGen & g) {
 
 } // namespace
 
+/* What the program run by either target did, compared with the evaluator's: the exit, the result, and
+ * for a guard that fired the frame state and the guard's identity. `float_slot` is the index of a frame
+ * state slot that is a float, compared with any two NaNs equal (none for the integer programs). */
+static bool same_as_evaluator(const GRJIT_Function * f, uint64_t seed, uint32_t exit,
+    const std::vector<uint64_t> & out, const ireval::Result & eval, const GRCORE_CodeMeta * meta,
+    int float_slot, size_t * returned, size_t * deopted) {
+  bool ok = true;
+  if (exit != eval.exit) {
+    ADD_FAILURE() << describe(f, seed, "different exits");
+    return false;
+  }
+  if (exit == GRJIT_EXIT_RETURNED) {
+    if (out[0] != eval.out[0]) {
+      ADD_FAILURE() << describe(f, seed, "different results");
+      ok = false;
+    }
+    ++*returned;
+    return ok;
+  }
+  if (exit != GRJIT_EXIT_DEOPT) {
+    ADD_FAILURE() << describe(f, seed, "an exit that is neither a return nor a guard");
+    return false;
+  }
+  const size_t slots = grjit_function_interp_slot_count(f);
+  for (size_t i = 0; i < slots; i++) {
+    const bool same = static_cast<int>(i) == float_slot ? ireval::same_float(64, out[i], eval.out[i])
+                                                        : out[i] == eval.out[i];
+    if (!same) {
+      ADD_FAILURE() << describe(f, seed, "different frame state slot " + std::to_string(i));
+      ok = false;
+    }
+  }
+  const GRCORE_CodeSite * site = grcore_codemeta_find(meta, static_cast<uint32_t>(out[slots]));
+  if (site == nullptr || site->identity.offset != eval.guard_identity.offset) {
+    ADD_FAILURE() << describe(f, seed, "different guard");
+    ok = false;
+  }
+  ++*deopted;
+  return ok;
+}
+
 TEST(Differential, GeneratedIntegerProgramsRunTheSameCompiledAndEvaluated) {
-#if defined(__x86_64__) && defined(__linux__)
-  GRJIT_REQUIRE_BACKEND();
-#else
-  GTEST_SKIP() << "the integer operations are emitted for x86-64 SysV only; the arm64 and Win64 refusals are tested in testInt_ir";
+#if defined(_WIN32)
+  GTEST_SKIP() << "the Win64 flavour emits the integer operations in a later commit of story 5";
 #endif
+  GRJIT_REQUIRE_BACKEND();
   JitWorld w;
   size_t returned = 0, deopted = 0, divisions = 0, const_divisors = 0, const_dividends = 0,
          negative_i32_imms = 0, multi_block = 0, arm_programs = 0;
@@ -605,12 +646,55 @@ TEST(Differential, GeneratedIntegerProgramsRunTheSameCompiledAndEvaluated) {
   // the run counts once per mask.
   EXPECT_GT(returned, 11000u * masks);
   EXPECT_GT(deopted, 5000u * masks);
-  EXPECT_GT(arm_programs, 0u) << "the integer programs reach clz, ctz or popcnt with a feature allowed";
+  if (featfx::detected() != GRJIT_FEATURES_NONE) {
+    EXPECT_GT(arm_programs, 0u) << "the integer programs reach clz, ctz or popcnt with a feature allowed";
+  }
   EXPECT_GT(divisions, 21000u);
   EXPECT_GT(const_divisors, 5200u);
   EXPECT_GT(const_dividends, 4900u);
   EXPECT_GT(negative_i32_imms, 5700u);
   EXPECT_GT(multi_block, 2200u);
+}
+
+/* The same programs, the same argument sets, against the same evaluator, with the arm64 code the emitter
+ * makes for each executed by the simulator in tests/a64_sim.h on any host. It is a dev loop and an extra
+ * catch, not the verdict: qemu-aarch64 and the Raspberry Pi run the real thing (the native test above, on
+ * an arm64 host). */
+TEST(Differential, GeneratedIntegerProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluated) {
+  JitWorld w;
+  size_t returned = 0, deopted = 0;
+  for (uint64_t seed = 1; seed <= 3000; seed++) {
+    IntGen g(seed * 0x9E3779B97F4A7C15ull);
+    IntProgram prog = generate_int_program(g);
+    Fn f(prog.f);
+    char why[256] = {0};
+    ASSERT_EQ(grjit_function_verify(f, nullptr, why, sizeof why), GRJIT_OK)
+        << describe(f, seed, std::string("the generator made a function the verifier refuses: ") + why);
+    // The same six argument sets as the native test draws, in the same order.
+    std::vector<std::vector<uint64_t>> arg_sets;
+    for (int run = 0; run < 6; run++) {
+      std::vector<uint64_t> args;
+      for (size_t i = 0; i < prog.params; i++) {
+        uint64_t v = IntGen::edges(i < 3).at(g.pick(IntGen::edges(i < 3).size()));
+        if (i < 3 && g.pick(2) == 0) {
+          v |= (g.rng() | 1) << 32; // an i32 argument with garbage above bit 31: the entry masks it
+        }
+        args.push_back(v);
+      }
+      arg_sets.push_back(args);
+    }
+    SimTarget c(f, w);
+    ASSERT_TRUE(c.ok()) << describe(f, seed, c.why());
+    for (const std::vector<uint64_t> & args : arg_sets) {
+      SimTarget::Run run = c.run(w, args);
+      ireval::Result eval = ireval::eval(f, w.ctx, nullptr, args);
+      ASSERT_TRUE(same_as_evaluator(f, seed, run.exit, run.out, eval, c.meta(), -1, &returned, &deopted))
+          << "(the arm64 code, simulated)";
+    }
+  }
+  std::printf("integer differential, arm64 simulated: %zu returned, %zu guard exits\n", returned, deopted);
+  EXPECT_GT(returned, 11000u);
+  EXPECT_GT(deopted, 5000u);
 }
 
 /* ---- Generated float programs (spec-runtime-float, story 3) -----------------------------------

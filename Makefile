@@ -805,7 +805,12 @@ endif
 # feature never runs unless the feature is masked off, so the tests that catch them run the masked arm
 # explicitly), 68: the stamp's names in the wrong order with one dropped (56 and 59 are also caught by
 # tools/x86-cpu-plants.txt under qemu CPU models, by suite/tools/xarch/jit-x86-cpu.sh in the workspace), and the test
-# that is meant to catch it is built and run there. Defects 20 to 29 are the arm64
+# that is meant to catch it is built and run there. Defects 69 to 75 are the arm64 emitter's integer
+# operations (an i32 add, subtract and multiply in 64 bits, an i32 shift or rotate by the 64-bit form, an ordered i32
+# compare on the whole register, `ctz` without `rbit`, an unsigned division emitted signed, a guard emitted as
+# nothing, a remainder's `msub` with the dividend and divisor swapped): the arm64 code the emitter makes is
+# executed by the simulator on this host, so the differential catches them here, and the same defects are caught
+# by real arm64 code in tools/arm64-plants.txt. Defects 20 to 29 are the arm64
 # emitter's own versions of the call, tail-call and native ones (the walk start stored
 # after a native call, a native's stack area not rounded or not popped, a callee that
 # does not pop, a tail call made as a call, the last stack argument of a tail call not
@@ -872,7 +877,14 @@ PLANT_DEFECTS := 1:testDifferential 2:testReadback 3:testReadback \
 	65:testCpu_features:CpuRun.* 65:testWast:Wast.TheF32SuiteFile*:Wast.TheFloatMiscSuiteFile* \
 	66:testCpu_features:CpuRun.TheV1Arm* 66:testInt_ir:IntRun.EveryOperationGivesTheWorkedAnswer* 66:testWast:Wast.TheI32SuiteFile* \
 	67:testCpu_features:CpuRun.TheV1Arm* 67:testInt_ir:IntRun.EveryOperationGivesTheWorkedAnswer* 67:testWast:Wast.TheI32SuiteFile* \
-	68:testCpu_features:CpuStamp.*
+	68:testCpu_features:CpuStamp.* \
+	69:testDifferential:Differential.GeneratedIntegerProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluated \
+	70:testDifferential:Differential.GeneratedIntegerProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluated \
+	71:testDifferential:Differential.GeneratedIntegerProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluated \
+	72:testDifferential:Differential.GeneratedIntegerProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluated \
+	73:testDifferential:Differential.GeneratedIntegerProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluated \
+	74:testDifferential:Differential.GeneratedIntegerProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluated \
+	75:testDifferential:Differential.GeneratedIntegerProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluated
 
 # The controls the script runs are built by this make, as prerequisites, and
 # not by the script's own sub-make. Under `make -j test` the sibling goals

@@ -118,16 +118,26 @@ static inline bool grjit_operand_is_float_imm(const GRJIT_Operand * o) {
   return o->kind == GRJIT_OPERAND_F32_IMM || o->kind == GRJIT_OPERAND_F64_IMM;
 }
 
-/** Whether the function has anything the arm64 and Win64 emitters do not yet
- *  emit: a register of type `I32`, `F32` or `F64`, a typed float immediate, or one of
- *  the integer and float operations added for numeric-operations.md (story 5 of
- *  spec-runtime-float replaces the refusal). */
-bool grjit_function_needs_numeric_ext(const GRJIT_Function * function);
-
-/** Whether an operation is one of the integer or float operations added after `CALL_NATIVE`. */
-static inline bool grjit_op_is_numeric_ext(GRJIT_OpKind kind) {
-  return kind >= GRJIT_OP_CLZ && kind < GRJIT_OP_COUNT;
+/** Whether an operation is one of the integer operations added for numeric-operations.md
+ *  (`CLZ` to `EXTEND_U`). */
+static inline bool grjit_op_is_int_ext(GRJIT_OpKind kind) {
+  return kind >= GRJIT_OP_CLZ && kind <= GRJIT_OP_EXTEND_U;
 }
+
+/** Whether an operation is one of the float operations (`FADD` to `REINTERPRET`). */
+static inline bool grjit_op_is_float_ext(GRJIT_OpKind kind) {
+  return kind >= GRJIT_OP_FADD && kind < GRJIT_OP_COUNT;
+}
+
+/** Whether the function has anything a backend that does not yet emit the integer
+ *  operations cannot: a register of type `I32` or an operation of numeric-operations.md's
+ *  integer table. */
+bool grjit_function_needs_int_ext(const GRJIT_Function * function);
+
+/** Whether the function has anything a backend that does not yet emit the float operations
+ *  cannot: a register of type `F32` or `F64`, a typed float immediate, or one of the float
+ *  operations. */
+bool grjit_function_needs_float_ext(const GRJIT_Function * function);
 
 /** Whether an operation ends a block. */
 bool grjit_op_is_terminator(GRJIT_OpKind kind);

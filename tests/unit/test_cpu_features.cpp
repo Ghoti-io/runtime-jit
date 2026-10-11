@@ -478,7 +478,18 @@ TEST(CpuArms, NoOtherOperationChangesArmAndRecordsNothing) {
   EXPECT_GT(compared, 60u);
 }
 
-TEST(CpuArms, Arm64AndWin64EmissionIgnoreTheSetAndStillRefuseTheNewOperationsByName) {
+namespace {
+
+/* Whether a backend other than SysV emits the operation `name` at this commit of story 5: arm64 emits the
+ * integer operations, and the floats follow; the Win64 flavour follows both. */
+bool arch_emits_feature_op(GRJIT_Arch arch, const std::string & name) {
+  const bool is_float = !name.empty() && name[0] == 'f';
+  return arch == GRJIT_ARCH_ARM64 && !is_float;
+}
+
+} // namespace
+
+TEST(CpuArms, Arm64AndWin64EmissionIgnoreTheSetAndTakeNoFeatureArm) {
   // An integer-only function: emitted by all three backends, and the same bytes whatever set is named.
   floatfx::FloatOp add = floatfx::build_any_op("i64.add");
   Fn f(add.function);
@@ -490,16 +501,24 @@ TEST(CpuArms, Arm64AndWin64EmissionIgnoreTheSetAndStillRefuseTheNewOperationsByN
     EXPECT_EQ(none.bytes, all.bytes) << arch << ": the set changes nothing";
     EXPECT_EQ(all.used, GRJIT_FEATURES_NONE) << arch << ": nothing is recorded";
   }
-  // The operations with a feature arm are refused there as they were: no arm, no record.
+  // The operations with a feature arm on x86-64: where the backend emits them, the same bytes under every set and
+  // nothing recorded; where it does not yet, the function is refused whole, with no record.
   for (const std::string & n : feature_ops()) {
     floatfx::FloatOp op = floatfx::build_any_op(n);
     Fn g(op.function);
     for (GRJIT_Arch arch : {GRJIT_ARCH_ARM64, GRJIT_ARCH_X86_64_WIN64}) {
-      for (GRJIT_Features set : {GRJIT_FEATURES_NONE, GRJIT_FEATURES_ALL}) {
-        // story 5 brings these to Win64 and arm64; until then each refuses the function whole
-        const Emit e = emit_with(g.f, set, arch);
-        EXPECT_EQ(e.result, GRJIT_ERR_UNSUPPORTED) << n << " on arch " << arch;
-        EXPECT_EQ(e.used, ~GRJIT_Features{0}) << "no record was made for a refused function";
+      const Emit none = emit_with(g.f, GRJIT_FEATURES_NONE, arch);
+      const Emit all = emit_with(g.f, GRJIT_FEATURES_ALL, arch);
+      if (arch_emits_feature_op(arch, n)) {
+        ASSERT_EQ(none.result, GRJIT_OK) << n << " on arch " << arch;
+        ASSERT_EQ(all.result, GRJIT_OK) << n << " on arch " << arch;
+        EXPECT_EQ(none.bytes, all.bytes) << n << " on arch " << arch << ": the set changes nothing";
+        EXPECT_EQ(none.used, GRJIT_FEATURES_NONE) << n << " on arch " << arch;
+        EXPECT_EQ(all.used, GRJIT_FEATURES_NONE) << n << " on arch " << arch << ": nothing is recorded";
+      } else {
+        EXPECT_EQ(none.result, GRJIT_ERR_UNSUPPORTED) << n << " on arch " << arch;
+        EXPECT_EQ(all.result, GRJIT_ERR_UNSUPPORTED) << n << " on arch " << arch;
+        EXPECT_EQ(all.used, ~GRJIT_Features{0}) << "no record was made for a refused function";
       }
     }
   }

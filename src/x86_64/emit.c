@@ -2248,7 +2248,7 @@ GRJIT_Result grjit_emit_function(const GRJIT_Function * f,
     const GRJIT_Allocator * allocator, size_t max_code_bytes,
     GRJIT_EntryHook hook, uint32_t request_offset, uint32_t frame_bytes,
     bool win64, GRJIT_Features features, const GRJIT_LiveSites * live, GRJIT_Emit * e) {
-  if (win64 && grjit_function_needs_numeric_ext(f)) {
+  if (win64 && (grjit_function_needs_int_ext(f) || grjit_function_needs_float_ext(f))) {
     /* The i32 type and the integer operations of numeric-operations.md are emitted for
      * SysV; story 5 of spec-runtime-float brings them to Win64. Until then the flavour
      * refuses the function by name instead of emitting a 64-bit operation for a 32-bit

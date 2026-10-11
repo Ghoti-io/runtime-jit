@@ -29,6 +29,13 @@
  * `LOAD_S` say, narrow stores store the low bits, an immediate is any 64-bit
  * value and a displacement is any `int32`.
  *
+ * The numeric operations of numeric-operations.md (spec-runtime-float, story 5) are emitted in the
+ * same shape: a value is a 64-bit word in its slot, `x0`/`x1`/`x2` (and `d0`/`d1`) are scratch, and
+ * an `I32` or `F32` is kept zero-extended in its word. The 32-bit integer forms (`w` registers)
+ * clear the upper half of their destination by the architecture, so a result needs no mask; what
+ * arrives from outside (a parameter, a helper's or a callee's result, an immediate) is cut with
+ * `mov w, w` at the site where it enters.
+ *
  * A *callable* function (AD-28) has the adapter, the tag and the internal entry first (see
  * emit_internal.h for the convention) and the same operations after them; the calls, tail calls
  * and native calls are `emit_guest_call`, `emit_tail_call` and `emit_native_call`, each
@@ -92,6 +99,20 @@ static GRJIT_A64Cond cmp_cond(GRJIT_Cmp c) {
       break;
   }
   return GRJIT_A64_HS;
+}
+
+/* A register kept zero-extended in its word: an i32, and an f32 for the same reason (its bits are 32;
+ * a word that arrives from a caller, a callee or memory is cut to them). */
+static bool vreg_is_narrow(const GRJIT_A64Emit * e, GRJIT_VReg v) {
+  return grjit_type_is_narrow(e->c.f->vregs[v].type);
+}
+
+static bool dst_is_i32(const GRJIT_A64Emit * e, const GRJIT_Op * op) {
+  return op->dst != GRJIT_NO_VREG && e->c.f->vregs[op->dst].type == GRJIT_TYPE_I32;
+}
+
+static bool operand_is_i32(const GRJIT_A64Emit * e, const GRJIT_Operand * o) {
+  return o->kind == GRJIT_OPERAND_VREG && e->c.f->vregs[o->vreg].type == GRJIT_TYPE_I32;
 }
 
 static void emit_load(GRJIT_A64Emit * e, const GRJIT_Op * op, bool sign) {
@@ -177,6 +198,10 @@ static void emit_call(GRJIT_A64Emit * e, const GRJIT_Op * op) {
         s->identity, e->c.live_cursor++, op->state);
   }
   if (op->dst != GRJIT_NO_VREG) {
+    if (vreg_is_narrow(e, op->dst)) {
+      /* A helper's 32-bit result: the upper half of x0 is not ours. */
+      grjit_a64_mov32_rr(a, GRJIT_A64_X0, GRJIT_A64_X0);
+    }
     store_result(e, op->dst, GRJIT_A64_X0);
   }
 }
@@ -344,6 +369,9 @@ static void emit_guest_call(GRJIT_A64Emit * e, const GRJIT_Op * op) {
       GRCORE_SITE_GC_POINT_CALL, st->identity, live + 1, op->state, op);
   grjit_a64_cbnz(a, GRJIT_A64_X1, e->ret_propagate);
   if (op->dst != GRJIT_NO_VREG) {
+    if (vreg_is_narrow(e, op->dst)) {
+      grjit_a64_mov32_rr(a, GRJIT_A64_X0, GRJIT_A64_X0); /* the callee returned a word; an i32 or f32 is its low half */
+    }
     store_result(e, op->dst, GRJIT_A64_X0);
   }
   /* The call is complete: pop the callee's guest frame. */
@@ -595,6 +623,201 @@ static void emit_native_call(GRJIT_A64Emit * e, const GRJIT_Op * op) {
   }
 }
 
+/* ---- The integer operations of numeric-operations.md (spec-runtime-float, story 5) ---------------
+ *
+ * The width of an operation is its destination's: an i32 operation is made of real `w` instructions,
+ * which take their shift and rotate counts modulo 32 and clear the upper half of the destination, so
+ * the result is zero-extended in its slot by construction and no mask follows it. Nothing here
+ * faults: `sdiv` and `udiv` answer a zero divisor with 0 and `MIN / -1` with `MIN`, so a division
+ * whose guard a frontend forgot is a wrong answer, not a signal (the verifier refuses it, and the
+ * emitter does not add or move a guard). `rem_s` is `sdiv` then `msub`, which gives `MIN % -1 = 0`
+ * with no special case. */
+
+/* ADD .. SAR on i32 operands. */
+static void emit_binary32(GRJIT_A64Emit * e, const GRJIT_Op * op) {
+  A * a = &e->as;
+  GRJIT_Operand left = op->a;
+  GRJIT_Operand right = op->b;
+  load_operand(e, GRJIT_A64_X0, &left);
+  load_operand(e, GRJIT_A64_X1, &right);
+  GRJIT_A64Alu alu;
+  switch (op->kind) {
+    case GRJIT_OP_ADD: alu = GRJIT_A64_ADD; break;
+    case GRJIT_OP_SUB: alu = GRJIT_A64_SUB; break;
+    case GRJIT_OP_MUL: alu = GRJIT_A64_MUL; break;
+    case GRJIT_OP_AND: alu = GRJIT_A64_AND; break;
+    case GRJIT_OP_OR: alu = GRJIT_A64_ORR; break;
+    case GRJIT_OP_XOR: alu = GRJIT_A64_EOR; break;
+    case GRJIT_OP_SHL: alu = GRJIT_A64_LSLV; break;
+    case GRJIT_OP_SHR: alu = GRJIT_A64_LSRV; break;
+    default: alu = GRJIT_A64_ASRV; break;
+  }
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 69
+  /* Planted defect 69 (tests only): an i32 addition, subtraction and multiplication are emitted with
+   * 64-bit registers, so a carry out of bit 31 lands in the upper half, which an i32 must keep zero. */
+  if (alu == GRJIT_A64_ADD || alu == GRJIT_A64_SUB || alu == GRJIT_A64_MUL) {
+    grjit_a64_alu(a, alu, GRJIT_A64_X0, GRJIT_A64_X0, GRJIT_A64_X1);
+    store_result(e, op->dst, GRJIT_A64_X0);
+    return;
+  }
+#endif
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 70
+  /* Planted defect 70 (tests only): an i32 shift is the 64-bit instruction (the count is taken
+   * modulo 64, not 32), cut to 32 bits afterwards. */
+  if (alu == GRJIT_A64_LSLV || alu == GRJIT_A64_LSRV || alu == GRJIT_A64_ASRV) {
+    grjit_a64_alu(a, alu, GRJIT_A64_X0, GRJIT_A64_X0, GRJIT_A64_X1);
+    grjit_a64_mov32_rr(a, GRJIT_A64_X0, GRJIT_A64_X0);
+    store_result(e, op->dst, GRJIT_A64_X0);
+    return;
+  }
+#endif
+  grjit_a64_alu32(a, alu, GRJIT_A64_X0, GRJIT_A64_X0, GRJIT_A64_X1);
+  store_result(e, op->dst, GRJIT_A64_X0);
+}
+
+/* A comparison of two operands, one at least an i32: a 32-bit `cmp`, then 0 or 1. */
+static void emit_cmp32(GRJIT_A64Emit * e, const GRJIT_Op * op) {
+  A * a = &e->as;
+  load_operand(e, GRJIT_A64_X0, &op->a);
+  load_operand(e, GRJIT_A64_X1, &op->b);
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 71
+  /* Planted defect 71 (tests only): an ordered i32 comparison compares the whole register, so
+   * 0xFFFFFFFF (-1) is not below 1. */
+  if (op->cmp != GRJIT_CMP_EQ && op->cmp != GRJIT_CMP_NE) {
+    grjit_a64_cmp(a, GRJIT_A64_X0, GRJIT_A64_X1);
+  } else {
+    grjit_a64_cmp32(a, GRJIT_A64_X0, GRJIT_A64_X1);
+  }
+#else
+  grjit_a64_cmp32(a, GRJIT_A64_X0, GRJIT_A64_X1);
+#endif
+  grjit_a64_cset(a, GRJIT_A64_X0, cmp_cond(op->cmp));
+  store_result(e, op->dst, GRJIT_A64_X0);
+}
+
+/* NEG and NOT on an i32 are the `w` forms. */
+static void emit_neg_not32(GRJIT_A64Emit * e, const GRJIT_Op * op) {
+  A * a = &e->as;
+  load_operand(e, GRJIT_A64_X0, &op->a);
+  if (op->kind == GRJIT_OP_NEG) {
+    grjit_a64_neg32(a, GRJIT_A64_X0, GRJIT_A64_X0);
+  } else {
+    grjit_a64_mvn32(a, GRJIT_A64_X0, GRJIT_A64_X0);
+  }
+  store_result(e, op->dst, GRJIT_A64_X0);
+}
+
+/* CLZ, CTZ, POPCNT, EXT*_S, WRAP, EXTEND_S, EXTEND_U. `clz` of zero is the width. `ctz` is `rbit`
+ * then `clz`, which is the width for zero too. `popcnt` goes through the vector unit (AArch64 has no
+ * scalar form before FEAT_CSSC): the value into `v0`, `cnt` the bits of each byte, `addv` the bytes,
+ * the sum back as a 32-bit word. A 32-bit value is moved with `fmov s, w`, which clears the rest of
+ * the register, so the bytes above it count nothing. */
+static void emit_int_unary(GRJIT_A64Emit * e, const GRJIT_Op * op) {
+  A * a = &e->as;
+  const bool wide = !dst_is_i32(e, op);
+  load_operand(e, GRJIT_A64_X0, &op->a);
+  switch (op->kind) {
+    case GRJIT_OP_CLZ:
+      grjit_a64_bits(a, GRJIT_A64_CLZ, GRJIT_A64_X0, GRJIT_A64_X0, wide);
+      break;
+    case GRJIT_OP_CTZ:
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 72
+      /* Planted defect 72 (tests only): no bit reversal, so the trailing zeros are the leading ones. */
+#else
+      grjit_a64_bits(a, GRJIT_A64_RBIT, GRJIT_A64_X0, GRJIT_A64_X0, wide);
+#endif
+      grjit_a64_bits(a, GRJIT_A64_CLZ, GRJIT_A64_X0, GRJIT_A64_X0, wide);
+      break;
+    case GRJIT_OP_POPCNT:
+      grjit_a64_fmov_from_gpr(a, wide ? GRJIT_A64_DOUBLE : GRJIT_A64_SINGLE, GRJIT_A64_V0, GRJIT_A64_X0);
+      grjit_a64_cnt8b(a, GRJIT_A64_V0, GRJIT_A64_V0);
+      grjit_a64_addv8b(a, GRJIT_A64_V0, GRJIT_A64_V0);
+      grjit_a64_fmov_to_gpr(a, GRJIT_A64_SINGLE, GRJIT_A64_X0, GRJIT_A64_V0);
+      break;
+    case GRJIT_OP_EXT8_S:
+      grjit_a64_sext(a, GRJIT_A64_SXTB, GRJIT_A64_X0, GRJIT_A64_X0, wide);
+      break;
+    case GRJIT_OP_EXT16_S:
+      grjit_a64_sext(a, GRJIT_A64_SXTH, GRJIT_A64_X0, GRJIT_A64_X0, wide);
+      break;
+    case GRJIT_OP_EXT32_S:
+    case GRJIT_OP_EXTEND_S:
+      grjit_a64_sext(a, GRJIT_A64_SXTW, GRJIT_A64_X0, GRJIT_A64_X0, true);
+      break;
+    case GRJIT_OP_WRAP:
+    case GRJIT_OP_EXTEND_U:
+      /* The source is zero-extended already (an i32), or the low half is wanted (wrap): the cut is
+       * emitted either way, so a dirty input cannot pass through. */
+      grjit_a64_mov32_rr(a, GRJIT_A64_X0, GRJIT_A64_X0);
+      break;
+    default:
+      e->c.error = GRJIT_ERR_INTERNAL;
+      break;
+  }
+  store_result(e, op->dst, GRJIT_A64_X0);
+}
+
+/* ROTL and ROTR, either width. `rorv` takes the count modulo the width of the form; a left rotation by
+ * `c` is a right rotation by `-c`, and the negated count is taken modulo the width the same way. */
+static void emit_rotate(GRJIT_A64Emit * e, const GRJIT_Op * op) {
+  A * a = &e->as;
+  const bool wide = !dst_is_i32(e, op);
+  load_operand(e, GRJIT_A64_X0, &op->a);
+  load_operand(e, GRJIT_A64_X1, &op->b);
+  if (op->kind == GRJIT_OP_ROTL) {
+    if (wide) {
+      grjit_a64_neg(a, GRJIT_A64_X1, GRJIT_A64_X1);
+    } else {
+      grjit_a64_neg32(a, GRJIT_A64_X1, GRJIT_A64_X1);
+    }
+  }
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 70
+  /* Planted defect 70, rotate half (tests only): an i32 rotation is the 64-bit instruction, cut to
+   * 32 bits afterwards. */
+  if (!wide) {
+    grjit_a64_alu(a, GRJIT_A64_RORV, GRJIT_A64_X0, GRJIT_A64_X0, GRJIT_A64_X1);
+    grjit_a64_mov32_rr(a, GRJIT_A64_X0, GRJIT_A64_X0);
+    store_result(e, op->dst, GRJIT_A64_X0);
+    return;
+  }
+#endif
+  if (wide) {
+    grjit_a64_alu(a, GRJIT_A64_RORV, GRJIT_A64_X0, GRJIT_A64_X0, GRJIT_A64_X1);
+  } else {
+    grjit_a64_alu32(a, GRJIT_A64_RORV, GRJIT_A64_X0, GRJIT_A64_X0, GRJIT_A64_X1);
+  }
+  store_result(e, op->dst, GRJIT_A64_X0);
+}
+
+/* DIV_S, DIV_U, REM_S, REM_U, either width. The divisor is non-zero and, for DIV_S, the quotient does
+ * not overflow: the guards are in front of this in the IR. */
+static void emit_divide(GRJIT_A64Emit * e, const GRJIT_Op * op) {
+  A * a = &e->as;
+  const bool wide = !dst_is_i32(e, op);
+  const bool is_signed = op->kind == GRJIT_OP_DIV_S || op->kind == GRJIT_OP_REM_S;
+  const bool remainder = op->kind == GRJIT_OP_REM_S || op->kind == GRJIT_OP_REM_U;
+  load_operand(e, GRJIT_A64_X0, &op->a);
+  load_operand(e, GRJIT_A64_X1, &op->b);
+  GRJIT_A64Alu divop = is_signed ? GRJIT_A64_SDIV : GRJIT_A64_UDIV;
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 73
+  /* Planted defect 73 (tests only): an unsigned division and remainder are emitted signed. */
+  divop = GRJIT_A64_SDIV;
+#endif
+  if (!remainder) {
+    (wide ? grjit_a64_alu : grjit_a64_alu32)(a, divop, GRJIT_A64_X0, GRJIT_A64_X0, GRJIT_A64_X1);
+  } else {
+    (wide ? grjit_a64_alu : grjit_a64_alu32)(a, divop, GRJIT_A64_X2, GRJIT_A64_X0, GRJIT_A64_X1);
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 75
+    /* Planted defect 75 (tests only): the remainder's `msub` has the divisor and the dividend
+     * swapped, so it is divisor - quotient * divisor. */
+    grjit_a64_msub(a, GRJIT_A64_X0, GRJIT_A64_X2, GRJIT_A64_X1, GRJIT_A64_X1, wide);
+#else
+    grjit_a64_msub(a, GRJIT_A64_X0, GRJIT_A64_X2, GRJIT_A64_X1, GRJIT_A64_X0, wide);
+#endif
+  }
+  store_result(e, op->dst, GRJIT_A64_X0);
+}
+
 static void emit_op(GRJIT_A64Emit * e, const GRJIT_Op * op, size_t block) {
   A * a = &e->as;
   switch (op->kind) {
@@ -602,6 +825,9 @@ static void emit_op(GRJIT_A64Emit * e, const GRJIT_Op * op, size_t block) {
     case GRJIT_OP_MOVE:
     case GRJIT_OP_BITCAST:
       load_operand(e, GRJIT_A64_X0, &op->a);
+      if (vreg_is_narrow(e, op->dst)) {
+        grjit_a64_mov32_rr(a, GRJIT_A64_X0, GRJIT_A64_X0); /* an i32 or f32 immediate: its low 32 bits */
+      }
       store_result(e, op->dst, GRJIT_A64_X0);
       break;
     case GRJIT_OP_ADD:
@@ -613,10 +839,18 @@ static void emit_op(GRJIT_A64Emit * e, const GRJIT_Op * op, size_t block) {
     case GRJIT_OP_SHL:
     case GRJIT_OP_SHR:
     case GRJIT_OP_SAR:
-      emit_binary(e, op);
+      if (dst_is_i32(e, op)) {
+        emit_binary32(e, op);
+      } else {
+        emit_binary(e, op);
+      }
       break;
     case GRJIT_OP_NEG:
     case GRJIT_OP_NOT:
+      if (dst_is_i32(e, op)) {
+        emit_neg_not32(e, op);
+        break;
+      }
       load_operand(e, GRJIT_A64_X0, &op->a);
       if (op->kind == GRJIT_OP_NEG) {
         grjit_a64_neg(a, GRJIT_A64_X0, GRJIT_A64_X0);
@@ -626,6 +860,10 @@ static void emit_op(GRJIT_A64Emit * e, const GRJIT_Op * op, size_t block) {
       store_result(e, op->dst, GRJIT_A64_X0);
       break;
     case GRJIT_OP_CMP:
+      if (operand_is_i32(e, &op->a) || operand_is_i32(e, &op->b)) {
+        emit_cmp32(e, op);
+        break;
+      }
       load_operand(e, GRJIT_A64_X0, &op->a);
       load_operand(e, GRJIT_A64_X1, &op->b);
       grjit_a64_cmp(a, GRJIT_A64_X0, GRJIT_A64_X1);
@@ -668,7 +906,13 @@ static void emit_op(GRJIT_A64Emit * e, const GRJIT_Op * op, size_t block) {
       p.op = op;
       p.live_index = e->c.live_cursor++;
       load_operand(e, GRJIT_A64_X0, &op->a);
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 74
+      /* Planted defect 74 (tests only): the guard's test is not emitted. arm64 never faults in
+       * hardware, so a zero divisor then gives 0 and no trap: only an assertion that the trap fired
+       * can see it. The stub is queued and bound, and nothing branches to it. */
+#else
       grjit_a64_cbz(a, GRJIT_A64_X0, p.entry);
+#endif
       grjit_emit_add_pending(&e->c, &p);
       break;
     }
@@ -729,12 +973,18 @@ static void emit_op(GRJIT_A64Emit * e, const GRJIT_Op * op, size_t block) {
     case GRJIT_OP_WRAP:
     case GRJIT_OP_EXTEND_S:
     case GRJIT_OP_EXTEND_U:
+      emit_int_unary(e, op);
+      break;
     case GRJIT_OP_ROTL:
     case GRJIT_OP_ROTR:
+      emit_rotate(e, op);
+      break;
     case GRJIT_OP_DIV_S:
     case GRJIT_OP_DIV_U:
     case GRJIT_OP_REM_S:
     case GRJIT_OP_REM_U:
+      emit_divide(e, op);
+      break;
     case GRJIT_OP_FADD:
     case GRJIT_OP_FSUB:
     case GRJIT_OP_FMUL:
@@ -758,7 +1008,7 @@ static void emit_op(GRJIT_A64Emit * e, const GRJIT_Op * op, size_t block) {
     case GRJIT_OP_DEMOTE:
     case GRJIT_OP_PROMOTE:
     case GRJIT_OP_REINTERPRET:
-      /* Not yet (story 5 of spec-runtime-float); the function-wide check in
+      /* The float operations are not emitted yet; the function-wide check in
        * grjit_a64_emit_function refuses first, and this arm keeps the refusal in force
        * if that check is ever narrowed. */
       e->c.error = GRJIT_ERR_UNSUPPORTED;
@@ -921,9 +1171,22 @@ static void emit_internal_prologue(GRJIT_A64Emit * e) {
   store_slot(e, GRJIT_A64_X9, GRJIT_SLOT_CTX);
   for (size_t i = 0; i < f->param_count; i++) {
     if (i < ireg) {
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 87
+      /* Planted defect 87 (tests only): an i32 or f32 parameter is not cut to 32 bits on entry. */
+#else
+      if (vreg_is_narrow(e, (GRJIT_VReg)i)) {
+        grjit_a64_mov32_rr(a, arg_regs_internal[i], arg_regs_internal[i]); /* an i32 argument is its low 32 bits */
+      }
+#endif
       store_slot(e, arg_regs_internal[i], grjit_emit_slot((GRJIT_VReg)i));
     } else {
       grjit_a64_load(a, GRJIT_A64_MEM_X64, GRJIT_A64_X10, GRJIT_A64_FP, (int32_t)(16 + 8 * (i - ireg)));
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 87
+#else
+      if (vreg_is_narrow(e, (GRJIT_VReg)i)) {
+        grjit_a64_mov32_rr(a, GRJIT_A64_X10, GRJIT_A64_X10);
+      }
+#endif
       store_slot(e, GRJIT_A64_X10, grjit_emit_slot((GRJIT_VReg)i));
     }
   }
@@ -984,6 +1247,9 @@ static GRJIT_Result emit_pass(const GRJIT_Function * f, GRJIT_A64Emit * e,
       for (size_t i = 0; i < f->param_count; i++) {
         grjit_a64_load(a, GRJIT_A64_MEM_X64, GRJIT_A64_X0, GRJIT_A64_X1,
             (int32_t)(8 * i));
+        if (vreg_is_narrow(e, (GRJIT_VReg)i)) {
+          grjit_a64_mov32_rr(a, GRJIT_A64_X0, GRJIT_A64_X0); /* an i32 argument is its low 32 bits */
+        }
         store_slot(e, GRJIT_A64_X0, grjit_emit_slot((GRJIT_VReg)i));
       }
     }
@@ -1037,11 +1303,11 @@ GRJIT_Result grjit_a64_emit_function(const GRJIT_Function * f,
     const GRJIT_Allocator * allocator, size_t max_code_bytes,
     GRJIT_EntryHook hook, uint32_t request_offset, uint32_t frame_bytes,
     const GRJIT_LiveSites * live, GRJIT_A64Emit * e) {
-  if (grjit_function_needs_numeric_ext(f)) {
-    /* The i32 type and the integer operations of numeric-operations.md are emitted for
-     * x86-64 SysV; story 5 of spec-runtime-float brings them to arm64. Until then the
-     * backend refuses the function by name, instead of emitting a 64-bit operation for a
-     * 32-bit one. `e` is the caller's zeroed record, which the free function accepts. */
+  if (grjit_function_needs_float_ext(f)) {
+    /* The float types and operations of numeric-operations.md are not emitted for arm64 yet
+     * (the integer ones are); the backend refuses the function by name, instead of emitting an
+     * integer operation for a float. `e` is the caller's zeroed record, which the free function
+     * accepts. */
     return GRJIT_ERR_UNSUPPORTED;
   }
   memset(e, 0, sizeof *e);

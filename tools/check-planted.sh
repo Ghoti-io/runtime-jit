@@ -109,6 +109,20 @@
 #  67  a wrong zero case in the v1 clz only           -> the same
 #  68  the stamp's names in the wrong order, one lost  -> testCpu_features
 #
+#  69  an i32 add, subtract and multiply emitted with  -> testDifferential (the arm64 code, executed
+#      64-bit registers by the arm64 emitter               by the simulator, against the evaluator)
+#  70  an i32 shift or rotate by the 64-bit form       -> the same
+#      (the count taken modulo 64) in the arm64 emitter
+#  71  an ordered i32 comparison on the whole          -> the same
+#      register in the arm64 emitter
+#  72  `ctz` without `rbit` in the arm64 emitter       -> the same
+#  73  `div_u` and `rem_u` emitted signed by the       -> the same
+#      arm64 emitter
+#  74  a `GUARD` emitted as nothing by the arm64       -> the same (arm64 never faults in hardware:
+#      emitter                                           a zero divisor gives 0 and no trap)
+#  75  `rem_s` with the dividend and the divisor       -> the same
+#      swapped in its `msub` in the arm64 emitter
+#
 # An existing defect in a sequence only the fallback runs is 52 (nearest rounds halves away from zero): on a host
 # with SSE4.1 the v1 rounding is run only through a mask of ALL, which testFloat_ir's worked answers and boundary
 # sweep, testWast and testDifferential (every subset of the host's features) do explicitly.

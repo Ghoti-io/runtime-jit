@@ -17,3 +17,10 @@
 27b|27|testCalls|Calls.NoCalleeSavedRegisterIsEverChangedByCompiledCodeThroughTheEntryOrAChain|-DGRJIT_TEST_PLANT_FORM=2|a callee-saved register (x19) used by the adapter and not restored
 28|28|testNatives|Natives.TheNativeStackIsCheckedAtTheCallSiteForTheStackArgumentsAndTheNativesOwnUseToTheByte||a native's stack check leaving out the stack-argument area
 29|29|testCalls|Calls.TheStackLimitIsMeasuredInBytesAndTheFirstFrameThatDoesNotFitIsTheOneRefused||the prologue's stack check leaving out its own frame
+69|69|testInt_ir|IntRun.EveryOperationGivesTheWorkedAnswerAndAnI32ResultIsZeroExtended||an i32 add, subtract and multiply emitted with 64-bit registers: the upper half of the result is not zero
+70|70|testInt_ir|IntRun.EveryOperationGivesTheWorkedAnswerAndAnI32ResultIsZeroExtended||an i32 shift or rotate by the 64-bit form: the count is taken modulo 64, not 32
+71|71|testInt_ir|IntRun.EveryOperationGivesTheWorkedAnswerAndAnI32ResultIsZeroExtended||an ordered i32 comparison on the whole register: 0xFFFFFFFF is not below 1
+72|72|testInt_ir|IntRun.EveryOperationGivesTheWorkedAnswerAndAnI32ResultIsZeroExtended||ctz without rbit: the trailing zeros are the leading ones
+73|73|testInt_ir|IntRun.EveryOperationGivesTheWorkedAnswerAndAnI32ResultIsZeroExtended||div_u and rem_u emitted signed
+74|74|testInt_ir|IntRun.DivideByZeroAndSignedOverflowFireTheirGuardsAndMinRemMinusOneIsZero||a guard emitted as nothing: arm64 never faults, so a zero divisor gives 0 and the trap never fires
+75|75|testInt_ir|IntRun.EveryOperationGivesTheWorkedAnswerAndAnI32ResultIsZeroExtended||rem_s with the dividend and the divisor swapped in its msub

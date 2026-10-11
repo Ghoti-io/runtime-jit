@@ -436,12 +436,12 @@ M = [
 # The mutations of the arm64 emitter (--target=arm64): the same entries, in src/arm64.
 M_ARM64 = [
     ('a call does not test the status for DEOPTED', 'jit', 'src/arm64/emit.c',
-     "  grjit_a64_cbnz(a, GRJIT_A64_X1, e->ret_propagate);\n  if (op->dst != GRJIT_NO_VREG) {\n    store_result(e, op->dst, GRJIT_A64_X0);\n  }\n  /* The call is complete: pop the callee's guest frame. */",
-     "  if (op->dst != GRJIT_NO_VREG) {\n    store_result(e, op->dst, GRJIT_A64_X0);\n  }\n  /* The call is complete: pop the callee's guest frame. */",
+     "  grjit_a64_cbnz(a, GRJIT_A64_X1, e->ret_propagate);\n  if (op->dst != GRJIT_NO_VREG) {\n    if (vreg_is_narrow(e, op->dst)) {\n      grjit_a64_mov32_rr(a, GRJIT_A64_X0, GRJIT_A64_X0); /* the callee returned a word; an i32 or f32 is its low half */\n    }\n    store_result(e, op->dst, GRJIT_A64_X0);\n  }\n  /* The call is complete: pop the callee's guest frame. */",
+     "  if (op->dst != GRJIT_NO_VREG) {\n    if (vreg_is_narrow(e, op->dst)) {\n      grjit_a64_mov32_rr(a, GRJIT_A64_X0, GRJIT_A64_X0); /* the callee returned a word; an i32 or f32 is its low half */\n    }\n    store_result(e, op->dst, GRJIT_A64_X0);\n  }\n  /* The call is complete: pop the callee's guest frame. */",
      ['testCalls']),
     ('a call through a pointer does not test the status for DEOPTED', 'jit', 'src/arm64/emit.c',
-     "  grjit_a64_cbnz(a, GRJIT_A64_X1, e->ret_propagate);\n  if (op->dst != GRJIT_NO_VREG) {\n    store_result(e, op->dst, GRJIT_A64_X0);\n  }\n  /* The call is complete: pop the callee's guest frame. */",
-     "  if (op->kind == GRJIT_OP_CALL_SLOT) {\n    grjit_a64_cbnz(a, GRJIT_A64_X1, e->ret_propagate);\n  }\n  if (op->dst != GRJIT_NO_VREG) {\n    store_result(e, op->dst, GRJIT_A64_X0);\n  }\n  /* The call is complete: pop the callee's guest frame. */",
+     "  grjit_a64_cbnz(a, GRJIT_A64_X1, e->ret_propagate);\n  if (op->dst != GRJIT_NO_VREG) {\n    if (vreg_is_narrow(e, op->dst)) {\n      grjit_a64_mov32_rr(a, GRJIT_A64_X0, GRJIT_A64_X0); /* the callee returned a word; an i32 or f32 is its low half */\n    }\n    store_result(e, op->dst, GRJIT_A64_X0);\n  }\n  /* The call is complete: pop the callee's guest frame. */",
+     "  if (op->kind == GRJIT_OP_CALL_SLOT) {\n    grjit_a64_cbnz(a, GRJIT_A64_X1, e->ret_propagate);\n  }\n  if (op->dst != GRJIT_NO_VREG) {\n    if (vreg_is_narrow(e, op->dst)) {\n      grjit_a64_mov32_rr(a, GRJIT_A64_X0, GRJIT_A64_X0); /* the callee returned a word; an i32 or f32 is its low half */\n    }\n    store_result(e, op->dst, GRJIT_A64_X0);\n  }\n  /* The call is complete: pop the callee's guest frame. */",
      ['testCalls']),
     ("the callee's guest frame is never popped", 'jit', 'src/arm64/emit.c',
      '  grjit_a64_mov_ri(a, GRJIT_A64_X16, (uint64_t)(uintptr_t)f->hooks.pop);\n  grjit_a64_blr(a, GRJIT_A64_X16);',
