@@ -43,7 +43,9 @@ inline bool host_fp_is_default() {
   asm volatile("mrs %0, fpcr" : "=r"(fpcr));
   return (fpcr & 0x07C09F00u) == 0; // RMode, FZ, DN, AHP and the trap enables
 #elif defined(__SSE__)
-  return (_mm_getcsr() & 0xE040u) == 0; // rounding control, FTZ, DAZ
+  const unsigned csr = _mm_getcsr();
+  // Rounding control, FTZ and DAZ clear, and every exception mask (bits 7-12) set: no trap enabled.
+  return (csr & 0xE040u) == 0 && (csr & 0x1F80u) == 0x1F80u;
 #else
   return true;
 #endif

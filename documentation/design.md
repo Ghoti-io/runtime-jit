@@ -1785,7 +1785,7 @@ get right, each with a test, an evaluator case and a suite assertion that shows 
 - *MXCSR.* Compiled code assumes the default (round to nearest, exceptions masked, no flush to zero,
   no denormals-are-zero) and never writes it. The rounding sequences (`nearest` and the others)
   depend on round-to-nearest, so **a helper called from compiled code must restore MXCSR before it
-  returns**, and a test checks the rounding-control bits as well as FTZ/DAZ (mask `0xE040`). Variadic
+  returns**, and a test checks the rounding-control bits as well as FTZ/DAZ (mask `0xE040`) and that all six exception masks (bits 7-12, `0x1F80`) are set, so that no trap is enabled. Variadic
   helpers, which need `al` set to the number of vector registers used, are unsupported: the emitter
   does not set it. A subnormal operand and result survive (the suite and a
   unit test hold them). There is no x87 instruction and no `long double`, and the library and every
@@ -2209,7 +2209,10 @@ The builder's limit of six arguments means no float is stack-passed. A float imm
 call address is loaded into after. A float result comes back in `d0`/`s0`; an `F32` is taken with `fmov w0, s0`, which
 clears the upper half, because the standard does not promise that a callee wrote only the low half and the test stub
 that returns a float with junk above bit 31 is how the rule is held. The convention between compiled functions is
-unchanged: a float travels as its bit word in the register or stack word an `I64` uses.
+unchanged: a float travels as its bit word in the register or stack word an `I64` uses. Helpers are non-variadic
+(AAPCS64 passes the variadic arguments of a call to a variadic function differently on some targets, and the emitter
+makes no such distinction), and only the standard (Linux) AAPCS64 convention is claimed: Apple's arm64 ABI, which
+packs stack arguments and treats variadic ones differently, and Windows on Arm are not.
 
 **FPCR.** Compiled code assumes the default (round to nearest, no flush to zero, default NaN off, no trap enabled)
 and never writes it. A test reads `fpcr` before the float tests of an arm64 host and asserts it (bits `0x07C09F00`
@@ -2299,9 +2302,14 @@ registers it would need saved; nothing here needs it and the slot shape is what 
 on it. *`fminnm`/`fmaxnm`*: they are the wrong semantics for WebAssembly. *A scalar `popcnt` helper*: a call for a
 four-instruction sequence, and the vector unit is baseline. *A Win64 rounding that saves and restores `xmm6` and
 `xmm7`*: correct, and rejected for the unwind information it needs and because it would make the sentinel test unable to
-tell a clobber from a save. *A libm call for `ceil`/`floor`/`trunc`/`nearbyint` or as the evaluator's reference where
-WebAssembly differs from it*. *Generalising the SysV probes*: one test asserting three conventions would hide which is
-wrong. *Treating the simulator as the arm64 verdict*.
+tell a clobber from a save. *A libm call for `ceil`/`floor`/`trunc`/`nearbyint`*: a call and a dependency for a sequence the
+hardware does in one instruction, and a library whose answer for a NaN, a zero's sign or a huge operand is the C
+standard's. *The same libm functions as the evaluator's reference where WebAssembly differs from them*: the evaluator
+would then agree with the library where both are wrong, so the evaluator spells out WebAssembly's rule (NaN
+propagation, the sign of zero, saturation) and is compared to the hardware instead. *Generalising the SysV probes*: one test asserting three conventions would hide which is
+wrong. *Treating the simulator as the arm64 verdict*: it is written by the same author as the emitter and can share a
+misreading of the manual with it, and its arithmetic is the host's, so it says nothing about a real core. It is a dev
+loop that runs on every host and an extra catch; the verdicts are `qemu-aarch64` and the Pi.
 
 **Known limits.** Instruction-cache coherence, a real kernel's W^X, memory ordering and the Windows kernel are outside
 every instrument here (`qemu-user`, wine and the simulator model none of them); the Pi covers the first three for

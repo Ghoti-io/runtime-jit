@@ -39,6 +39,16 @@
 #include <random>
 #include <unistd.h>
 
+/* The simulator takes its arithmetic (x + y, nearbyint, sqrt, the conversions) from the host, so a host with a
+ * non-default MXCSR / FPCR would make it disagree with the hand-worked answers: skip by name, as the float tests
+ * of the compiled code do. */
+#define SIM_NEEDS_DEFAULT_FP()                                                                \
+  do {                                                                                        \
+    if (!floatfx::host_fp_is_default()) {                                                     \
+      GTEST_SKIP() << "the host's MXCSR / FPCR is not the default the simulator's arithmetic assumes"; \
+    }                                                                                         \
+  } while (0)
+
 namespace {
 
 using a64sim::Cpu;
@@ -285,6 +295,7 @@ TEST(Arm64Sim, ANegationANotAndAThirtyTwoBitCompareAreTheWFormsAndSetTheFlagsOnT
 /* ---- Floating point: the arithmetic ------------------------------------------------------ */
 
 TEST(Arm64Sim, ScalarArithmeticGivesTheWorkedAnswersInBothWidths) {
+  SIM_NEEDS_DEFAULT_FP();
   EXPECT_EQ(fbin(GRJIT_A64_FADD, true, bits(1.5), bits(2.25)), bits(3.75));
   EXPECT_EQ(fbin(GRJIT_A64_FSUB, true, bits(1.5), bits(2.25)), bits(-0.75)) << "the operands in order: 1.5 - 2.25";
   EXPECT_EQ(fbin(GRJIT_A64_FMUL, true, bits(-3.0), bits(0.5)), bits(-1.5));
@@ -300,6 +311,7 @@ TEST(Arm64Sim, ScalarArithmeticGivesTheWorkedAnswersInBothWidths) {
 }
 
 TEST(Arm64Sim, ANanOperandIsReturnedQuietenedAndAnyOtherNanIsThePositiveDefaultNan) {
+  SIM_NEEDS_DEFAULT_FP();
   const uint64_t snan = 0x7FF0000000000001ull, qnan_payload = 0x7FF8000000000123ull;
   EXPECT_EQ(fbin(GRJIT_A64_FADD, true, snan, bits(1.0)), snan | (1ull << 51)) << "a signalling NaN comes back quiet, payload kept";
   EXPECT_EQ(fbin(GRJIT_A64_FADD, true, bits(1.0), qnan_payload), qnan_payload);
@@ -313,6 +325,7 @@ TEST(Arm64Sim, ANanOperandIsReturnedQuietenedAndAnyOtherNanIsThePositiveDefaultN
 }
 
 TEST(Arm64Sim, MinAndMaxOrderMinusZeroBelowPlusZeroAndAnyNanGivesANan) {
+  SIM_NEEDS_DEFAULT_FP();
   EXPECT_EQ(fbin(GRJIT_A64_FMIN, true, bits(-0.0), bits(0.0)), bits(-0.0));
   EXPECT_EQ(fbin(GRJIT_A64_FMIN, true, bits(0.0), bits(-0.0)), bits(-0.0));
   EXPECT_EQ(fbin(GRJIT_A64_FMAX, true, bits(-0.0), bits(0.0)), bits(0.0));
@@ -337,6 +350,7 @@ TEST(Arm64Sim, NegationAndAbsoluteValueTouchTheSignBitOnlyEvenOfASignallingNan) 
 }
 
 TEST(Arm64Sim, TheFourRoundingsAreToNearestEvenUpDownAndTowardZeroWithTheSignOfZeroKept) {
+  SIM_NEEDS_DEFAULT_FP();
   struct Row { double x, n, p, m, z; };
   const Row rows[] = {
       {0.5, 0.0, 1.0, 0.0, 0.0},
@@ -364,6 +378,7 @@ TEST(Arm64Sim, TheFourRoundingsAreToNearestEvenUpDownAndTowardZeroWithTheSignOfZ
 /* ---- Comparison and conversion -------------------------------------------------------------- */
 
 TEST(Arm64Sim, FcmpOrdersThePairAndAnUnorderedPairIsFalseForEqLtLeGtGeAndTrueForNe) {
+  SIM_NEEDS_DEFAULT_FP();
   // The emitter maps the IR's EQ NE LT LE GT GE to eq ne mi ls gt ge: after `fcmp` an unordered pair
   // is NZCV = 0011, which makes the integer lt and le true and these false.
   for (bool d : {true, false}) {
@@ -381,6 +396,7 @@ TEST(Arm64Sim, FcmpOrdersThePairAndAnUnorderedPairIsFalseForEqLtLeGtGeAndTrueFor
 }
 
 TEST(Arm64Sim, FcvtRoundsOnceNarrowingKeepsANansSignAndTopPayloadAndWideningIsExact) {
+  SIM_NEEDS_DEFAULT_FP();
   auto fcvt = [](bool to_double, uint64_t a) {
     Prog p;
     grjit_a64_fmov_from_gpr(&p.a, to_double ? GRJIT_A64_SINGLE : GRJIT_A64_DOUBLE, GRJIT_A64_V1, X1);
@@ -400,6 +416,7 @@ TEST(Arm64Sim, FcvtRoundsOnceNarrowingKeepsANansSignAndTopPayloadAndWideningIsEx
 }
 
 TEST(Arm64Sim, ConversionsFromIntegersRoundOnceAndThoseToIntegersTruncateAndSaturate) {
+  SIM_NEEDS_DEFAULT_FP();
   auto scvtf = [](bool sgn, bool to_double, bool wide, uint64_t a) {
     Prog p;
     grjit_a64_cvt_to_fp(&p.a, sgn, to_double ? GRJIT_A64_DOUBLE : GRJIT_A64_SINGLE, GRJIT_A64_V0, X1, wide);
@@ -721,6 +738,7 @@ uint64_t random_float_bits(std::mt19937_64 & g, bool dbl_) {
 } // namespace
 
 TEST(Arm64Sim, ArithmeticAndRoundingAgreeWithTheHostOnRandomOperandsNansEqual) {
+  SIM_NEEDS_DEFAULT_FP();
   std::mt19937_64 g(0xA64);
   size_t checked = 0, nans = 0;
   for (int i = 0; i < 4000; i++) {
@@ -765,6 +783,7 @@ TEST(Arm64Sim, ArithmeticAndRoundingAgreeWithTheHostOnRandomOperandsNansEqual) {
 }
 
 TEST(Arm64Sim, ConversionsAgreeWithTheHostOnRandomOperands) {
+  SIM_NEEDS_DEFAULT_FP();
   std::mt19937_64 g(0xC0DE);
   for (int i = 0; i < 3000; i++) {
     const uint64_t n = g();
@@ -894,6 +913,30 @@ TEST(Arm64Registers, NoCalleeSavedVectorRegisterIsEncodedForAnyInstructionOfTheT
   EXPECT_EQ(seen, 0x3Fu) << "v0 to v5 are what the emitter uses (six float arguments reach v5), each of them by something";
 }
 
+/* A scratch file in $TMPDIR (or /tmp) that is removed on every path out of the test, a failed ASSERT included. */
+struct TempFile {
+  std::string path;
+  int fd = -1;
+  bool created = false;
+  TempFile() {
+    const char * dir = std::getenv("TMPDIR");
+    path = std::string(dir != nullptr && *dir != 0 ? dir : "/tmp") + "/grjit-a64v-XXXXXX";
+    fd = mkstemp(&path[0]);
+    created = fd >= 0;
+  }
+  ~TempFile() {
+    if (fd >= 0) {
+      close(fd);
+    }
+    if (created) {
+      unlink(path.c_str());
+    }
+  }
+  TempFile(const TempFile &) = delete;
+  TempFile & operator=(const TempFile &) = delete;
+  bool ok() const { return fd >= 0; }
+};
+
 TEST(Arm64Registers, TheDisassemblerAgreesThatNoCalleeSavedVectorRegisterAppearsInAnyFloatFunction) {
   const char * tool = std::getenv("GRJIT_AARCH64_OBJDUMP");
   if (tool == nullptr || *tool == 0) {
@@ -931,12 +974,12 @@ TEST(Arm64Registers, TheDisassemblerAgreesThatNoCalleeSavedVectorRegisterAppears
     GRJIT_Emitted e;
     ASSERT_EQ(grjit_emit_for(GRJIT_ARCH_ARM64, b.op.function, grjit_allocator_default(), nullptr, nullptr, 0, &e),
         GRJIT_OK);
-    char path[] = "/tmp/grjit-a64v-XXXXXX";
-    int fd = mkstemp(path);
-    ASSERT_GE(fd, 0);
-    ASSERT_EQ(write(fd, e.bytes, e.size), static_cast<ssize_t>(e.size));
-    close(fd);
-    std::string cmd = std::string(tool) + " -D -b binary -m aarch64 --no-show-raw-insn " + path;
+    TempFile tmp;
+    ASSERT_TRUE(tmp.ok());
+    ASSERT_EQ(write(tmp.fd, e.bytes, e.size), static_cast<ssize_t>(e.size));
+    close(tmp.fd);
+    tmp.fd = -1;
+    std::string cmd = std::string(tool) + " -D -b binary -m aarch64 --no-show-raw-insn " + tmp.path;
     FILE * pipe = popen(cmd.c_str(), "r");
     ASSERT_NE(pipe, nullptr);
     char line[512];
@@ -949,13 +992,13 @@ TEST(Arm64Registers, TheDisassemblerAgreesThatNoCalleeSavedVectorRegisterAppears
       }
     }
     EXPECT_EQ(pclose(pipe), 0);
-    unlink(path);
     EXPECT_FALSE(has_callee_saved_vector(all)) << instr << ":\n" << all;
     EXPECT_FALSE(all.empty()) << instr << ": the disassembly read nothing";
     grjit_emitted_free(&e);
     checked++;
   }
-  EXPECT_EQ(checked, 70u);
+  EXPECT_EQ(checked, floatfx::every_float_instruction().size());
+  EXPECT_GT(checked, 0u);
 }
 
 /* ---- Compiled functions run by the simulator, on any host -------------------------------------
@@ -1000,6 +1043,7 @@ SimRun sim_function(const GRJIT_Function * f, JitWorld & w, std::vector<uint64_t
 } // namespace
 
 TEST(Arm64SimCompiled, AnF32ResultIsAWholeWordWithTheUpperHalfZeroOverAStackThatHeldGarbage) {
+  SIM_NEEDS_DEFAULT_FP();
   JitWorld w;
   size_t checked = 0;
   for (const std::string & instr : floatfx::every_float_instruction()) {
@@ -1023,6 +1067,7 @@ TEST(Arm64SimCompiled, AnF32ResultIsAWholeWordWithTheUpperHalfZeroOverAStackThat
 }
 
 TEST(Arm64SimCompiled, AHelperGetsEachFloatAndIntegerArgumentInItsAapcs64RegisterAndAFloatResultIsTakenByItsWidth) {
+  SIM_NEEDS_DEFAULT_FP();
   if (!a64sim::kSignatures) {
     GTEST_SKIP() << "the simulator calls a host function with a signature only where the host's C ABI classifies as AAPCS64 does";
   }
@@ -1089,6 +1134,7 @@ TEST(Arm64SimCompiled, AHelperGetsEachFloatAndIntegerArgumentInItsAapcs64Registe
 /* ---- Slots beyond the short offset forms, run by the simulator on any host ------------------------ */
 
 TEST(Arm64Offsets, ManyFloatRegistersAreAddressedThroughTheRegisterFormAndEveryValueIsExact) {
+  SIM_NEEDS_DEFAULT_FP();
   const size_t n = 120;
   Fn f(many_floats(n));
   GRJIT_Emitted e;

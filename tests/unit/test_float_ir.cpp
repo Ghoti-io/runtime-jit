@@ -1733,6 +1733,7 @@ TEST(FloatRun, TheOperationsAreRoundedOneAtATimeAndSubnormalsSurviveUnderTheDefa
 #if defined(__SSE__)
   const unsigned before = _mm_getcsr();
   EXPECT_EQ(before & 0xE040u, 0u) << "the host runs the tests with round-to-nearest, flush-to-zero and denormals-are-zero off";
+  EXPECT_EQ(before & 0x1F80u, 0x1F80u) << "the host runs the tests with every floating-point exception masked";
 #elif defined(__aarch64__)
   uint64_t before;
   asm volatile("mrs %0, fpcr" : "=r"(before));

@@ -1065,6 +1065,9 @@ TEST(Differential, GeneratedFloatProgramsRunTheSameCompiledAndEvaluatedWithNansE
  * loop on any host; the native test above is the verdict on an arm64 host, under qemu-aarch64 or on a Pi). The
  * same programs and argument sets as the native test draws. */
 TEST(Differential, GeneratedFloatProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluatedWithNansEqual) {
+  if (!floatfx::host_fp_is_default()) {
+    GTEST_SKIP() << "the host's MXCSR / FPCR is not the default the simulator's arithmetic assumes";
+  }
   JitWorld w;
   size_t returned = 0, deopted = 0;
   for (uint64_t seed = 1; seed <= 3000; seed++) {
