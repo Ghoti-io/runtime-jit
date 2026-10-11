@@ -497,7 +497,9 @@ TEST(Win64Sentinels, FloatCodeLeavesEveryCalleeSavedRegisterAloneOnAReturnAGuard
   Fn f(sentfx::sentinel_function(reinterpret_cast<const void *>(&fp_clobber)));
   char why[256] = {0};
   ASSERT_EQ(grjit_function_verify(f, nullptr, why, sizeof why), GRJIT_OK) << why;
-  Compiled c(f, w.pages());
+  /* Every CPU feature disabled: the host's own set would pick the SSE4.1 rounding and leave the SSE2
+   * sequence, which has the vector registers to get right, unemitted on a host that has the feature. */
+  Compiled c(f, w.pages(), nullptr, nullptr, nullptr, GRJIT_FEATURES_ALL);
   ASSERT_TRUE(c) << grjit_result_string(c.result);
   alignas(16) uint8_t mem[64] = {0};
   const std::vector<uint64_t> args = {floatfx::f64bits(2.75), floatfx::f32bits(1.5f), 1,
