@@ -1338,6 +1338,33 @@ TEST(IntCalls, AnI32GoesThroughACallInARegisterAndOnTheStackAndComesBackZeroExte
   EXPECT_EQ(e.st.pushes, e.st.pops);
 }
 
+TEST(IntCalls, AnI32ParameterReturnedWholeIsItsLow32BitsInARegisterAndOnTheStackWhateverTheEntryWordHeld) {
+  INT_RUN_HERE();
+  // A sum of i32 parameters cannot see a dirty upper half (the 32-bit forms ignore it), so this callee returns one
+  // parameter as it is: the word in its slot, not its arithmetic. Entered with garbage above bit 31 in every word,
+  // each parameter, in a register or on the stack, must come back as its low 32 bits and nothing more.
+  fx::Engine e;
+  for (int n : {1, 2, 6, 7, 9, 12}) {
+    SCOPED_TRACE(n);
+    for (int j = 0; j < n; j++) {
+      SCOPED_TRACE(j);
+      std::vector<GRJIT_Type> params(static_cast<size_t>(n), GRJIT_TYPE_I32);
+      P p("pick", params);
+      p.ret(j);
+      int callee = e.reserve();
+      e.set(callee, p.done());
+      std::vector<fx::u64> words;
+      for (int k = 0; k < n; k++) {
+        words.push_back(0xDEADBEEF00000000ull | (0x80000000u + static_cast<uint32_t>(k)));
+      }
+      fx::Outcome d = e.run_compiled(callee, words);
+      ASSERT_TRUE(d.finished);
+      EXPECT_EQ(d.value, uint64_t{0x80000000u + static_cast<uint32_t>(j)})
+          << "the " << (j < 6 ? "register" : "stack") << " parameter is its low 32 bits";
+    }
+  }
+}
+
 TEST(IntCalls, AnI32GoesThroughATailCallInARegisterAndOnTheStack) {
   INT_RUN_HERE();
   fx::Engine e;
