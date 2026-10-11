@@ -222,8 +222,10 @@ size_t shadow_space_stores(const uint8_t * p, size_t n) {
     const unsigned mod = p[j] >> 6;
     if (mod == 0) {
       found++; // [rsp + 0]
+      i = j + 1; // the instruction is counted once, not again from its opcode byte
     } else if (mod == 1 && j + 2 < n && p[j + 2] < 32 && p[j + 2] % 8 == 0) {
       found++;
+      i = j + 2;
     }
   }
   return found;
