@@ -653,7 +653,7 @@ static uint64_t compile_sites_run(uint64_t iterations) {
  * loop, floats by their bits, in a --smoke run too. The references are timed as cases of their
  * own ("ref-..."), built with the project's flags (-ffp-contract=off among them) and with an
  * empty asm statement that names the accumulator after every iteration, so the compiler can
- * neither fold the loop to a closed form nor vectorise or remove it; main refuses a reference
+ * neither fold the loop to a closed form nor vectorize or remove it; main refuses a reference
  * whose figure is implausibly fast for that (below 0.05 ns an operation).
  *
  * The CPU-feature arms are the same loop compiled twice, with the detected features and with
@@ -942,17 +942,9 @@ static uint64_t ref_bits(KernelKind k, uint64_t n) {
 }
 
 /* The reference of a kernel, by kind. The `switch` is outside every loop. */
-static uint64_t reference(KernelKind k, uint64_t n) {
+static uint64_t reference_raw(KernelKind k, uint64_t n) {
   switch (k) {
-    case K_F64_ADD: {
-      uint64_t v = ref_f64_add(n);
-#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 101
-      /* Planted (check-planted.sh): the reference is one ulp off, so the compiled loop's
-       * correct answer disagrees with it and the case must fail, in a --smoke run too. */
-      v += 1u;
-#endif
-      return v;
-    }
+    case K_F64_ADD: return ref_f64_add(n);
     case K_F64_DIV: return ref_f64_div(n);
     case K_F64_CMP: return ref_f64_cmp(n);
     case K_I64_DIV_S: return ref_i64_div_s(n);
@@ -971,9 +963,40 @@ static uint64_t reference(KernelKind k, uint64_t n) {
   return 0;
 }
 
+/* Planted defects 101 to 109 (check-planted.sh): the reference of one kernel (or one family of them)
+ * is one off, so the compiled loop's right answer disagrees with it and the case must fail, in a
+ * --smoke run too. 101 f64-add, 102 f64-div, 103 f64-cmp, 104 i64-div-s, 105 i64-rem-s, 106 i32-div-u,
+ * 107 cvt-trunc, 108 the four roundings, 109 popcnt, clz and ctz. */
+static int planted_reference(KernelKind k) {
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG >= 101 && GRJIT_TEST_PLANT_BUG <= 109
+  switch (GRJIT_TEST_PLANT_BUG) {
+    case 101: return k == K_F64_ADD;
+    case 102: return k == K_F64_DIV;
+    case 103: return k == K_F64_CMP;
+    case 104: return k == K_I64_DIV_S;
+    case 105: return k == K_I64_REM_S;
+    case 106: return k == K_I32_DIV_U;
+    case 107: return k == K_CVT_TRUNC;
+    case 108: return k >= K_F64_CEIL && k <= K_F64_NEAREST;
+    default: return k >= K_POPCNT && k <= K_CTZ;
+  }
+#else
+  (void)k;
+  return 0;
+#endif
+}
+
+static uint64_t reference(KernelKind k, uint64_t n) {
+  uint64_t v = reference_raw(k, n);
+  return planted_reference(k) ? v + 1u : v;
+}
+
 static GRJIT_Code * g_kernel[K_COUNT][2]; /* [kind][0 the detected features, 1 every optional feature masked off] */
 static uint64_t g_expected_n[K_COUNT];
 static uint64_t g_expected[K_COUNT];
+static uint64_t g_last_out[K_COUNT]; /* what the compiled loop of the kernel last returned, for its reference case */
+static uint64_t g_last_out_n[K_COUNT];
+static uint64_t g_guard_exits;      /* runs of a kernel loop that left through a guard (any is a failed case) */
 
 static GRJIT_Code * compile_masked(const GRJIT_Function * f, GRJIT_Features disabled) {
   GRJIT_CompileOptions o;
@@ -997,6 +1020,8 @@ static uint64_t run_kernel(KernelKind k, int masked, uint64_t n) {
   uint64_t args[1] = {n};
   uint64_t out[3] = {0, 0, 0};
   if (grjit_code_call(g_kernel[k][masked], g_context, args, out) != GRJIT_EXIT_RETURNED) {
+    ++g_guard_exits;
+    fprintf(stderr, "bench: kernel %s left through a guard or did not return (guard exits %llu)\n", kernel_name[k], (unsigned long long)g_guard_exits);
     setup_failed("a kernel loop left through a guard, or did not return");
   }
   if (g_expected_n[k] != n || g_expected_n[k] == 0) {
@@ -1008,10 +1033,25 @@ static uint64_t run_kernel(KernelKind k, int masked, uint64_t n) {
         (unsigned long long)out[0], (unsigned long long)g_expected[k]);
     setup_failed("a kernel loop's answer is not the C reference's");
   }
+  if (!masked) {
+    g_last_out[k] = out[0];
+    g_last_out_n[k] = n;
+  }
   return out[0];
 }
 
-static uint64_t ref_case(KernelKind k, uint64_t n) { return reference(k, n); }
+/* The reference case returns the reference's value; when the compiled loop of the same kernel has run
+ * at this n (it precedes the reference in the table), the two must agree: this is the smoke-run check
+ * of the C loop against the compiled one, the plausibility floor in main being a full-run check. */
+static uint64_t ref_case(KernelKind k, uint64_t n) {
+  uint64_t v = reference(k, n);
+  if (g_last_out_n[k] == n && g_last_out[k] != v) {
+    fprintf(stderr, "bench: kernel %s: the C reference gives %016llx, the compiled loop gave %016llx\n", kernel_name[k],
+        (unsigned long long)v, (unsigned long long)g_last_out[k]);
+    setup_failed("a C reference that disagrees with the compiled loop");
+  }
+  return v;
+}
 
 #define KERNEL_CASES(tag, kind) \
   static uint64_t loop_##tag##_run(uint64_t n) { return run_kernel(kind, 0, n); } \
@@ -1233,6 +1273,9 @@ int main(int argc, char ** argv) {
     printf("%-24s best %10.3f ns/op  median %10.3f ns/op  (%llu ops x %d, check %016llx)\n",
         cases[c].name, best, median, (unsigned long long)n, repeats,
         (unsigned long long)sink);
+    if (strncmp(cases[c].name, "loop-", 5) == 0 && cases[c].warm) {
+      printf("  %s: guard exits %llu\n", cases[c].name, (unsigned long long)g_guard_exits);
+    }
   }
   for (int k = 0; k < 3; k++) {
     grjit_code_destroy(g_loop[k]);

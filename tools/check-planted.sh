@@ -156,7 +156,9 @@
 # 100  a promotion that does not convert               -> testDifferential
 #
 # 101  the C reference of the F64 addition loop one     -> bench/bench --smoke (the harness checks each
-#      ulp off, in the benchmark harness                   loop's answer against its reference and aborts)
+#      off, in the benchmark harness                       loop's answer against its reference and aborts)
+# 102 to 109  the same for the F64 division and comparison loops, the signed 64-bit divide and remainder, the
+#      unsigned 32-bit divide, the truncation, the four roundings and the three bit counts (one each)
 #
 #  88  the SSE2 rounding sequence unreworked for      -> testWin64_numeric (the registers the
 #      Win64: it names the callee-saved xmm6 and xmm7      assembler encoded), testWin64 (objdump)
@@ -224,7 +226,7 @@ for entry in $DEFECTS; do
   verdict="FAILED"
   bench_args="--gtest_brief=1"
   case "$test_name" in
-    bench/*) filter=""; bench_args="--smoke"; verdict="setup failed" ;;
+    bench/*) filter=""; bench_args="--smoke"; verdict="the C reference gives" ;;
   esac
   count=$((count + 1))
   tree="$BUILD-plant-$n"
