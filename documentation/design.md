@@ -2328,6 +2328,85 @@ every instrument here (`qemu-user`, wine and the simulator model none of them); 
 arm64. A claim in this section says "under wine" (wine 10.0, the host's features), "under `qemu-aarch64`" (10.0.13) or
 "on the Pi (Cortex-A72)", and "simulated" for the simulator.
 
+## Floats and division across the three backends (spec-runtime-float, CAP-7)
+
+This section is the index to the three that wrote the detail ("The integer operations", "The float
+operations", "CPU features", "The numeric operations on arm64 and Win64"), and records the decision they
+share. It is a table and short paragraphs, not a second copy.
+
+**The decision (AD-27).** A float (and a raw 32-bit integer) is a typed register of the IR, `F32`, `F64` or
+`I32`, held as its bits in a frame slot like every other value; the frame state of a site says which
+representation a slot has (`GRCORE_REPR_F32`, `GRCORE_REPR_F64`), and `runtime-core` rebuilds the guest
+frame by converting each one. Nothing here allocates, boxes or collects, and no raw value is ever in a stack
+map. This library's part is the IR types, the operations and their verifier rules, the `F64` temporaries an
+engine asks for (an operation reads its operands from slots and writes its result to a slot; nothing is kept
+in a vector register between two operations), and the helper ABI below. The format and the rebuild are
+`runtime-core`'s ("Representation-tagged frame state"); the kinds, the pool and the exits are `lang-tang`'s.
+
+*Rejected, in this library's terms.* **In-word doubles** (NaN-boxing, a low-bit tag): the IR's value types are
+`I32`, `I64`, `F32`, `F64`, `REF` and `PTR`, and a `REF` is a precise root that the stack maps name, so a double
+packed into a word that is sometimes a reference would make the maps answer "is this a reference" from the
+word's bits, which the format forbids by construction (an engine's value representation is its own: Tang's
+pointers are 48 bits and its heap's codec describes a low-bit tag, and the lang-wasm engine has no value words).
+**Allocation inside compiled code**: an operation that allocated would be a `CALL` to an engine helper, hence a
+GC point with a stack map; the stack map cannot name a raw `F64` that is live across it, so every float in
+flight would have to be boxed before the call, which is the boxing the representation exists to avoid, and the
+helper can fail, which a straight-line float body has no way to answer except by an exit. **Boxing at every
+poll**: a poll with nothing pending is a load, a test and a branch (AD-4, AD-19) and "Benchmarks" measures it at
+a fraction of a nanosecond; boxing the live floats at each poll is an allocation for each iteration of every
+float loop. The older rejections (a dynamic tag, a representation as a `SlotKind`, a bit-copying `convert`, a
+format-version bump, floats kept in vector registers between operations, the callee-saved FP registers) are
+where they were written: `runtime-core`'s section and this library's "CPU features" and "The numeric
+operations on arm64 and Win64".
+
+**The float protocol, per backend.**
+
+| | x86-64 SysV | Win64 (Microsoft x64) | arm64 (AAPCS64) |
+| --- | --- | --- | --- |
+| helper arguments | integer class `rdi rsi rdx rcx r8 r9`, float class `xmm0`-`xmm7`, each numbered among its own class | four register slots numbered by **position**: `rcx rdx r8 r9` for an integer and `xmm0`-`xmm3` for a float; the fifth and sixth are stack words at `[rsp + 32]` and `[rsp + 40]`, a float as its bit word | integer class `x0`-`x5`, float class `d0`-`d7`, each among its own class |
+| helper result | `rax`, or `xmm0` by width | `rax`, or `xmm0` by width | `x0`, or `d0`/`s0` by width |
+| `F32` result taken | `movd eax, xmm0` (never as 64 bits) | the same | `fmov w0, s0` (the standard does not promise the upper half) |
+| between compiled functions | a float is its bit word in the register or the stack word an `I64` uses; `I32` and `F32` cut at the callee's entry and at the receiver | the same, with `GRJIT_WIN64_INTERNAL_REG_ARGS` (4) register slots | the same |
+| callee-saved vector registers | none (SysV has none) | `xmm6`-`xmm15`, never encoded | low halves of `d8`-`d15`, never encoded |
+| what shows it | the helper-ABI probe against assembly | the structural scan of the registers encoded, the bytes of the argument loads, the sentinel test under wine | the same scan, the sentinel test under `qemu-aarch64` and on the Pi, the simulator |
+| FP control state | default MXCSR assumed, never written | the same | default FPCR assumed (a test reads it and skips by name if it is not) |
+
+Helpers are non-variadic on every target, and natives (`CALL_NATIVE`) stay integer-only. The Win64 SSE2
+rounding sequence names only `xmm0`-`xmm5`, two registers dead at the point where the SysV sequence loads
+`xmm6` and `xmm7` (planted defect 88). Details:
+"The float operations" (SysV and the semantics), "The numeric operations on arm64 and Win64".
+
+**The CPU-feature arms (x86-64 only).** The set is *detected* (CPUID, once), ANDed with the context's mask
+(`disabled_features`: a disable set, zero disables nothing), *recorded* with the code (`grjit_code_features`:
+the features whose arm was taken), and the reuse is by subset (`grjit_code_usable_with`).
+
+| operation | feature | with it | without it (x86-64-v1) |
+| --- | --- | --- | --- |
+| `ceil floor trunc nearest` | SSE4.1 | `roundss`/`roundsd` | the ten-instruction SSE2 sequence |
+| `popcnt` | POPCNT | `popcnt` | the parallel count |
+| `clz` | LZCNT | `lzcnt` | `bsr`, `cmov`, `xor` |
+| `ctz` | BMI1 | `tzcnt` | `bsf`, `cmov` |
+
+arm64 needs none: the detected set is empty, the effective set is empty, a mask is accepted and changes nothing,
+and the stamp prefix is `arm64-v8`; there are no arms to compare, and the benchmark's pairs say so by name.
+"Benchmarks" has the ratio of each pair on the machine the instrument names. Details: "CPU features".
+
+**The guards.** `DIV_S`, `DIV_U`, `REM_S`, `REM_U` and `TRUNC_S`/`TRUNC_U` are *partial*: the operation never
+traps and never returns the hardware's "integer indefinite" as an answer. The frontend writes the guards as
+ordinary IR (`GUARD` in front: a divisor that is not zero, and for `DIV_S` that the dividend is not the minimum
+or the divisor is not -1; for a truncation the NaN guard and the exact range guard) and the **verifier refuses a
+function whose guard is missing or wider than the exact bound** (planted defects 38 and 44). `REM_S` of
+`MIN % -1` is 0 and needs no overflow guard. A guard that fails is a deopt exit with the frame state the
+builder was given.
+
+**NaN.** The IR guarantees the comparisons (`EQ LT LE GT GE` false when either side is a NaN, `NE` true), that
+`FNEG`, `FABS` and `FCOPYSIGN` act on the sign bit alone, that `FMIN`/`FMAX` of a NaN is a quiet NaN, that
+the conversions round once to nearest even, and that a NaN produced is of the class asked for (canonical when
+every input is canonical, else arithmetic). It does **not** fix a NaN's sign or payload, or which payload
+survives when both operands are NaN: an engine that needs a particular NaN must make it itself (a constant),
+and must not rely on one an operation made. Compiled NaN arithmetic is not an exit. The suite compares floats
+by bits with any two NaNs equal.
+
 ## Gates
 
 `make check-labels` requires every header to carry exactly one `@stability free`
@@ -2343,10 +2422,14 @@ here: the headers are flat.
 
 ## Benchmarks
 
-`make bench` has a calibration case, compiling a 100-operation function, and a
-counting loop of 10 million iterations three ways: with no poll, with an inline
-poll whose fast path is taken, and with a call to a no-op `NO_GC` helper on
-every iteration. `make test` runs it once, small. No budget is asserted (AD-26).
+`make bench` has a calibration case, compiling a 100-operation function (and, beside it,
+100 float operations and 100 guarded divisions), counting loops of 10 million iterations
+(with no poll, with an inline poll whose fast path is taken, with a call to a no-op `NO_GC`
+helper, and through the calls and natives of "Calls between compiled functions"), the float,
+division and conversion loops with a C reference each, and the CPU-feature arms in pairs.
+`make test` runs it once, small, and checks every loop's answer against its reference. No
+budget is asserted (AD-26). The first measurement below is the first one, on another machine;
+the figures of the float, division and conversion loops follow it.
 
 First measurement, 2026-10-03, an Intel Core 7 150U, GCC 14.2, release build
 (minimum of 5 repeats; medians in brackets):
@@ -2371,6 +2454,55 @@ The compiled-call, tail-call and native-call loops of `bench/bench.c` are record
 their machine, compiler and date under "Calls between compiled functions", "Measured",
 and the call-heavy `fib` against the interpreter is lang-tang's (this library has no
 interpreter).
+
+### Floats, division and conversion against C, and the CPU-feature arms (spec-runtime-float)
+
+*Instrument.* `bench/bench.c` of runtime-jit `613c115`, runtime-core `08deb9e`, cutil `d440e43`, built in the build image (`ghoti-build:gcc16`: GCC 16.2.0, `-O2 -g -std=c17 -ffp-contract=off`, release) and run through `tools/evo` on the EVO-X2 (AMD Ryzen AI MAX+ 395, Linux 7.2.9, governor `powersave`, detected CPU features `x86_64-v1+sse4.1+popcnt+lzcnt+bmi1`), the box otherwise idle (load 0.8 before the run), 2026-10-11. The calibration case reads 1.170 ns a step. Each case is the best of 5 repeats of 10,000,000 iterations (1,000 in a smoke run), the whole harness was run **5 times**, and each figure is the **median of the five runs' bests, with the minimum and the spread (maximum less minimum) in brackets as (minimum; spread)**. To reproduce: `make -C libs/runtime-jit build/linux/release/apps/bench/bench PREFIX=<prefix>` and `build/linux/release/apps/bench/bench`. The results of every compiled loop are checked in the case against the C reference's (a float by its bits) in a smoke run too, and planted defect 101 (a reference one ulp off) shows that the check can fail. No qemu or wine figure is recorded anywhere here.
+
+*The C loops are honest.* Each `ref-loop-*` case is the same loop in C built with the project's flags, with an empty `asm volatile` naming its accumulator after every iteration (a register-class constraint per target: `+x` on x86-64, `+w` on arm64), so the compiler can neither fold it to a closed form nor vectorise or remove it; the harness refuses a reference that runs faster than 0.05 ns an operation. The disassembly of the seven references was read once on this build: `ref-loop-f64-add` is `cvtsi2sd`, `mulsd`, `addsd`, the increment and the compare, one dependent `addsd` chain; `-f64-div` the same with `divsd`; `-f64-cmp` a `cvtsi2sd`, a `mulsd`, `comisd`/`ucomisd` twice and three condition-to-integer sequences (`seta`, `setnp` with `cmovne`, `sbb`); `-i64-div-s` and `-i64-rem-s` a `cqo` and an `idiv` in every iteration with the divisor computed in the iteration; `-i32-div-u` a `div ecx`; `-cvt-trunc` `cvtsi2sd`, `mulsd`, `cvttsd2si` and an add. None is vectorised, none is a closed form, and none was removed. The compiled `F64` loop (the `runtime-jit` code bytes of `loop-f64-add`, read with `objdump -D -b binary`) has `cvtsi2sd`, `mulsd` and `addsd` between its compare and its back jump, with the frame-slot loads and stores around each
+
+
+| Loop (ns per iteration, 10,000,000 iterations a repeat) | Compiled | The C loop | Compiled over C |
+| --- | --- | --- | --- |
+| `loop-f64-add`: `sum += (double)i * 0.5` (convert, multiply, add) | 2.358 (2.347; 0.013) | 0.518 (0.517; 0.003) | 4.55 |
+| `loop-f64-div`: `sum += (double)i / 3.0` | 2.345 (2.342; 0.006) | 0.780 (0.780; 0.000) | 3.01 |
+| `loop-f64-cmp`: three comparisons of a raw double | 2.008 (1.987; 0.022) | 0.798 (0.784; 0.015) | 2.52 |
+| `loop-i64-div-s`: signed 64-bit divide, zero and overflow guards | 1.930 (1.910; 0.023) | 1.365 (1.365; 0.001) | 1.41 |
+| `loop-i64-rem-s`: signed 64-bit remainder, zero guard | 1.398 (1.388; 0.015) | 1.365 (1.365; 0.000) | 1.02 |
+| `loop-i32-div-u`: unsigned 32-bit divide, zero guard | 1.386 (1.368; 0.029) | 1.180 (1.179; 0.002) | 1.17 |
+| `loop-cvt-trunc`: `trunc_s` behind the NaN and range guards | 2.326 (2.292; 0.035) | 0.297 (0.290; 0.007) | 7.83 |
+
+*What it shows.* The baseline keeps every value in a frame slot and stores and reloads each iteration, so a ratio to C is a statement about the baseline and not about the instruction: the compiled loop is **2.3 to 4.5 times the C loop for float operations** (the dependent chain through a frame slot is added to the arithmetic), **1.0 to 1.4 times for the integer divisions** (the hardware divide dominates both), and **7.8 times for the guarded truncation**, whose C loop is one `cvttsd2si` and whose compiled form carries two guards, a compare against each bound and the slot traffic. A guard that does not fire is cheap (the divide loops are within 0.6 ns of C); none of the guards fired in any timed loop. The compile of a 100-operation function: **6.5 us for 100 float operations** against 5.1 us for the integer function above (`compile-100-f64` and `compile-100`), and **78.1 us for 100 guarded divisions and remainders**: each guard is a site with its own frame state and metadata, so a function of guarded divisions compiles about fifteen times as slowly as one of the same length without guards (78,050 ns against 5,095.7 ns).
+
+| Arm pair (ns per iteration) | With the detected feature | Every optional feature masked off (v1) | v1 over detected |
+| --- | --- | --- | --- |
+| `ceil` (SSE4.1 `roundsd`) | 2.367 (2.343; 0.026) | 2.477 (2.428; 0.057) | 1.05 |
+| `floor` (SSE4.1) | 2.365 (2.344; 0.025) | 2.466 (2.420; 0.055) | 1.04 |
+| `trunc` (SSE4.1) | 2.365 (2.343; 0.040) | 2.454 (2.410; 0.074) | 1.04 |
+| `nearest` (SSE4.1) | 2.367 (2.345; 0.046) | 2.413 (2.369; 0.056) | 1.02 |
+| `popcnt` (POPCNT) | 0.836 (0.820; 0.026) | 1.471 (1.445; 0.037) | 1.76 |
+| `clz` (LZCNT) | 0.841 (0.812; 0.041) | 0.965 (0.939; 0.042) | 1.15 |
+| `ctz` (BMI1 `tzcnt`) | 0.841 (0.811; 0.042) | 0.895 (0.880; 0.031) | 1.06 |
+
+*The CPU-feature arms.* These ratios are the evidence for CAP-2's choice to detect at run time, on this CPU and in this baseline: the SSE4.1 rounding is 1.05, 1.04, 1.04 and 1.02 times as fast as the ten-instruction SSE2 sequence (small, because a loop iteration is dominated by the slot traffic and the convert and multiply beside it), `popcnt` is **1.76 times** as fast as the parallel count, `lzcnt` 1.15 and `tzcnt` 1.06 times as fast as the `bsr` and `bsf` sequences. A masked run is the fallback's cost on a CPU that has the feature, which is what the right column says; a CPU without the feature runs that sequence. **On arm64 the arms do not exist**: the detected set is empty, a mask changes nothing, and the harness prints the `-v1` row of each pair as `skipped: this target has no optional CPU features (no arms)` by name.
+
+*Against the figures recorded before.* The rows of the first measurement (an Intel Core 7 150U, GCC 14.2) are another machine and another compiler and are not comparable with the table above. On this machine the earlier call figures of "Calls between compiled functions, Measured" (2.641 to 2.823 for `loop-compiled-call`, 1.670 to 1.790 for `loop-tail-call`, 1.020 to 1.091, 1.021 to 1.107 and 1.027 to 1.114 for the three native loops) were re-measured on `613c115`: 2.726 (2.634; 0.159), 1.716 (1.658; 0.102), 1.044 (1.018; 0.049), 1.065 (1.018; 0.071) and 1.070 (1.022; 0.166). All five are inside the earlier ranges: not told apart. The first loop rows on this machine: `loop-plain` 0.487 (0.478; 0.018), `loop-poll` 0.603 (0.592; 0.030), `loop-call` 1.033 (1.010; 0.059), `compile-12k-sites` 13,859,963 ns.
+
+**On real arm64 (a Raspberry Pi 4, Cortex-A72).** *Instrument:* the same harness, runtime-jit `613c115`, runtime-core `08deb9e`, cutil `d440e43`, built in `suite/Containerfile.build.arm64` (GCC 16.2.0 aarch64, `-O2 -g -std=c17 -ffp-contract=off`, release) through `tools/evo --box pi4`, the Raspberry Pi 4 Model B Rev 1.4 (Linux 6.18.50, governor `ondemand`, the television's controller with nothing else of ours running, capped at 3 GiB and 3 CPUs; load 1.3 before the run), detected CPU features `arm64-v8`, **3 runs** of the whole harness, 2026-10-11, the same statistic. The calibration reads 3.337 ns a step. The C references were read on x86-64 only (their arm64 disassembly was not looked at; the references carry the `+w` barrier and their figures are as plausible as the x86-64 ones, but this is a statement and not a check). Every loop's answer was checked against its reference on the Pi, which runs the F64, divide and truncation emission on real arm64.
+
+| Loop (ns per iteration) | Compiled | The C loop | Compiled over C |
+| --- | --- | --- | --- |
+| `loop-f64-add` | 10.8 (10.8; 0.001) | 1.668 (1.668; 0.000) | 6.47 |
+| `loop-f64-div` | 13.9 (13.9; 0.014) | 8.897 (8.897; 0.006) | 1.56 |
+| `loop-f64-cmp` | 24.5 (24.5; 0.001) | 3.893 (3.892; 0.001) | 6.29 |
+| `loop-i64-div-s` | 21.1 (21.0; 0.030) | 3.783 (3.783; 0.001) | 5.58 |
+| `loop-i64-rem-s` | 14.1 (14.1; 0.001) | 4.618 (4.618; 0.009) | 3.05 |
+| `loop-i32-div-u` | 19.0 (19.0; 0.000) | 3.784 (3.783; 0.001) | 5.02 |
+| `loop-cvt-trunc` | 26.1 (26.1; 0.001) | 2.224 (2.224; 0.000) | 11.74 |
+
+On arm64 the arms do not exist: the harness printed the seven `-v1` rows as `skipped: this target has no optional CPU features (no arms)` by name (the detected-side loops ran, and are the plain emission). The compile of 100 float operations is 53,813 ns against 46,111 ns for 100 integer operations, and of 100 guarded divisions and remainders 531,532 ns (11.53 times as slow as the integer function: the guards' sites again). The call figures of the section above, re-measured on this commit: `loop-compiled-call` 17.6 (17.6; 0.022) (17.61 recorded), `loop-tail-call` 12.8 (12.8; 0.154) (12.79), `loop-native` 7.229 (7.23): not told apart; the compile of a 100-operation function is 46.1 us against the recorded 44 (moved by 5%, more than the spread of 0.3 us; not attributed).
+
+
 
 ## What is not here
 
