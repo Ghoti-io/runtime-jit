@@ -83,6 +83,8 @@ typedef struct {
   uint64_t iterations;       /* per repeat, full run */
   uint64_t smoke_iterations; /* per repeat, --smoke */
   int needs_calls;           /* only where calls between compiled functions exist */
+  int warm;                  /* run once, untimed, first (the kernel cases compute their reference then) */
+  int needs_features;        /* a CPU-feature arm: only where the target has optional features */
 } Case;
 
 /* A case that cannot set itself up must not report a short, fast run as a
@@ -643,23 +645,525 @@ static uint64_t compile_sites_run(uint64_t iterations) {
   return sink;
 }
 
+/* ---- floats, division, conversion and the CPU-feature arms (spec-runtime-float story 8) ----
+ *
+ * Each kernel is a counting loop in the shape of `build_loop` that accumulates into an I64
+ * or an F64 register (the baseline keeps every value in a frame slot, so a ratio to C is a
+ * statement about the baseline). Its result is checked against a C reference of the same
+ * loop, floats by their bits, in a --smoke run too. The references are timed as cases of their
+ * own ("ref-..."), built with the project's flags (-ffp-contract=off among them) and with an
+ * empty asm statement that names the accumulator after every iteration, so the compiler can
+ * neither fold the loop to a closed form nor vectorise or remove it; main refuses a reference
+ * whose figure is implausibly fast for that (below 0.05 ns an operation).
+ *
+ * The CPU-feature arms are the same loop compiled twice, with the detected features and with
+ * every optional feature masked off (x86-64-v1 code). Where the target has no optional feature
+ * (arm64) the pairs are skipped by name. */
+
+#if defined(__x86_64__) || defined(__i386__)
+#define BARRIER_F(x) __asm__ volatile("" : "+x"(x))
+#elif defined(__aarch64__)
+#define BARRIER_F(x) __asm__ volatile("" : "+w"(x))
+#else
+#define BARRIER_F(x) \
+  do { \
+    volatile double barrier_sink_ = (x); \
+    (x) = barrier_sink_; \
+  } while (0)
+#endif
+#define BARRIER_I(x) __asm__ volatile("" : "+r"(x))
+
+typedef enum {
+  K_F64_ADD,    /* fsum += (double)i * 0.5 */
+  K_F64_DIV,    /* fsum += (double)i / 3.0 */
+  K_F64_CMP,    /* x = (double)i * 0.5; sum += (x < 100.0) + (x == 100.0) + (x >= 100.0) */
+  K_I64_DIV_S,  /* sum += i / ((i & 7) + 1), with the zero and the overflow guards */
+  K_I64_REM_S,  /* sum += i % ((i & 7) + 1), with the zero guard */
+  K_I32_DIV_U,  /* sum += (uint32_t)i / (((uint32_t)i & 7) + 1), with the zero guard */
+  K_CVT_TRUNC,  /* sum += (int64_t)((double)i * 0.25), with the NaN and range guards */
+  K_F64_CEIL,   /* fsum += ceil((double)i * 0.37) */
+  K_F64_FLOOR,
+  K_F64_TRUNC,
+  K_F64_NEAREST,
+  K_POPCNT,     /* sum += popcount((i + 1) * 0x9E3779B97F4A7C15) */
+  K_CLZ,
+  K_CTZ,
+  K_COUNT
+} KernelKind;
+
+#define FIRST_FEATURE_KERNEL K_F64_CEIL
+
+static int kernel_is_float(KernelKind k) {
+  return k == K_F64_ADD || k == K_F64_DIV || (k >= K_F64_CEIL && k <= K_F64_NEAREST);
+}
+
+static int64_t dbits(double d) {
+  int64_t b;
+  memcpy(&b, &d, sizeof b);
+  return b;
+}
+
+static const char * const kernel_name[K_COUNT] = {"f64-add", "f64-div", "f64-cmp", "i64-div-s", "i64-rem-s", "i32-div-u",
+    "cvt-trunc", "f64-ceil", "f64-floor", "f64-trunc", "f64-nearest", "popcnt", "clz", "ctz"};
+
+static GRJIT_Function * build_kernel(KernelKind k) {
+  GRJIT_Builder * b;
+  check(grjit_builder_create(kernel_name[k], 0, NULL, NULL, &b), "builder");
+  GRJIT_VReg n, i, sum, fsum, t, t1, t2, t3, t4, d, q, x, y, w, d32, q32, v;
+  GRJIT_BlockId entry, head, body, done;
+  const int fl = kernel_is_float(k);
+  check(grjit_builder_param(b, GRJIT_TYPE_I64, &n), "param");
+  check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &i), "vreg");
+  check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &sum), "vreg");
+  check(grjit_builder_vreg(b, GRJIT_TYPE_F64, &fsum), "vreg");
+  check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &t), "vreg");
+  check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &t1), "vreg");
+  check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &t2), "vreg");
+  check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &t3), "vreg");
+  check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &t4), "vreg");
+  check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &d), "vreg");
+  check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &q), "vreg");
+  check(grjit_builder_vreg(b, GRJIT_TYPE_F64, &x), "vreg");
+  check(grjit_builder_vreg(b, GRJIT_TYPE_F64, &y), "vreg");
+  check(grjit_builder_vreg(b, GRJIT_TYPE_I32, &w), "vreg");
+  check(grjit_builder_vreg(b, GRJIT_TYPE_I32, &d32), "vreg");
+  check(grjit_builder_vreg(b, GRJIT_TYPE_I32, &q32), "vreg");
+  check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &v), "vreg");
+  check(grjit_builder_block(b, &entry), "block");
+  check(grjit_builder_block(b, &head), "block");
+  check(grjit_builder_block(b, &body), "block");
+  check(grjit_builder_block(b, &done), "block");
+  check(grjit_builder_set_block(b, entry), "at");
+  check(grjit_builder_const(b, i, 0), "op");
+  check(grjit_builder_const(b, sum, 0), "op");
+  check(grjit_builder_const(b, fsum, 0), "op");
+  if (k == K_F64_CMP) {
+    check(grjit_builder_const(b, y, dbits(100.0)), "op");
+  }
+  check(grjit_builder_br(b, head), "op");
+  check(grjit_builder_set_block(b, head), "at");
+  check(grjit_builder_cmp(b, GRJIT_CMP_LT, t, grjit_operand_vreg(i), grjit_operand_vreg(n)), "op");
+  check(grjit_builder_br_if(b, grjit_operand_vreg(t), body, done), "op");
+  check(grjit_builder_set_block(b, body), "at");
+  const GRCORE_PollIdentity id = {1, 1};
+#define VR(r) grjit_operand_vreg(r)
+#define IMM(v) grjit_operand_imm(v)
+#define OPK(call) check(call, "op")
+  switch (k) {
+    case K_F64_ADD:
+      OPK(grjit_builder_unary(b, GRJIT_OP_CONVERT_S, x, VR(i)));
+      OPK(grjit_builder_binary(b, GRJIT_OP_FMUL, x, VR(x), IMM(dbits(0.5))));
+      OPK(grjit_builder_binary(b, GRJIT_OP_FADD, fsum, VR(fsum), VR(x)));
+      break;
+    case K_F64_DIV:
+      OPK(grjit_builder_unary(b, GRJIT_OP_CONVERT_S, x, VR(i)));
+      OPK(grjit_builder_binary(b, GRJIT_OP_FDIV, x, VR(x), IMM(dbits(3.0))));
+      OPK(grjit_builder_binary(b, GRJIT_OP_FADD, fsum, VR(fsum), VR(x)));
+      break;
+    case K_F64_CMP:
+      OPK(grjit_builder_unary(b, GRJIT_OP_CONVERT_S, x, VR(i)));
+      OPK(grjit_builder_binary(b, GRJIT_OP_FMUL, x, VR(x), IMM(dbits(0.5))));
+      OPK(grjit_builder_cmp(b, GRJIT_CMP_LT, t1, VR(x), VR(y)));
+      OPK(grjit_builder_cmp(b, GRJIT_CMP_EQ, t2, VR(x), VR(y)));
+      OPK(grjit_builder_cmp(b, GRJIT_CMP_GE, t3, VR(x), VR(y)));
+      OPK(grjit_builder_binary(b, GRJIT_OP_ADD, sum, VR(sum), VR(t1)));
+      OPK(grjit_builder_binary(b, GRJIT_OP_ADD, sum, VR(sum), VR(t2)));
+      OPK(grjit_builder_binary(b, GRJIT_OP_ADD, sum, VR(sum), VR(t3)));
+      break;
+    case K_I64_DIV_S:
+    case K_I64_REM_S:
+      OPK(grjit_builder_binary(b, GRJIT_OP_AND, d, VR(i), IMM(7)));
+      OPK(grjit_builder_binary(b, GRJIT_OP_ADD, d, VR(d), IMM(1)));
+      OPK(grjit_builder_cmp(b, GRJIT_CMP_NE, t, VR(d), IMM(0)));
+      OPK(grjit_builder_guard(b, VR(t), id, NULL, 0));
+      if (k == K_I64_DIV_S) {
+        OPK(grjit_builder_cmp(b, GRJIT_CMP_EQ, t1, VR(i), IMM(INT64_MIN)));
+        OPK(grjit_builder_cmp(b, GRJIT_CMP_EQ, t2, VR(d), IMM(-1)));
+        OPK(grjit_builder_binary(b, GRJIT_OP_AND, t3, VR(t1), VR(t2)));
+        OPK(grjit_builder_cmp(b, GRJIT_CMP_EQ, t4, VR(t3), IMM(0)));
+        OPK(grjit_builder_guard(b, VR(t4), id, NULL, 0));
+      }
+      OPK(grjit_builder_binary(b, k == K_I64_DIV_S ? GRJIT_OP_DIV_S : GRJIT_OP_REM_S, q, VR(i), VR(d)));
+      OPK(grjit_builder_binary(b, GRJIT_OP_ADD, sum, VR(sum), VR(q)));
+      break;
+    case K_I32_DIV_U:
+      OPK(grjit_builder_binary(b, GRJIT_OP_AND, d, VR(i), IMM(7)));
+      OPK(grjit_builder_binary(b, GRJIT_OP_ADD, d, VR(d), IMM(1)));
+      OPK(grjit_builder_unary(b, GRJIT_OP_WRAP, w, VR(i)));
+      OPK(grjit_builder_unary(b, GRJIT_OP_WRAP, d32, VR(d)));
+      OPK(grjit_builder_cmp(b, GRJIT_CMP_NE, t, VR(d32), IMM(0)));
+      OPK(grjit_builder_guard(b, VR(t), id, NULL, 0));
+      OPK(grjit_builder_binary(b, GRJIT_OP_DIV_U, q32, VR(w), VR(d32)));
+      OPK(grjit_builder_unary(b, GRJIT_OP_EXTEND_U, q, VR(q32)));
+      OPK(grjit_builder_binary(b, GRJIT_OP_ADD, sum, VR(sum), VR(q)));
+      break;
+    case K_CVT_TRUNC:
+      OPK(grjit_builder_unary(b, GRJIT_OP_CONVERT_S, x, VR(i)));
+      OPK(grjit_builder_binary(b, GRJIT_OP_FMUL, x, VR(x), IMM(dbits(0.25))));
+      OPK(grjit_builder_cmp(b, GRJIT_CMP_EQ, t, VR(x), VR(x)));
+      OPK(grjit_builder_guard(b, VR(t), id, NULL, 0));
+      OPK(grjit_builder_cmp(b, GRJIT_CMP_GE, t1, VR(x), IMM(dbits(-9223372036854775808.0))));
+      OPK(grjit_builder_cmp(b, GRJIT_CMP_LT, t2, VR(x), IMM(dbits(9223372036854775808.0))));
+      OPK(grjit_builder_binary(b, GRJIT_OP_AND, t3, VR(t1), VR(t2)));
+      OPK(grjit_builder_guard(b, VR(t3), id, NULL, 0));
+      OPK(grjit_builder_unary(b, GRJIT_OP_TRUNC_S, q, VR(x)));
+      OPK(grjit_builder_binary(b, GRJIT_OP_ADD, sum, VR(sum), VR(q)));
+      break;
+    case K_F64_CEIL:
+    case K_F64_FLOOR:
+    case K_F64_TRUNC:
+    case K_F64_NEAREST: {
+      static const GRJIT_OpKind ops[] = {GRJIT_OP_FCEIL, GRJIT_OP_FFLOOR, GRJIT_OP_FTRUNC, GRJIT_OP_FNEAREST};
+      OPK(grjit_builder_unary(b, GRJIT_OP_CONVERT_S, x, VR(i)));
+      OPK(grjit_builder_binary(b, GRJIT_OP_FMUL, x, VR(x), IMM(dbits(0.37))));
+      OPK(grjit_builder_unary(b, ops[k - K_F64_CEIL], x, VR(x)));
+      OPK(grjit_builder_binary(b, GRJIT_OP_FADD, fsum, VR(fsum), VR(x)));
+      break;
+    }
+    case K_POPCNT:
+    case K_CLZ:
+    case K_CTZ:
+      OPK(grjit_builder_binary(b, GRJIT_OP_ADD, v, VR(i), IMM(1)));
+      OPK(grjit_builder_binary(b, GRJIT_OP_MUL, v, VR(v), IMM((int64_t)0x9E3779B97F4A7C15ull)));
+      OPK(grjit_builder_unary(b, k == K_POPCNT ? GRJIT_OP_POPCNT : k == K_CLZ ? GRJIT_OP_CLZ : GRJIT_OP_CTZ, q, VR(v)));
+      OPK(grjit_builder_binary(b, GRJIT_OP_ADD, sum, VR(sum), VR(q)));
+      break;
+    case K_COUNT:
+      break;
+  }
+  OPK(grjit_builder_binary(b, GRJIT_OP_ADD, i, VR(i), IMM(1)));
+  OPK(grjit_builder_br(b, head));
+  check(grjit_builder_set_block(b, done), "at");
+  check(grjit_builder_ret(b, VR(fl ? fsum : sum)), "op");
+#undef VR
+#undef IMM
+#undef OPK
+  GRJIT_Function * f;
+  check(grjit_builder_finish(b, &f), "finish");
+  return f;
+}
+
+/* The C references. Each returns what the compiled loop returns, as a 64-bit word (a float's
+ * bits). */
+static uint64_t ref_f64_add(uint64_t n) {
+  double s = 0.0;
+  for (int64_t i = 0; i < (int64_t)n; i++) {
+    s = s + (double)i * 0.5;
+    BARRIER_F(s);
+  }
+  return (uint64_t)dbits(s);
+}
+static uint64_t ref_f64_div(uint64_t n) {
+  double s = 0.0;
+  for (int64_t i = 0; i < (int64_t)n; i++) {
+    s = s + (double)i / 3.0;
+    BARRIER_F(s);
+  }
+  return (uint64_t)dbits(s);
+}
+static uint64_t ref_f64_cmp(uint64_t n) {
+  int64_t s = 0;
+  double y = 100.0;
+  BARRIER_F(y);
+  for (int64_t i = 0; i < (int64_t)n; i++) {
+    double x = (double)i * 0.5;
+    s += x < y;
+    s += x == y;
+    s += x >= y;
+    BARRIER_I(s);
+  }
+  return (uint64_t)s;
+}
+static uint64_t ref_i64_div_s(uint64_t n) {
+  int64_t s = 0;
+  for (int64_t i = 0; i < (int64_t)n; i++) {
+    int64_t d = (i & 7) + 1;
+    BARRIER_I(d);
+    s += i / d;
+    BARRIER_I(s);
+  }
+  return (uint64_t)s;
+}
+static uint64_t ref_i64_rem_s(uint64_t n) {
+  int64_t s = 0;
+  for (int64_t i = 0; i < (int64_t)n; i++) {
+    int64_t d = (i & 7) + 1;
+    BARRIER_I(d);
+    s += i % d;
+    BARRIER_I(s);
+  }
+  return (uint64_t)s;
+}
+static uint64_t ref_i32_div_u(uint64_t n) {
+  uint64_t s = 0;
+  for (int64_t i = 0; i < (int64_t)n; i++) {
+    uint32_t d = ((uint32_t)i & 7u) + 1u;
+    BARRIER_I(d);
+    s += (uint32_t)i / d;
+    BARRIER_I(s);
+  }
+  return s;
+}
+static uint64_t ref_cvt_trunc(uint64_t n) {
+  int64_t s = 0;
+  for (int64_t i = 0; i < (int64_t)n; i++) {
+    double x = (double)i * 0.25;
+    BARRIER_F(x);
+    s += (int64_t)x;
+    BARRIER_I(s);
+  }
+  return (uint64_t)s;
+}
+static uint64_t ref_f64_round(KernelKind k, uint64_t n) {
+  double s = 0.0;
+  for (int64_t i = 0; i < (int64_t)n; i++) {
+    double x = (double)i * 0.37;
+    BARRIER_F(x);
+    switch (k) {
+      case K_F64_CEIL: x = __builtin_ceil(x); break;
+      case K_F64_FLOOR: x = __builtin_floor(x); break;
+      case K_F64_TRUNC: x = __builtin_trunc(x); break;
+      default: x = __builtin_rint(x); break;
+    }
+    s = s + x;
+    BARRIER_F(s);
+  }
+  return (uint64_t)dbits(s);
+}
+static uint64_t ref_bits(KernelKind k, uint64_t n) {
+  uint64_t s = 0;
+  for (int64_t i = 0; i < (int64_t)n; i++) {
+    uint64_t v = ((uint64_t)i + 1u) * 0x9E3779B97F4A7C15ull;
+    BARRIER_I(v);
+    s += k == K_POPCNT ? (uint64_t)__builtin_popcountll(v) : k == K_CLZ ? (uint64_t)__builtin_clzll(v) : (uint64_t)__builtin_ctzll(v);
+    BARRIER_I(s);
+  }
+  return s;
+}
+
+/* The reference of a kernel, by kind. The `switch` is outside every loop. */
+static uint64_t reference(KernelKind k, uint64_t n) {
+  switch (k) {
+    case K_F64_ADD: {
+      uint64_t v = ref_f64_add(n);
+#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 101
+      /* Planted (check-planted.sh): the reference is one ulp off, so the compiled loop's
+       * correct answer disagrees with it and the case must fail, in a --smoke run too. */
+      v += 1u;
+#endif
+      return v;
+    }
+    case K_F64_DIV: return ref_f64_div(n);
+    case K_F64_CMP: return ref_f64_cmp(n);
+    case K_I64_DIV_S: return ref_i64_div_s(n);
+    case K_I64_REM_S: return ref_i64_rem_s(n);
+    case K_I32_DIV_U: return ref_i32_div_u(n);
+    case K_CVT_TRUNC: return ref_cvt_trunc(n);
+    case K_F64_CEIL:
+    case K_F64_FLOOR:
+    case K_F64_TRUNC:
+    case K_F64_NEAREST: return ref_f64_round(k, n);
+    case K_POPCNT:
+    case K_CLZ:
+    case K_CTZ: return ref_bits(k, n);
+    case K_COUNT: break;
+  }
+  return 0;
+}
+
+static GRJIT_Code * g_kernel[K_COUNT][2]; /* [kind][0 the detected features, 1 every optional feature masked off] */
+static uint64_t g_expected_n[K_COUNT];
+static uint64_t g_expected[K_COUNT];
+
+static GRJIT_Code * compile_masked(const GRJIT_Function * f, GRJIT_Features disabled) {
+  GRJIT_CompileOptions o;
+  memset(&o, 0, sizeof o);
+  o.pages = grcore_context_page_provider(g_context);
+  o.disabled_features = disabled;
+  GRJIT_Code * code;
+  check(grjit_compile(&o, f, &code), "compile");
+  return code;
+}
+
+/* Runs a kernel and checks its answer against the reference (floats by bits). The reference is
+ * computed once for each n, outside the timed region (main runs a case once before it times it). */
+static uint64_t run_kernel(KernelKind k, int masked, uint64_t n) {
+  world_open();
+  if (g_kernel[k][masked] == NULL) {
+    GRJIT_Function * f = build_kernel(k);
+    g_kernel[k][masked] = compile_masked(f, masked ? GRJIT_FEATURES_ALL : GRJIT_FEATURES_NONE);
+    grjit_function_destroy(f);
+  }
+  uint64_t args[1] = {n};
+  uint64_t out[3] = {0, 0, 0};
+  if (grjit_code_call(g_kernel[k][masked], g_context, args, out) != GRJIT_EXIT_RETURNED) {
+    setup_failed("a kernel loop left through a guard, or did not return");
+  }
+  if (g_expected_n[k] != n || g_expected_n[k] == 0) {
+    g_expected[k] = reference(k, n);
+    g_expected_n[k] = n;
+  }
+  if (out[0] != g_expected[k]) {
+    fprintf(stderr, "bench: kernel %s (masked %d): got %016llx, the C reference gives %016llx\n", kernel_name[k], masked,
+        (unsigned long long)out[0], (unsigned long long)g_expected[k]);
+    setup_failed("a kernel loop's answer is not the C reference's");
+  }
+  return out[0];
+}
+
+static uint64_t ref_case(KernelKind k, uint64_t n) { return reference(k, n); }
+
+#define KERNEL_CASES(tag, kind) \
+  static uint64_t loop_##tag##_run(uint64_t n) { return run_kernel(kind, 0, n); } \
+  static uint64_t ref_##tag##_run(uint64_t n) { return ref_case(kind, n); }
+#define KERNEL_ARM_CASES(tag, kind) \
+  static uint64_t loop_##tag##_run(uint64_t n) { return run_kernel(kind, 0, n); } \
+  static uint64_t loop_##tag##_v1_run(uint64_t n) { return run_kernel(kind, 1, n); }
+
+KERNEL_CASES(f64_add, K_F64_ADD)
+KERNEL_CASES(f64_div, K_F64_DIV)
+KERNEL_CASES(f64_cmp, K_F64_CMP)
+KERNEL_CASES(i64_div_s, K_I64_DIV_S)
+KERNEL_CASES(i64_rem_s, K_I64_REM_S)
+KERNEL_CASES(i32_div_u, K_I32_DIV_U)
+KERNEL_CASES(cvt_trunc, K_CVT_TRUNC)
+KERNEL_ARM_CASES(f64_ceil, K_F64_CEIL)
+KERNEL_ARM_CASES(f64_floor, K_F64_FLOOR)
+KERNEL_ARM_CASES(f64_trunc, K_F64_TRUNC)
+KERNEL_ARM_CASES(f64_nearest, K_F64_NEAREST)
+KERNEL_ARM_CASES(popcnt, K_POPCNT)
+KERNEL_ARM_CASES(clz, K_CLZ)
+KERNEL_ARM_CASES(ctz, K_CTZ)
+
+/* A function of 100 float operations (the compile cost beside compile-100) and one of 100
+ * guarded divisions and remainders. */
+static GRJIT_Function * build_hundred_f64(void) {
+  GRJIT_Builder * b;
+  check(grjit_builder_create("hundred_f64", 0, NULL, NULL, &b), "builder");
+  GRJIT_VReg x, y, z;
+  GRJIT_BlockId entry;
+  check(grjit_builder_param(b, GRJIT_TYPE_F64, &x), "param");
+  check(grjit_builder_vreg(b, GRJIT_TYPE_F64, &y), "vreg");
+  check(grjit_builder_vreg(b, GRJIT_TYPE_F64, &z), "vreg");
+  check(grjit_builder_block(b, &entry), "block");
+  check(grjit_builder_set_block(b, entry), "at");
+  check(grjit_builder_const(b, y, dbits(1.0)), "op");
+  check(grjit_builder_const(b, z, dbits(2.0)), "op");
+  static const GRJIT_OpKind kinds[] = {GRJIT_OP_FADD, GRJIT_OP_FSUB, GRJIT_OP_FMUL, GRJIT_OP_FDIV};
+  for (int i = 0; i < 96; i++) {
+    GRJIT_VReg d = i % 3 == 0 ? y : i % 3 == 1 ? z : x;
+    GRJIT_VReg a = i % 3 == 0 ? z : i % 3 == 1 ? x : y;
+    check(grjit_builder_binary(b, kinds[i % 4], d, grjit_operand_vreg(a), grjit_operand_imm(dbits(1.5 + (double)i))), "op");
+  }
+  check(grjit_builder_binary(b, GRJIT_OP_FADD, x, grjit_operand_vreg(x), grjit_operand_vreg(y)), "op");
+  check(grjit_builder_binary(b, GRJIT_OP_FADD, x, grjit_operand_vreg(x), grjit_operand_vreg(z)), "op");
+  check(grjit_builder_ret(b, grjit_operand_vreg(x)), "op");
+  GRJIT_Function * f;
+  check(grjit_builder_finish(b, &f), "finish");
+  return f;
+}
+
+static GRJIT_Function * build_hundred_int_div(void) {
+  GRJIT_Builder * b;
+  check(grjit_builder_create("hundred_div", 0, NULL, NULL, &b), "builder");
+  GRJIT_VReg a, d, t, t1, t2, t3, t4, q;
+  GRJIT_BlockId entry;
+  check(grjit_builder_param(b, GRJIT_TYPE_I64, &a), "param");
+  check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &d), "vreg");
+  check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &t), "vreg");
+  check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &t1), "vreg");
+  check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &t2), "vreg");
+  check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &t3), "vreg");
+  check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &t4), "vreg");
+  check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &q), "vreg");
+  check(grjit_builder_block(b, &entry), "block");
+  check(grjit_builder_set_block(b, entry), "at");
+  const GRCORE_PollIdentity id = {1, 1};
+  for (int i = 0; i < 100; i++) {
+    check(grjit_builder_binary(b, GRJIT_OP_OR, d, grjit_operand_vreg(a), grjit_operand_imm(1)), "op");
+    check(grjit_builder_cmp(b, GRJIT_CMP_NE, t, grjit_operand_vreg(d), grjit_operand_imm(0)), "op");
+    check(grjit_builder_guard(b, grjit_operand_vreg(t), id, NULL, 0), "guard");
+    if (i % 2 == 0) {
+      check(grjit_builder_cmp(b, GRJIT_CMP_EQ, t1, grjit_operand_vreg(a), grjit_operand_imm(INT64_MIN)), "op");
+      check(grjit_builder_cmp(b, GRJIT_CMP_EQ, t2, grjit_operand_vreg(d), grjit_operand_imm(-1)), "op");
+      check(grjit_builder_binary(b, GRJIT_OP_AND, t3, grjit_operand_vreg(t1), grjit_operand_vreg(t2)), "op");
+      check(grjit_builder_cmp(b, GRJIT_CMP_EQ, t4, grjit_operand_vreg(t3), grjit_operand_imm(0)), "op");
+      check(grjit_builder_guard(b, grjit_operand_vreg(t4), id, NULL, 0), "guard");
+      check(grjit_builder_binary(b, GRJIT_OP_DIV_S, q, grjit_operand_vreg(a), grjit_operand_vreg(d)), "op");
+    }
+    else {
+      check(grjit_builder_binary(b, GRJIT_OP_REM_S, q, grjit_operand_vreg(a), grjit_operand_vreg(d)), "op");
+    }
+    check(grjit_builder_binary(b, GRJIT_OP_ADD, a, grjit_operand_vreg(q), grjit_operand_imm(i + 3)), "op");
+  }
+  check(grjit_builder_ret(b, grjit_operand_vreg(a)), "op");
+  GRJIT_Function * f;
+  check(grjit_builder_finish(b, &f), "finish");
+  return f;
+}
+
+static uint64_t compile_100_with(GRJIT_Function * (*build)(void), uint64_t iterations) {
+  world_open();
+  GRJIT_Function * f = build();
+  uint64_t sink = grjit_function_op_count(f);
+  for (uint64_t i = 0; i < iterations; i++) {
+    GRJIT_Code * code = compile(f);
+    sink += grjit_code_size(code);
+    grjit_code_destroy(code);
+  }
+  grjit_function_destroy(f);
+  return sink;
+}
+static uint64_t compile_f64_run(uint64_t n) { return compile_100_with(build_hundred_f64, n); }
+static uint64_t compile_int_div_run(uint64_t n) { return compile_100_with(build_hundred_int_div, n); }
+
 static int compare_double(const void * a, const void * b) {
   double x = *(const double *)a, y = *(const double *)b;
   return x < y ? -1 : x > y ? 1 : 0;
 }
 
 static const Case cases[] = {
-    {"calibration", calibration_run, 50000000, 100000, 0},
-    {"compile-100", compile_run, 2000, 3, 0},
-    {"compile-12k-sites", compile_sites_run, 3, 1, 0},
-    {"loop-plain", loop_plain_run, 10000000, 1000, 0},
-    {"loop-poll", loop_poll_run, 10000000, 1000, 0},
-    {"loop-call", loop_call_run, 10000000, 1000, 0},
-    {"loop-compiled-call", loop_compiled_call_run, 10000000, 1000, 1},
-    {"loop-tail-call", loop_tail_call_run, 10000000, 1000, 1},
-    {"loop-helper-gc", loop_helper_gc_run, 10000000, 1000, 1},
-    {"loop-native", loop_native_run, 10000000, 1000, 1},
-    {"loop-native-status", loop_native_status_run, 10000000, 1000, 1},
+    {"calibration", calibration_run, 50000000, 100000, 0, 0, 0},
+    {"compile-100", compile_run, 2000, 3, 0, 0, 0},
+    {"compile-12k-sites", compile_sites_run, 3, 1, 0, 0, 0},
+    {"loop-plain", loop_plain_run, 10000000, 1000, 0, 0, 0},
+    {"loop-poll", loop_poll_run, 10000000, 1000, 0, 0, 0},
+    {"loop-call", loop_call_run, 10000000, 1000, 0, 0, 0},
+    {"loop-compiled-call", loop_compiled_call_run, 10000000, 1000, 1, 0, 0},
+    {"loop-tail-call", loop_tail_call_run, 10000000, 1000, 1, 0, 0},
+    {"loop-helper-gc", loop_helper_gc_run, 10000000, 1000, 1, 0, 0},
+    {"loop-native", loop_native_run, 10000000, 1000, 1, 0, 0},
+    {"loop-native-status", loop_native_status_run, 10000000, 1000, 1, 0, 0},
+    {"compile-100-f64", compile_f64_run, 2000, 3, 0, 0, 0},
+    {"compile-100-int-div", compile_int_div_run, 2000, 3, 0, 0, 0},
+    {"loop-f64-add", loop_f64_add_run, 10000000, 1000, 0, 1, 0},
+    {"ref-loop-f64-add", ref_f64_add_run, 10000000, 1000, 0, 0, 0},
+    {"loop-f64-div", loop_f64_div_run, 10000000, 1000, 0, 1, 0},
+    {"ref-loop-f64-div", ref_f64_div_run, 10000000, 1000, 0, 0, 0},
+    {"loop-f64-cmp", loop_f64_cmp_run, 10000000, 1000, 0, 1, 0},
+    {"ref-loop-f64-cmp", ref_f64_cmp_run, 10000000, 1000, 0, 0, 0},
+    {"loop-i64-div-s", loop_i64_div_s_run, 10000000, 1000, 0, 1, 0},
+    {"ref-loop-i64-div-s", ref_i64_div_s_run, 10000000, 1000, 0, 0, 0},
+    {"loop-i64-rem-s", loop_i64_rem_s_run, 10000000, 1000, 0, 1, 0},
+    {"ref-loop-i64-rem-s", ref_i64_rem_s_run, 10000000, 1000, 0, 0, 0},
+    {"loop-i32-div-u", loop_i32_div_u_run, 10000000, 1000, 0, 1, 0},
+    {"ref-loop-i32-div-u", ref_i32_div_u_run, 10000000, 1000, 0, 0, 0},
+    {"loop-cvt-trunc", loop_cvt_trunc_run, 10000000, 1000, 0, 1, 0},
+    {"ref-loop-cvt-trunc", ref_cvt_trunc_run, 10000000, 1000, 0, 0, 0},
+    {"loop-f64-ceil", loop_f64_ceil_run, 10000000, 1000, 0, 1, 0},
+    {"loop-f64-ceil-v1", loop_f64_ceil_v1_run, 10000000, 1000, 0, 1, 1},
+    {"loop-f64-floor", loop_f64_floor_run, 10000000, 1000, 0, 1, 0},
+    {"loop-f64-floor-v1", loop_f64_floor_v1_run, 10000000, 1000, 0, 1, 1},
+    {"loop-f64-trunc", loop_f64_trunc_run, 10000000, 1000, 0, 1, 0},
+    {"loop-f64-trunc-v1", loop_f64_trunc_v1_run, 10000000, 1000, 0, 1, 1},
+    {"loop-f64-nearest", loop_f64_nearest_run, 10000000, 1000, 0, 1, 0},
+    {"loop-f64-nearest-v1", loop_f64_nearest_v1_run, 10000000, 1000, 0, 1, 1},
+    {"loop-popcnt", loop_popcnt_run, 10000000, 1000, 0, 1, 0},
+    {"loop-popcnt-v1", loop_popcnt_v1_run, 10000000, 1000, 0, 1, 1},
+    {"loop-clz", loop_clz_run, 10000000, 1000, 0, 1, 0},
+    {"loop-clz-v1", loop_clz_v1_run, 10000000, 1000, 0, 1, 1},
+    {"loop-ctz", loop_ctz_run, 10000000, 1000, 0, 1, 0},
+    {"loop-ctz-v1", loop_ctz_v1_run, 10000000, 1000, 0, 1, 1},
 };
 
 int main(int argc, char ** argv) {
@@ -682,19 +1186,34 @@ int main(int argc, char ** argv) {
   /* Naming the library's version proves the harness linked the library it
    * claims to measure, and ties every figure to the build that produced it. */
   printf("runtime-jit %s, %s run\n", grjit_version_string(), smoke ? "smoke" : "full");
+  {
+    /* The feature set is part of the instrument: the detected optional CPU features. */
+    char stamp[GRJIT_FEATURES_STAMP_MAX];
+    if (grjit_features_stamp(grjit_features_detected(), stamp, sizeof stamp) == GRJIT_OK) {
+      printf("detected CPU features: %s\n", stamp);
+    }
+  }
 
   int repeats = smoke ? 1 : REPEATS;
   for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
     if (cases[c].needs_calls && !grjit_backend_calls_available()) {
       /* Named, not silently left out: this target refuses calls between
        * compiled functions (arm64 and Win64 have them in a later story). */
-      printf("%-12s skipped: this target has no calls between compiled functions\n",
+      printf("%-24s skipped: this target has no calls between compiled functions\n",
           cases[c].name);
+      continue;
+    }
+    if (cases[c].needs_features && grjit_features_detected() == GRJIT_FEATURES_NONE) {
+      /* The pairs of CPU-feature arms exist only where the target has optional features. */
+      printf("%-24s skipped: this target has no optional CPU features (no arms)\n", cases[c].name);
       continue;
     }
     uint64_t n = smoke ? cases[c].smoke_iterations : cases[c].iterations;
     double ns[REPEATS];
     uint64_t sink = 0;
+    if (cases[c].warm) {
+      (void)cases[c].run(n);
+    }
     for (int r = 0; r < repeats; r++) {
       double start = now_ns();
       sink ^= cases[c].run(n);
@@ -707,7 +1226,11 @@ int main(int argc, char ** argv) {
       fprintf(stderr, "bench: %s measured no time; the clock is unusable\n", cases[c].name);
       return 1;
     }
-    printf("%-12s best %10.3f ns/op  median %10.3f ns/op  (%llu ops x %d, check %016llx)\n",
+    if (!smoke && strncmp(cases[c].name, "ref-", 4) == 0 && best < 0.05) {
+      fprintf(stderr, "bench: %s took %.4f ns an operation, which no loop that is run can: the compiler removed it\n", cases[c].name, best);
+      return 1;
+    }
+    printf("%-24s best %10.3f ns/op  median %10.3f ns/op  (%llu ops x %d, check %016llx)\n",
         cases[c].name, best, median, (unsigned long long)n, repeats,
         (unsigned long long)sink);
   }
@@ -727,6 +1250,10 @@ int main(int argc, char ** argv) {
   }
   for (int k = 0; k < 3; k++) {
     grjit_code_destroy(g_native_loop[k]);
+  }
+  for (int k = 0; k < K_COUNT; k++) {
+    grjit_code_destroy(g_kernel[k][0]);
+    grjit_code_destroy(g_kernel[k][1]);
   }
   grjit_native_table_free(g_native_table);
   if (g_context != NULL) {

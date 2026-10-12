@@ -155,6 +155,9 @@
 #  99  a demotion that does not convert                -> testDifferential
 # 100  a promotion that does not convert               -> testDifferential
 #
+# 101  the C reference of the F64 addition loop one     -> bench/bench --smoke (the harness checks each
+#      ulp off, in the benchmark harness                   loop's answer against its reference and aborts)
+#
 #  88  the SSE2 rounding sequence unreworked for      -> testWin64_numeric (the registers the
 #      Win64: it names the callee-saved xmm6 and xmm7      assembler encoded), testWin64 (objdump)
 #  89  a helper's float arguments numbered by class    -> testWin64_numeric (the bytes of the argument
@@ -216,6 +219,13 @@ for entry in $DEFECTS; do
   case "$rest" in
     *:*) filter="--gtest_filter=${rest#*:}" ;;
   esac
+  # The benchmark harness is no gtest binary: it takes --smoke, and its verdict is its own
+  # "setup failed" (an abort) and not a gtest's FAILED.
+  verdict="FAILED"
+  bench_args="--gtest_brief=1"
+  case "$test_name" in
+    bench/*) filter=""; bench_args="--smoke"; verdict="setup failed" ;;
+  esac
   count=$((count + 1))
   tree="$BUILD-plant-$n"
 
@@ -225,7 +235,7 @@ for entry in $DEFECTS; do
     failures=$((failures + 1))
     continue
   fi
-  if ! LD_LIBRARY_PATH="$LD_DIR:$APPS" "$APPS/$test_name" --gtest_brief=1 $filter >/dev/null 2>&1; then
+  if ! LD_LIBRARY_PATH="$LD_DIR:$APPS" "$APPS/$test_name" $bench_args $filter >/dev/null 2>&1; then
     printf 'check-planted: FAIL: the control %s does not pass without the planted defect\n' \
       "$test_name" >&2
     failures=$((failures + 1))
@@ -240,12 +250,12 @@ for entry in $DEFECTS; do
     failures=$((failures + 1))
     continue
   fi
-  out="$(LD_LIBRARY_PATH="$LD_DIR:$tree/apps" "$tree/apps/$test_name" --gtest_brief=1 $filter 2>&1)"
+  out="$(LD_LIBRARY_PATH="$LD_DIR:$tree/apps" "$tree/apps/$test_name" $bench_args $filter 2>&1)"
   rc=$?
   if [ "$rc" -eq 0 ]; then
     printf 'check-planted: FAIL: defect %s was not caught by %s\n' "$n" "$test_name" >&2
     failures=$((failures + 1))
-  elif ! printf '%s' "$out" | grep -q 'FAILED'; then
+  elif ! printf '%s' "$out" | grep -q "$verdict"; then
     printf 'check-planted: FAIL: defect %s: %s exited %s without reporting a failure\n' \
       "$n" "$test_name" "$rc" >&2
     failures=$((failures + 1))

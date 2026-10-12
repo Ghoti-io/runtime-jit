@@ -824,6 +824,10 @@ endif
 # alone. Four mutations of the same kind were tried by hand and no input separates them from the code (a guest call's
 # result cut, a reinterpretation's cut, the width of an i32 popcnt's move, an f32 copysign's cut: every slot and
 # every immediate the verifier admits is already clean), so they have no plant; design.md says so.
+# Defect 101 is in the benchmark harness and not in the library: the C reference of the F64 addition loop is one
+# ulp off, so the compiled loop's right answer disagrees with it and `bench --smoke` must abort (an answer check
+# that has never been seen to fail may check nothing). The entry runs the bench with --smoke; its verdict is the
+# harness's own "setup failed" and a nonzero exit.
 # Defects 88 to 90 are the Win64 flavour's float operations: the SSE2 rounding sequence unreworked, naming the
 # callee-saved xmm6 and xmm7 (caught here by the structural scan of the registers the assembler encoded and by
 # objdump's reading of the bytes, and under wine by the sentinels), and the helper's float arguments numbered by class
@@ -921,7 +925,8 @@ PLANT_DEFECTS := 1:testDifferential 2:testReadback 3:testReadback \
 	97:testDifferential:Differential.GeneratedIntegerProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluated \
 	98:testArm64_numeric:Arm64SimCompiled.AnF32Result* \
 	99:testDifferential:Differential.GeneratedFloatProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluatedWithNansEqual \
-	100:testDifferential:Differential.GeneratedFloatProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluatedWithNansEqual
+	100:testDifferential:Differential.GeneratedFloatProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluatedWithNansEqual \
+	101:bench/bench:smoke
 
 # The controls the script runs are built by this make, as prerequisites, and
 # not by the script's own sub-make. Under `make -j test` the sibling goals
