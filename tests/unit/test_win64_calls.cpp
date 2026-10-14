@@ -320,7 +320,7 @@ TEST(Win64Calls, ACalleeWithMoreThanFourParametersPopsTheRestWithRetAndAnImmedia
      * loaded from [rbp + 16 + 8 i]. */
     const uint8_t stores[4][3] = {{0x48, 0x89, 0x4D}, {0x48, 0x89, 0x55}, {0x4C, 0x89, 0x45}, {0x4C, 0x89, 0x4D}};
     for (unsigned i = 0; i < 4; i++) {
-      const Bytes store = {stores[i][0], stores[i][1], stores[i][2], static_cast<uint8_t>(-8 * (static_cast<int>(i) + 4))};
+      const Bytes store = {stores[i][0], stores[i][1], stores[i][2], static_cast<uint8_t>(-8 * (static_cast<int>(i) + 5))};
       EXPECT_EQ(em.count(store, from, from + 96), i < n ? 1u : 0u) << "register argument " << i;
     }
     size_t loads = 0;
@@ -340,13 +340,13 @@ TEST(Win64Calls, TheAdaptersFrameHoldsTheStackArgumentsAndTheShadowSpaceInOneAll
     ASSERT_TRUE(em.ok());
     const uint32_t in_a = stack_args(n);
     const uint32_t w = in_a > 32 ? in_a : 32;
-    EXPECT_EQ(em.e.prologue.adapter_alloc_bytes, w + 32) << "N' = max(32, in_A) rounded, plus the three saved words and one spare";
+    EXPECT_EQ(em.e.prologue.adapter_alloc_bytes, w + 48) << "N' = max(32, in_A) rounded, plus four saved entry words and one spare";
     EXPECT_EQ(em.e.prologue.adapter_push_end, 1u) << "push rbp";
     EXPECT_GT(em.e.prologue.adapter_alloc_end, em.e.prologue.adapter_push_end);
     EXPECT_LE(em.e.prologue.adapter_end, em.e.internal_offset - 16u) << "the tag and its padding are in neither function";
     EXPECT_EQ(em.e.prologue.body_begin, em.e.internal_offset);
     EXPECT_EQ(em.e.internal_offset % 16, 0u);
-    /* The body's own frame is the base frame and the 48-byte outgoing area. */
+    /* The body's own frame includes the environment slot and outgoing area. */
     EXPECT_EQ(em.e.prologue.alloc_bytes % 16, 0u);
     EXPECT_EQ(em.e.prologue.push_end, em.e.internal_offset + 1);
     EXPECT_EQ(em.e.prologue.setfp_end, em.e.internal_offset + 4);
@@ -387,7 +387,8 @@ TEST(Win64Calls, ACallPushesRoundedStackArgumentsJustBeforeTheCallAndTheCalleePo
 }
 
 TEST(Win64Calls, ATailCallMovesTheReturnAddressByTheDifferenceOfTheTwoStackAreas) {
-  /* `lea rsp, [rbp + ra']; mov rbp, rax; jmp r11` ends the replacement, with `ra' = 8 + in_A - in_T`.
+  /* `lea rsp, [rbp + ra']; mov rbp, [rsp - 8]; jmp rax` ends the replacement,
+   * with `ra' = 8 + in_A - in_T` and the caller's saved frame link restored.
    * Read for every pair of caller parameters and callee arguments from 0 to 16: both sides of the
    * four-register boundary, the callee wider, narrower and equal. */
   for (unsigned params = 0; params <= 16; params++) {
@@ -397,7 +398,7 @@ TEST(Win64Calls, ATailCallMovesTheReturnAddressByTheDifferenceOfTheTwoStackAreas
       Emit em(f);
       ASSERT_TRUE(em.ok());
       const int64_t want = 8 + int64_t{stack_args(params)} - int64_t{stack_args(args)};
-      const Bytes end = {0x48, 0x89, 0xC5, 0x41, 0xFF, 0xE3}; // mov rbp, rax ; jmp r11
+      const Bytes end = {0x48, 0x8B, 0x6C, 0x24, 0xF8, 0xFF, 0xE0}; // mov rbp, [rsp - 8] ; jmp rax
       size_t found = 0;
       for (size_t i = em.e.internal_offset; i + end.size() <= em.e.size; i++) {
         if (std::memcmp(em.e.bytes + i, end.data(), end.size()) != 0) {
@@ -462,6 +463,61 @@ bool at(const Emit & em, size_t pos, const Bytes & want) {
 }
 
 } // namespace
+
+TEST(Win64Calls, ACallableTwoResultSlotCallEmitsItsBufferAndReturnPath) {
+  B b("multi-result-slot", 0);
+  GRJIT_CallHooks h{};
+  h.deopt = reinterpret_cast<decltype(h.deopt)>(uintptr_t{0x30300});
+  ASSERT_EQ(grjit_builder_set_callable(b.b, &h), GRJIT_OK);
+  ASSERT_EQ(grjit_builder_set_token(b.b, 0x7788), GRJIT_OK);
+  const auto a = b.reg();
+  const auto c = b.reg();
+  b.at(b.block());
+  const GRJIT_VReg results[] = {a, c};
+  const GRCORE_PollIdentity id{1, 2};
+  ASSERT_EQ(grjit_builder_call_slot_results(b.b, results, 2, 0x123400,
+                0x7789, nullptr, 0, id, nullptr, 0, id, nullptr, 0), GRJIT_OK);
+  const GRJIT_Operand values[] = {V(a), V(c)};
+  ASSERT_EQ(grjit_builder_ret_multi(b.b, values, 2), GRJIT_OK);
+  Fn f(b.finish());
+  Emit em(f.f);
+  ASSERT_TRUE(em.ok());
+  EXPECT_GT(em.e.size, 0u);
+  bool call_site = false;
+  for (size_t i = 0; i < em.e.meta.meta.site_count; i++)
+    call_site = call_site || em.e.meta.meta.sites[i].kind == GRCORE_SITE_GC_POINT_CALL;
+  EXPECT_TRUE(call_site);
+}
+
+TEST(Win64Calls, CatchCallHasSeparateLandingMetadataAndRethrowPath) {
+  B b("catch-edge", 0);
+  GRJIT_CallHooks h{};
+  h.deopt = reinterpret_cast<decltype(h.deopt)>(uintptr_t{0x30300});
+  h.push = reinterpret_cast<decltype(h.push)>(uintptr_t{0x30310});
+  h.pop = reinterpret_cast<decltype(h.pop)>(uintptr_t{0x30320});
+  h.compile = reinterpret_cast<decltype(h.compile)>(uintptr_t{0x30330});
+  h.catch_exception = reinterpret_cast<decltype(h.catch_exception)>(uintptr_t{0x30340});
+  ASSERT_EQ(grjit_builder_set_callable(b.b, &h), GRJIT_OK);
+  ASSERT_EQ(grjit_builder_set_token(b.b, 0x7788), GRJIT_OK);
+  const auto body = b.block();
+  const auto landing = b.block();
+  b.at(body);
+  const GRCORE_PollIdentity id{1, 2};
+  ASSERT_EQ(grjit_builder_call_slot_catch_results(b.b, nullptr, 0, 0x123400,
+                0x7789, nullptr, 0, id, nullptr, 0, id, nullptr, 0, landing), GRJIT_OK);
+  ASSERT_EQ(grjit_builder_ret(b.b, grjit_operand_none()), GRJIT_OK);
+  b.at(landing);
+  ASSERT_EQ(grjit_builder_rethrow(b.b), GRJIT_OK);
+  Fn f(b.finish());
+  GRJIT_Emitted e{};
+  ASSERT_EQ(grjit_emit_for(GRJIT_ARCH_X86_64_WIN64, f.f, grjit_allocator_default(), nullptr,
+                nullptr, kRequestOffset, &e), GRJIT_OK);
+  ASSERT_EQ(e.exception_site_count, 1u);
+  EXPECT_EQ(e.exception_sites[0].landing_block, landing);
+  EXPECT_LT(e.exception_sites[0].call_offset, e.size);
+  EXPECT_LT(e.exception_sites[0].landing_offset, e.size);
+  grjit_emitted_free(&e);
+}
 
 TEST(Win64Calls, EachNativeCallSiteMakesItsShadowSpaceStackWordsAndBufferInOneRoundedAreaAndReadsThePairFromIt) {
   /* Read per call site, from the code. A native's call is `mov rax, <its address>; call rax`, and:

@@ -189,7 +189,7 @@ GRJIT_Function * frame_of(size_t registers, const GRJIT_Limits * limits = nullpt
 /* The base frame of `registers` registers, as the library computes it, and the
  * Win64 frame: that plus the 48-byte outgoing area. */
 uint64_t base_frame(size_t registers) {
-  return ((registers + 3) * 8 + 15) / 16 * 16;
+  return ((registers + 4) * 8 + 15) / 16 * 16;
 }
 
 } // namespace
@@ -201,11 +201,11 @@ TEST(Win64Shape, ThePrologueTheOutgoingAreaAndTheEntryRegistersAreAsPinned) {
   Emit em(f);
   ASSERT_TRUE(em.ok()) << grjit_result_string(em.result);
   /* push rbp; mov rbp,rsp; sub rsp,144 (96 of frame and 48 of outgoing area);
-   * then the context from rcx, `out` from r8 and `args` from rdx into their
-   * fixed slots; then parameter 0 through r10 (rsi is callee-saved here). */
+   * then context, environment, args, and out from rcx, rdx, r8, and r9 into
+   * their fixed slots; then parameter 0 through r10. */
   Bytes want = {0x55, 0x48, 0x89, 0xE5, 0x48, 0x81, 0xEC, 0x90, 0x00, 0x00, 0x00, 0x48, 0x89,
-      0x4D, 0xF8, 0x4C, 0x89, 0x45, 0xF0, 0x48, 0x89, 0x55, 0xE8, 0x4C, 0x8B, 0x55, 0xE8, 0x49,
-      0x8B, 0x02, 0x48, 0x89, 0x45, 0xE0};
+      0x4D, 0xF8, 0x48, 0x89, 0x55, 0xE0, 0x4C, 0x89, 0x45, 0xE8, 0x4C, 0x89, 0x4D, 0xF0,
+      0x4C, 0x8B, 0x55, 0xE8, 0x49, 0x8B, 0x02, 0x48, 0x89, 0x45, 0xD8};
   ASSERT_GE(em.e.size, want.size());
   EXPECT_EQ(Bytes(em.e.bytes, em.e.bytes + want.size()), want);
   EXPECT_EQ(base_frame(8), 96u);
@@ -216,16 +216,30 @@ TEST(Win64Shape, ThePrologueTheOutgoingAreaAndTheEntryRegistersAreAsPinned) {
   EXPECT_EQ(em.e.meta.meta.frame_bytes, 96u) << "the metadata names the base frame, as on Linux";
 }
 
+TEST(Win64Shape, IndexedMemoryUsesOnlyCallerSavedScratchRegisters) {
+  B b("win64-indexed");
+  GRJIT_VReg base = b.param(GRJIT_TYPE_PTR);
+  GRJIT_VReg index = b.param(GRJIT_TYPE_I64);
+  GRJIT_VReg value = b.reg();
+  b.at(b.block());
+  ASSERT_EQ(grjit_builder_load_indexed(b.b, value, base, index, 8, 0, 64, false), GRJIT_OK);
+  b.ret(V(value));
+  Fn f(b.finish());
+  Emit em(f);
+  ASSERT_TRUE(em.ok()) << grjit_result_string(em.result);
+  EXPECT_NE(em.find(Bytes{0x48, 0x01, 0xC0}), -1) << "the scale-eight index is doubled";
+}
+
 TEST(Win64Shape, ASixArgumentCallStoresTheFifthAndSixthAboveTheShadowSpaceAndLoadsFourRegisters) {
   Fn f(six_calls_a_poll_and_a_guard());
   Emit em(f);
   ASSERT_TRUE(em.ok());
-  /* Arguments 5 and 6 (slots -64 and -72) through rax into [rsp+32] and
-   * [rsp+40]; then rcx, rdx, r8, r9 from slots -32, -40, -48, -56; then the
+  /* Arguments 5 and 6 (slots -72 and -80) through rax into [rsp+32] and
+   * [rsp+40]; then rcx, rdx, r8, r9 from slots -40, -48, -56, -64; then the
    * address in eax and `call rax`. */
-  Bytes call = {0x48, 0x8B, 0x45, 0xC0, 0x48, 0x89, 0x44, 0x24, 0x20, 0x48, 0x8B, 0x45, 0xB8,
-      0x48, 0x89, 0x44, 0x24, 0x28, 0x48, 0x8B, 0x4D, 0xE0, 0x48, 0x8B, 0x55, 0xD8, 0x4C, 0x8B,
-      0x45, 0xD0, 0x4C, 0x8B, 0x4D, 0xC8, 0xB8, 0x00, 0x06, 0x01, 0x00, 0xFF, 0xD0};
+  Bytes call = {0x48, 0x8B, 0x45, 0xB8, 0x48, 0x89, 0x44, 0x24, 0x20, 0x48, 0x8B, 0x45, 0xB0,
+      0x48, 0x89, 0x44, 0x24, 0x28, 0x48, 0x8B, 0x4D, 0xD8, 0x48, 0x8B, 0x55, 0xD0, 0x4C, 0x8B,
+      0x45, 0xC8, 0x4C, 0x8B, 0x4D, 0xC0, 0xB8, 0x00, 0x06, 0x01, 0x00, 0xFF, 0xD0};
   EXPECT_EQ(em.count(call), 1u);
 }
 
@@ -249,10 +263,10 @@ TEST(Win64Shape, TheEntryHookIsCalledWithTheContextStillInRcx) {
   auto hook = reinterpret_cast<GRJIT_EntryHook>(0x30000);
   Emit em(f, GRJIT_ARCH_X86_64_WIN64, nullptr, hook);
   ASSERT_TRUE(em.ok());
-  /* The three entry registers are stored, then the hook is called with rcx
+  /* The four entry arguments are stored, then the hook is called with rcx
    * untouched: the next instructions are the address and the call. */
-  Bytes stores_then_call = {0x48, 0x89, 0x4D, 0xF8, 0x4C, 0x89, 0x45, 0xF0, 0x48, 0x89, 0x55,
-      0xE8, 0xB8, 0x00, 0x00, 0x03, 0x00, 0xFF, 0xD0};
+  Bytes stores_then_call = {0x48, 0x89, 0x4D, 0xF8, 0x48, 0x89, 0x55, 0xE0, 0x4C, 0x89, 0x45,
+      0xE8, 0x4C, 0x89, 0x4D, 0xF0, 0xB8, 0x00, 0x00, 0x03, 0x00, 0xFF, 0xD0};
   EXPECT_EQ(em.count(stores_then_call), 1u);
 }
 
@@ -285,16 +299,16 @@ TEST(Win64Shape, TheSysVFlavourOfTheSameFunctionIsUntouched) {
   Fn f(six_calls_a_poll_and_a_guard());
   Emit sysv(f, GRJIT_ARCH_X86_64);
   ASSERT_TRUE(sysv.ok());
-  /* push rbp; mov rbp,rsp; sub rsp,96; rdi, rdx, rsi stored; `leave; ret`. */
+  /* push rbp; mov rbp,rsp; sub rsp,96; rdi, rsi, rdx, rcx stored; `leave; ret`. */
   Bytes want = {0x55, 0x48, 0x89, 0xE5, 0x48, 0x83, 0xEC, 0x60, 0x48, 0x89, 0x7D, 0xF8, 0x48,
-      0x89, 0x55, 0xF0, 0x48, 0x89, 0x75, 0xE8};
+      0x89, 0x75, 0xE0, 0x48, 0x89, 0x55, 0xE8, 0x48, 0x89, 0x4D, 0xF0};
   EXPECT_EQ(Bytes(sysv.e.bytes, sysv.e.bytes + want.size()), want);
   EXPECT_EQ(sysv.count({0xC9, 0xC3}), 3u);
   EXPECT_EQ(sysv.e.prologue.alloc_bytes, 96u) << "no outgoing area on SysV";
 }
 
 TEST(Win64Shape, AFrameOverThePageSizeIsProbedADownwardsPageAtATimeBeforeRspMoves) {
-  /* 600 registers: a base frame of 4816 and a Win64 frame of 4864. */
+  /* 600 registers: a base frame of 4832 and a Win64 frame of 4880. */
   Fn large(frame_of(600));
   Emit em(large);
   ASSERT_TRUE(em.ok());
@@ -325,14 +339,14 @@ TEST(Win64Shape, AFrameOverThePageSizeIsProbedADownwardsPageAtATimeBeforeRspMove
 
 TEST(Win64Shape, TheProbeThresholdIsExactlyWhereTheFramePlusAReturnAddressPassesAPage) {
   const Bytes lea_page = {0x4D, 0x8D, 0x9B, 0x00, 0xF0, 0xFF, 0xFF};
-  /* 501 registers: a Win64 frame of 4080, and 4080 + 8 fits the page. */
-  Fn below(frame_of(501));
+  /* 500 registers: a Win64 frame of 4080, and 4080 + 8 fits the page. */
+  Fn below(frame_of(500));
   Emit b(below);
   ASSERT_TRUE(b.ok());
   ASSERT_EQ(b.e.prologue.alloc_bytes, 4080u);
   EXPECT_EQ(b.count(lea_page), 0u);
-  /* 502 registers: 4096, and 4096 + 8 passes it. */
-  Fn above(frame_of(502));
+  /* 501 registers: 4096, and 4096 + 8 passes it. */
+  Fn above(frame_of(501));
   Emit a(above);
   ASSERT_TRUE(a.ok());
   ASSERT_EQ(a.e.prologue.alloc_bytes, 4096u);
@@ -419,19 +433,19 @@ TEST(Win64Shape, TheProbeLoopDisassemblesAsTheSequenceItIsMeantToBe) {
 }
 
 TEST(Win64Shape, TheFrameCapAppliesToTheBaseFrameExactlyAsOnLinux) {
-  /* 125 registers is a base frame of exactly 1024 bytes; one more is 1040. */
+  /* 124 registers plus the fixed environment slots is exactly 1024 bytes; one more is 1040. */
   GRJIT_Limits limits;
   grjit_limits_default(&limits);
   limits.max_frame_bytes = 1024;
   for (GRJIT_Arch arch : {GRJIT_ARCH_X86_64, GRJIT_ARCH_X86_64_WIN64}) {
-    Fn at(frame_of(125));
+    Fn at(frame_of(124));
     Emit ok(at, arch, &limits);
     EXPECT_TRUE(ok.ok()) << arch << ": " << grjit_result_string(ok.result);
-    Fn over(frame_of(126));
+    Fn over(frame_of(125));
     Emit no(over, arch, &limits);
     EXPECT_EQ(no.result, GRJIT_ERR_LIMIT) << arch;
   }
-  Fn at(frame_of(125));
+  Fn at(frame_of(124));
   Emit win(at, GRJIT_ARCH_X86_64_WIN64, &limits);
   ASSERT_TRUE(win.ok());
   EXPECT_EQ(win.e.prologue.alloc_bytes, 1024u + 48u) << "the outgoing area is not charged to the cap";
@@ -980,8 +994,6 @@ grjit_test_call_sentinels:
   sub $40, %rsp
   mov %rcx, %rax
   mov %rdx, %rcx
-  mov %r8, %rdx
-  mov %r9, %r8
   movabs $0x1111111111111111, %rbx
   movabs $0x2222222222222222, %rsi
   movabs $0x3333333333333333, %rdi
@@ -1030,8 +1042,6 @@ grjit_test_call_sentinels:
   push %r8
   mov %rdi, %rax
   mov %rsi, %rdi
-  mov %rdx, %rsi
-  mov %rcx, %rdx
   movabs $0x1111111111111111, %rbx
   movabs $0x2222222222222222, %r12
   movabs $0x3333333333333333, %r13
