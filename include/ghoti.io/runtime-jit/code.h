@@ -49,11 +49,15 @@
  * frames. ::GRJIT_EXIT_REFUSED is then only the entry hook's answer.
  *
  * **The calling convention** is the target's own for
- * `uint32_t (void * context, const uint64_t * args, uint64_t * out)`: SysV on
- * Linux x86-64 (`rdi`, `rsi`, `rdx`), Microsoft x64 on Windows x86-64 (`rcx`,
- * `rdx`, `r8`) and AAPCS64 on Linux arm64. The function loads its parameters
- * from `args`, and returns one of the exits below. `out` must hold
- * ::grjit_code_out_words words. On Windows x86-64 the code's pages also hold its
+ * `uint32_t (void * context, void * environment, const uint64_t * args,
+ * uint64_t * out)`: SysV on Linux x86-64 uses `rdi`, `rsi`, `rdx`, `rcx`;
+ * Microsoft x64 on Windows x86-64 uses `rcx`, `rdx`, `r8`, `r9`; AAPCS64 on
+ * Linux arm64 uses `x0`, `x1`, `x2`, `x3`. `context` is the runtime-services
+ * pointer; `environment` is the opaque per-invocation language instance.
+ * The function loads its parameters from `args`, and returns one of the exits
+ * below. `out` must hold
+ * ::grjit_code_out_words words. A `RET` writes its results to `out[0..n)` in
+ * order; `grjit_code_out_words` includes the largest return list. On Windows x86-64 the code's pages also hold its
  * unwind information, registered with the operating system for as long as the
  * code lives, so that a native stack walk (a debugger, an exception dispatch,
  * `RtlVirtualUnwind`) passes through the compiled frame; ::grjit_code_destroy
@@ -98,15 +102,28 @@ typedef enum GRJIT_Exit {
    *  the compiled calls left them, and `out[0]` is the hook's non-zero value.
    *  The engine must unwind what the run pushed and report an internal error;
    *  it must not continue in the interpreter (`ir.h`, ::GRJIT_CallHooks). */
-  GRJIT_EXIT_REBUILD_FAILED = 3
+  GRJIT_EXIT_REBUILD_FAILED = 3,
+  /** A Wasm trap; `out[0]` is a ::GRJIT_TrapKind. */
+  GRJIT_EXIT_TRAP = 4,
+  /** An uncaught engine-owned guest exception. */
+  GRJIT_EXIT_EXCEPTION = 5
 } GRJIT_Exit;
 
 /** @brief The signature of compiled code. */
 typedef uint32_t (*GRJIT_EntryFn)(
-    void * context, const uint64_t * args, uint64_t * out);
+    void * context, void * environment, const uint64_t * args, uint64_t * out);
 
 /** @brief Compiled code. Opaque. */
 typedef struct GRJIT_Code GRJIT_Code;
+
+/** JIT-owned guest call catch metadata. Offsets are from code address;
+ * `call_offset` points just after the call instruction (the return address).
+ * This is separate from native unwind records and runtime-core GC/deopt metadata. */
+typedef struct GRJIT_ExceptionSite {
+  uint32_t call_offset;
+  uint32_t landing_block;
+  uint32_t landing_offset;
+} GRJIT_ExceptionSite;
 
 /**
  * @brief Unmaps the code's pages and frees it.
@@ -124,6 +141,15 @@ GRJIT_API void grjit_code_destroy(GRJIT_Code * code);
  * Offsets are from ::grjit_code_address. Never NULL for a live code.
  */
 GRJIT_API const GRCORE_CodeMeta * grjit_code_meta(const GRJIT_Code * code);
+
+/** Returns the immutable call-site catch table (empty when no catch edges).
+ * There is one entry per call with a catch landing, in code-emission order.
+ * The returned pointer is owned by `code` and remains valid until
+ * ::grjit_code_destroy.
+ * If code returns ::GRJIT_EXIT_EXCEPTION, the engine must clean up the guest
+ * activations that remain on its guest stack. */
+GRJIT_API const GRJIT_ExceptionSite * grjit_code_exception_sites(
+    const GRJIT_Code * code, size_t * count);
 
 /** @brief The entry point, with the calling convention above. */
 GRJIT_API GRJIT_EntryFn grjit_code_entry(const GRJIT_Code * code);
@@ -214,6 +240,9 @@ GRJIT_API size_t grjit_code_out_words(const GRJIT_Code * code);
 /** @brief The number of parameters, which `args` must hold. */
 GRJIT_API size_t grjit_code_param_count(const GRJIT_Code * code);
 
+/** @brief The function's declared return arity (zero for no returned values). */
+GRJIT_API size_t grjit_code_result_count(const GRJIT_Code * code);
+
 /**
  * @brief Calls the code.
  *
@@ -225,12 +254,25 @@ GRJIT_API size_t grjit_code_param_count(const GRJIT_Code * code);
  *
  * @param code The code.
  * @param context The context pointer the code's polls load through.
+ * @param environment The opaque language environment returned by
+ *   ::grjit_builder_instance. It must be a stable, nonmoving host pointer for
+ *   the duration of all activations that receive it; this slot is not a GC root.
  * @param args The parameters, `grjit_code_param_count` words.
  * @param out At least ::grjit_code_out_words words.
  * @return A ::GRJIT_Exit.
+ *
+ * The environment argument was added to this in-development API. Existing
+ * source and binary clients must be rebuilt; callers that need the former
+ * context-as-environment behavior can use ::grjit_code_call_legacy.
  */
 GRJIT_API uint32_t grjit_code_call(const GRJIT_Code * code, void * context,
-    const uint64_t * args, uint64_t * out);
+    void * environment, const uint64_t * args, uint64_t * out);
+
+/** Compatibility form for callers that used the original context-only entry.
+ * It passes context as both the runtime context and language environment. */
+GRJIT_API uint32_t grjit_code_call_legacy(const GRJIT_Code * code,
+    void * context, const uint64_t * args, uint64_t * out);
+
 
 #ifdef __cplusplus
 }

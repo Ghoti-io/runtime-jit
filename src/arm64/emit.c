@@ -175,7 +175,16 @@ static void store_float(GRJIT_A64Emit * e, GRJIT_VReg dst, GRJIT_A64VReg v, bool
 }
 
 static void emit_load(GRJIT_A64Emit * e, const GRJIT_Op * op, bool sign) {
-  load_operand(e, GRJIT_A64_X1, &op->a);
+  if (op->index.kind == GRJIT_OPERAND_VREG) {
+    load_operand(e, GRJIT_A64_X0, &op->index);
+    for (unsigned s = 1; s < op->scale; s <<= 1) {
+      grjit_a64_add_uxtx(&e->as, GRJIT_A64_X0, GRJIT_A64_X0, GRJIT_A64_X0);
+    }
+    load_operand(e, GRJIT_A64_X1, &op->a);
+    grjit_a64_add_uxtx(&e->as, GRJIT_A64_X1, GRJIT_A64_X1, GRJIT_A64_X0);
+  } else {
+    load_operand(e, GRJIT_A64_X1, &op->a);
+  }
   GRJIT_A64Mem kind;
   switch (op->width) {
     case 8: kind = sign ? GRJIT_A64_MEM_S8 : GRJIT_A64_MEM_U8; break;
@@ -188,7 +197,16 @@ static void emit_load(GRJIT_A64Emit * e, const GRJIT_Op * op, bool sign) {
 }
 
 static void emit_store(GRJIT_A64Emit * e, const GRJIT_Op * op) {
-  load_operand(e, GRJIT_A64_X1, &op->a);
+  if (op->index.kind == GRJIT_OPERAND_VREG) {
+    load_operand(e, GRJIT_A64_X16, &op->index);
+    for (unsigned s = 1; s < op->scale; s <<= 1) {
+      grjit_a64_add_uxtx(&e->as, GRJIT_A64_X16, GRJIT_A64_X16, GRJIT_A64_X16);
+    }
+    load_operand(e, GRJIT_A64_X1, &op->a);
+    grjit_a64_add_uxtx(&e->as, GRJIT_A64_X1, GRJIT_A64_X1, GRJIT_A64_X16);
+  } else {
+    load_operand(e, GRJIT_A64_X1, &op->a);
+  }
   load_operand(e, GRJIT_A64_X0, &op->b);
   GRJIT_A64Mem kind;
   switch (op->width) {
@@ -358,7 +376,8 @@ static GRJIT_Label emit_dispatch(
   if (slot) {
     GRJIT_Label slow = grjit_a64_label(a);
     GRJIT_Label back = grjit_a64_label(a);
-    grjit_a64_mov_ri(a, GRJIT_A64_X16, op->address);
+    if (op->address != 0) grjit_a64_mov_ri(a, GRJIT_A64_X16, op->address);
+    else load_operand(e, GRJIT_A64_X16, &op->a);
     grjit_a64_load(a, GRJIT_A64_MEM_X64, GRJIT_A64_X16, GRJIT_A64_X16, 0);
     /* One compare tells compiled code (above one) from empty (zero) and from refused (one). */
     grjit_a64_cmp_imm(a, GRJIT_A64_X16, GRCORE_ENTRY_REFUSED);
@@ -378,7 +397,9 @@ static GRJIT_Label emit_dispatch(
     load_slot(e, GRJIT_A64_X0, GRJIT_SLOT_CTX);
     grjit_a64_mov_rr(a, GRJIT_A64_X1, GRJIT_A64_X16);
     grjit_a64_mov_ri(a, GRJIT_A64_X2, op->callee);
-    grjit_a64_mov_ri(a, GRJIT_A64_X3, n);
+    grjit_a64_mov_ri(a, GRJIT_A64_X3, GRJIT_CALL_SIGNATURE(n,
+        op->kind == GRJIT_OP_TAIL_CALL_SLOT || op->kind == GRJIT_OP_TAIL_CALL_PTR
+            ? op->callee_result_count : op->result_count));
     grjit_a64_mov_ri(a, GRJIT_A64_X16, (uint64_t)(uintptr_t)grjit_call_target_ok);
     grjit_a64_blr(a, GRJIT_A64_X16);
     grjit_a64_mov32_rr(a, GRJIT_A64_X0, GRJIT_A64_X0);
@@ -402,7 +423,7 @@ static void emit_stage_arguments(GRJIT_A64Emit * e, const GRJIT_Op * op) {
   const size_t regs = GRJIT_SHAPE_REGS(f, e->c.shape);
   for (size_t i = 0; i < op->arg_count; i++) {
     load_operand(e, GRJIT_A64_X0, &op->args[i]);
-    store_slot(e, GRJIT_A64_X0, GRJIT_ARGS_SLOT(regs, e->c.shape.args_area, i));
+    store_slot(e, GRJIT_A64_X0, GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, i));
   }
 }
 
@@ -412,10 +433,17 @@ static void emit_frame_hook(GRJIT_A64Emit * e, const GRJIT_Op * op, GRJIT_Label 
   A * a = &e->as;
   const size_t regs = GRJIT_SHAPE_REGS(e->c.f, e->c.shape);
   grjit_a64_emit_store_walk_cell(e, ret);
-  grjit_a64_mov_rr(a, GRJIT_A64_X0, GRJIT_A64_X15);
-  grjit_a64_mov_ri(a, GRJIT_A64_X1, op->callee);
-  lea(e, GRJIT_A64_X2, GRJIT_A64_FP, GRJIT_ARGS_SLOT(regs, e->c.shape.args_area, 0));
-  grjit_a64_mov_ri(a, GRJIT_A64_X3, op->arg_count);
+  load_slot(e, GRJIT_A64_X0, GRJIT_SLOT_CTX);
+  if (op->environment.kind == GRJIT_OPERAND_NONE)
+    load_slot(e, GRJIT_A64_X1, GRJIT_SLOT_ENV);
+  else
+    load_operand(e, GRJIT_A64_X1, &op->environment);
+  grjit_a64_mov_ri(a, GRJIT_A64_X2, op->callee);
+  lea(e, GRJIT_A64_X3, GRJIT_A64_FP, GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, 0));
+  grjit_a64_mov_ri(a, GRJIT_A64_X4, op->arg_count);
+  grjit_a64_mov_ri(a, GRJIT_A64_X5,
+      op->kind == GRJIT_OP_TAIL_CALL_SLOT || op->kind == GRJIT_OP_TAIL_CALL_PTR
+          ? op->callee_result_count : op->result_count);
   grjit_a64_mov_ri(a, GRJIT_A64_X16, hook);
   grjit_a64_blr(a, GRJIT_A64_X16);
 }
@@ -451,29 +479,70 @@ static void emit_guest_call(GRJIT_A64Emit * e, const GRJIT_Op * op) {
   /* The call. The stack arguments are made just before it, at `[sp]`, and popped by the
    * callee, which keeps `sp` 16-aligned (the area is whole 16-byte units). */
   const unsigned ireg = GRJIT_ARM64_INTERNAL_REG_ARGS;
-  const uint32_t area = stack_bytes(n);
+  const size_t call_args = n + (op->result_count > 1 ? 1u : 0u);
+  const uint32_t area = stack_bytes(call_args);
   if (area != 0) {
     grjit_a64_sub_sp(a, area);
     for (size_t i = ireg; i < n; i++) {
-      load_slot(e, GRJIT_A64_X10, GRJIT_ARGS_SLOT(regs, e->c.shape.args_area, i));
+      load_slot(e, GRJIT_A64_X10, GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, i));
       grjit_a64_store(a, GRJIT_A64_MEM_X64, GRJIT_A64_X10, GRJIT_A64_SP, (int32_t)(8 * (i - ireg)));
+    }
+    if (op->result_count > 1 && n >= ireg) {
+      lea(e, GRJIT_A64_X10, GRJIT_A64_FP,
+          GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, e->c.shape.args_area));
+      grjit_a64_store(a, GRJIT_A64_MEM_X64, GRJIT_A64_X10, GRJIT_A64_SP,
+          (int32_t)(8 * (n - ireg)));
     }
   }
   for (size_t i = 0; i < n && i < ireg; i++) {
-    load_slot(e, arg_regs_internal[i], GRJIT_ARGS_SLOT(regs, e->c.shape.args_area, i));
+    load_slot(e, arg_regs_internal[i], GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, i));
+  }
+  if (n < ireg) {
+    if (op->result_count > 1) lea(e, arg_regs_internal[n], GRJIT_A64_FP,
+        GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, e->c.shape.args_area));
   }
   load_slot(e, GRJIT_A64_X9, GRJIT_SLOT_CTX);
+  if (op->environment.kind == GRJIT_OPERAND_NONE)
+    load_slot(e, GRJIT_A64_X8, GRJIT_SLOT_ENV);
+  else
+    load_operand(e, GRJIT_A64_X8, &op->environment);
   load_slot(e, GRJIT_A64_X16, entry_slot);
   grjit_a64_blr(a, GRJIT_A64_X16);
   /* The return address is the site: this frame, with the callee running. */
   grjit_emit_add_site_for(&e->c, (uint32_t)grjit_a64_size(a),
       GRCORE_SITE_GC_POINT_CALL, st->identity, live + 1, op->state, op);
+  if (op->landing_target != GRJIT_NO_BLOCK) {
+    grjit_emit_add_exception_site(&e->c, (uint32_t)grjit_a64_size(a), op->landing_target);
+    GRJIT_Label not_exception = grjit_a64_label(a);
+    GRJIT_Label propagate_exception = grjit_a64_label(a);
+    grjit_a64_cmp_imm(a, GRJIT_A64_X1, GRJIT_STATUS_EXCEPTION);
+    grjit_a64_bcond(a, GRJIT_A64_NE, not_exception);
+    load_slot(e, GRJIT_A64_X0, GRJIT_SLOT_CTX);
+    load_slot(e, GRJIT_A64_X1, GRJIT_SLOT_ENV);
+    grjit_a64_mov_ri(a, GRJIT_A64_X2, op->callee);
+    grjit_a64_mov_ri(a, GRJIT_A64_X3, op->landing_target);
+    grjit_a64_mov_ri(a, GRJIT_A64_X16, (uint64_t)(uintptr_t)f->hooks.catch_exception);
+    grjit_a64_blr(a, GRJIT_A64_X16);
+    grjit_a64_cbnz(a, GRJIT_A64_X0, propagate_exception);
+    grjit_a64_mov_ri(a, GRJIT_A64_X1, GRJIT_STATUS_RETURNED);
+    grjit_a64_b(a, e->blocks[op->landing_target]);
+    grjit_a64_bind(a, propagate_exception);
+    grjit_a64_mov_ri(a, GRJIT_A64_X1, GRJIT_STATUS_EXCEPTION);
+    grjit_a64_b(a, e->ret_propagate);
+    grjit_a64_bind(a, not_exception);
+  }
   grjit_a64_cbnz(a, GRJIT_A64_X1, e->ret_propagate);
-  if (op->dst != GRJIT_NO_VREG) {
-    if (vreg_is_narrow(e, op->dst)) {
+  if (op->result_count != 0) {
+    if (vreg_is_narrow(e, op->results[0])) {
       grjit_a64_mov32_rr(a, GRJIT_A64_X0, GRJIT_A64_X0); /* the callee returned a word; an i32 or f32 is its low half */
     }
-    store_result(e, op->dst, GRJIT_A64_X0);
+    store_result(e, op->results[0], GRJIT_A64_X0);
+    for (size_t i = 1; i < op->result_count; i++) {
+      load_slot(e, GRJIT_A64_X10, GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots,
+          e->c.shape.args_area + i - 1));
+      if (vreg_is_narrow(e, op->results[i])) grjit_a64_mov32_rr(a, GRJIT_A64_X10, GRJIT_A64_X10);
+      store_result(e, op->results[i], GRJIT_A64_X10);
+    }
   }
   /* The call is complete: pop the callee's guest frame. */
   load_slot(e, GRJIT_A64_X0, GRJIT_SLOT_CTX);
@@ -532,18 +601,28 @@ static void emit_tail_call(GRJIT_A64Emit * e, const GRJIT_Op * op) {
    * answer is the same and the native stack grows with every tail call, which no result shows
    * and the stack pointer does. */
   {
-    const uint32_t area_bytes = stack_bytes(n);
+    const uint32_t area_bytes = stack_bytes(n + (e->c.shape.has_result_buffer ? 1u : 0u));
     if (area_bytes != 0) {
       grjit_a64_sub_sp(a, area_bytes);
       for (size_t i = ireg; i < n; i++) {
-        load_slot(e, GRJIT_A64_X10, GRJIT_ARGS_SLOT(regs, e->c.shape.args_area, i));
+        load_slot(e, GRJIT_A64_X10, GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, i));
         grjit_a64_store(a, GRJIT_A64_MEM_X64, GRJIT_A64_X10, GRJIT_A64_SP, (int32_t)(8 * (i - ireg)));
+      }
+      if (e->c.shape.has_result_buffer) {
+        load_slot(e, GRJIT_A64_X10, GRJIT_SLOT_ARGS);
+        grjit_a64_store(a, GRJIT_A64_MEM_X64, GRJIT_A64_X10, GRJIT_A64_SP,
+            (int32_t)(8 * (n - ireg)));
       }
     }
     for (size_t i = 0; i < n && i < ireg; i++) {
-      load_slot(e, arg_regs_internal[i], GRJIT_ARGS_SLOT(regs, e->c.shape.args_area, i));
+      load_slot(e, arg_regs_internal[i], GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, i));
     }
+    if (e->c.shape.has_result_buffer && n < ireg) load_slot(e, arg_regs_internal[n], GRJIT_SLOT_ARGS);
     load_slot(e, GRJIT_A64_X9, GRJIT_SLOT_CTX);
+  if (op->environment.kind == GRJIT_OPERAND_NONE)
+    load_slot(e, GRJIT_A64_X8, GRJIT_SLOT_ENV);
+  else
+    load_operand(e, GRJIT_A64_X8, &op->environment);
     load_slot(e, GRJIT_A64_X16, entry_slot);
     grjit_a64_blr(a, GRJIT_A64_X16);
     grjit_a64_emit_callable_epilogue(e);
@@ -552,9 +631,13 @@ static void emit_tail_call(GRJIT_A64Emit * e, const GRJIT_Op * op) {
 #endif
   /* The frame replacement. */
   const int64_t in_a = e->c.shape.incoming_bytes;
-  const int64_t in_t = stack_bytes(n);
+  const int64_t in_t = stack_bytes(n + (e->c.shape.has_result_buffer ? 1u : 0u));
   const int64_t sp_new = 16 + in_a - in_t; /* from x29 */
   load_slot(e, GRJIT_A64_X9, GRJIT_SLOT_CTX);
+  if (op->environment.kind == GRJIT_OPERAND_NONE)
+    load_slot(e, GRJIT_A64_X8, GRJIT_SLOT_ENV);
+  else
+    load_operand(e, GRJIT_A64_X8, &op->environment);
   grjit_a64_load(a, GRJIT_A64_MEM_X64, GRJIT_A64_X30, GRJIT_A64_FP, 8);
   grjit_a64_load(a, GRJIT_A64_MEM_X64, GRJIT_A64_X15, GRJIT_A64_FP, 0);
   size_t copy_to = n;
@@ -566,12 +649,18 @@ static void emit_tail_call(GRJIT_A64Emit * e, const GRJIT_Op * op) {
   }
 #endif
   for (size_t i = ireg; i < copy_to; i++) {
-    load_slot(e, GRJIT_A64_X10, GRJIT_ARGS_SLOT(regs, e->c.shape.args_area, i));
+    load_slot(e, GRJIT_A64_X10, GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, i));
     store_slot(e, GRJIT_A64_X10, (int32_t)(sp_new + 8 * (int64_t)(i - ireg)));
   }
-  for (size_t i = 0; i < n && i < ireg; i++) {
-    load_slot(e, arg_regs_internal[i], GRJIT_ARGS_SLOT(regs, e->c.shape.args_area, i));
+  if (e->c.shape.has_result_buffer && n >= ireg) {
+    load_slot(e, GRJIT_A64_X10, GRJIT_SLOT_ARGS);
+    store_slot(e, GRJIT_A64_X10,
+        (int32_t)(sp_new + 8 * (int64_t)(n - ireg)));
   }
+  for (size_t i = 0; i < n && i < ireg; i++) {
+    load_slot(e, arg_regs_internal[i], GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, i));
+  }
+  if (e->c.shape.has_result_buffer && n < ireg) load_slot(e, arg_regs_internal[n], GRJIT_SLOT_ARGS);
   load_slot(e, GRJIT_A64_X16, entry_slot);
   lea(e, GRJIT_A64_SP, GRJIT_A64_FP, sp_new);
   grjit_a64_mov_rr(a, GRJIT_A64_FP, GRJIT_A64_X15);
@@ -1191,6 +1280,10 @@ static void emit_float_op(GRJIT_A64Emit * e, const GRJIT_Op * op) {
 static void emit_op(GRJIT_A64Emit * e, const GRJIT_Op * op, size_t block) {
   A * a = &e->as;
   switch (op->kind) {
+    case GRJIT_OP_INSTANCE:
+      load_slot(e, GRJIT_A64_X0, GRJIT_SLOT_ENV);
+      store_result(e, op->dst, GRJIT_A64_X0);
+      break;
     case GRJIT_OP_CONST:
     case GRJIT_OP_MOVE:
     case GRJIT_OP_BITCAST:
@@ -1312,23 +1405,66 @@ static void emit_op(GRJIT_A64Emit * e, const GRJIT_Op * op, size_t block) {
         grjit_a64_b(a, e->blocks[op->target_else]);
       }
       break;
+    case GRJIT_OP_BR_TABLE:
+      load_operand(e, GRJIT_A64_X0, &op->a);
+      grjit_a64_mov_ri(a, GRJIT_A64_X1, op->target_count);
+      grjit_a64_cmp(a, GRJIT_A64_X0, GRJIT_A64_X1);
+      grjit_a64_bcond(a, GRJIT_A64_HS, e->blocks[op->default_target]);
+      for (size_t i = 0; i < op->target_count; i++) {
+        grjit_a64_mov_ri(a, GRJIT_A64_X1, i);
+        grjit_a64_cmp(a, GRJIT_A64_X0, GRJIT_A64_X1);
+        grjit_a64_bcond(a, GRJIT_A64_EQ, e->blocks[op->targets[i]]);
+      }
+      grjit_a64_b(a, e->blocks[op->default_target]);
+      break;
+    case GRJIT_OP_TRAP:
+      grjit_a64_mov_ri(a, GRJIT_A64_X0, op->trap_kind);
+      if (e->c.callable) {
+        grjit_a64_mov_ri(a, GRJIT_A64_X1, GRJIT_STATUS_TRAPPED);
+        grjit_a64_emit_callable_epilogue(e);
+      } else {
+        load_slot(e, GRJIT_A64_X2, GRJIT_SLOT_OUT);
+        grjit_a64_store(a, GRJIT_A64_MEM_X64, GRJIT_A64_X0, GRJIT_A64_X2, 0);
+        grjit_a64_mov_ri(a, GRJIT_A64_X0, GRJIT_EXIT_TRAP);
+        grjit_a64_emit_epilogue(e);
+      }
+      break;
+    case GRJIT_OP_RETHROW:
+      grjit_a64_mov_ri(a, GRJIT_A64_X0, 0);
+      grjit_a64_mov_ri(a, GRJIT_A64_X1, GRJIT_STATUS_EXCEPTION);
+      grjit_a64_emit_callable_epilogue(e);
+      break;
     case GRJIT_OP_RET:
       if (e->c.callable) {
         /* The internal convention: the result in x0 (zero for none), the status in x1, and
          * the callee pops its own stack arguments. */
-        if (op->a.kind != GRJIT_OPERAND_NONE) {
-          load_operand(e, GRJIT_A64_X0, &op->a);
-        } else {
-          grjit_a64_mov_ri(a, GRJIT_A64_X0, 0);
+        if (op->result_count > 1) {
+          load_slot(e, GRJIT_A64_X15, GRJIT_SLOT_ARGS);
+          for (size_t i = 1; i < op->result_count; i++) {
+            load_operand(e, GRJIT_A64_X10, &op->returns[i]);
+            grjit_a64_store(a, GRJIT_A64_MEM_X64, GRJIT_A64_X10, GRJIT_A64_X15,
+                (int32_t)(8 * (i - 1)));
+          }
         }
+        if (op->result_count != 0) load_operand(e, GRJIT_A64_X0, &op->returns[0]);
+        else grjit_a64_mov_ri(a, GRJIT_A64_X0, 0);
         grjit_a64_mov_ri(a, GRJIT_A64_X1, GRJIT_STATUS_RETURNED);
         grjit_a64_emit_callable_epilogue(e);
         break;
       }
-      if (op->a.kind != GRJIT_OPERAND_NONE) {
-        load_operand(e, GRJIT_A64_X0, &op->a);
-        load_slot(e, GRJIT_A64_X2, GRJIT_SLOT_OUT);
-        grjit_a64_store(a, GRJIT_A64_MEM_X64, GRJIT_A64_X0, GRJIT_A64_X2, 0);
+      if (op->result_count != 0) {
+        if (op->result_count == 1) {
+          load_operand(e, GRJIT_A64_X0, &op->returns[0]);
+          load_slot(e, GRJIT_A64_X2, GRJIT_SLOT_OUT);
+          grjit_a64_store(a, GRJIT_A64_MEM_X64, GRJIT_A64_X0, GRJIT_A64_X2, 0);
+        } else {
+          load_slot(e, GRJIT_A64_X2, GRJIT_SLOT_OUT);
+          for (size_t i = 0; i < op->result_count; i++) {
+            load_operand(e, GRJIT_A64_X0, &op->returns[i]);
+            grjit_a64_store(a, GRJIT_A64_MEM_X64, GRJIT_A64_X0, GRJIT_A64_X2,
+                (int32_t)(8 * i));
+          }
+        }
       }
       grjit_a64_mov_ri(a, GRJIT_A64_X0, GRJIT_EXIT_RETURNED);
       grjit_a64_emit_epilogue(e);
@@ -1423,10 +1559,11 @@ static void emit_adapter(GRJIT_A64Emit * e) {
   GRJIT_Label not_failed = grjit_a64_label(a);
   GRJIT_Label done = grjit_a64_label(a);
   grjit_a64_push_frame_record(a);
-  grjit_a64_sub_sp(a, 32);
-  grjit_a64_store(a, GRJIT_A64_MEM_X64, GRJIT_A64_X2, GRJIT_A64_SP, 0);  /* out */
+  grjit_a64_sub_sp(a, 48);
+  grjit_a64_store(a, GRJIT_A64_MEM_X64, GRJIT_A64_X3, GRJIT_A64_SP, 0);  /* out */
   grjit_a64_store(a, GRJIT_A64_MEM_X64, GRJIT_A64_X0, GRJIT_A64_SP, 8);  /* context */
-  grjit_a64_store(a, GRJIT_A64_MEM_X64, GRJIT_A64_X1, GRJIT_A64_SP, 16); /* args */
+  grjit_a64_store(a, GRJIT_A64_MEM_X64, GRJIT_A64_X1, GRJIT_A64_SP, 16); /* environment */
+  grjit_a64_store(a, GRJIT_A64_MEM_X64, GRJIT_A64_X2, GRJIT_A64_SP, 24); /* args */
 #if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 27 && defined(GRJIT_TEST_PLANT_FORM) && GRJIT_TEST_PLANT_FORM == 2
   /* Planted defect 27, second form (tests only): a callee-saved register is used and never
    * restored. The caller's own value must survive the call. */
@@ -1439,7 +1576,7 @@ static void emit_adapter(GRJIT_A64Emit * e) {
     grjit_a64_mov32_rr(a, GRJIT_A64_X0, GRJIT_A64_X0);
     grjit_a64_cbnz(a, GRJIT_A64_X0, e->refuse);
   }
-  grjit_a64_load(a, GRJIT_A64_MEM_X64, GRJIT_A64_X15, GRJIT_A64_SP, 16);
+  grjit_a64_load(a, GRJIT_A64_MEM_X64, GRJIT_A64_X15, GRJIT_A64_SP, 24);
   if (in_bytes != 0) {
     grjit_a64_sub_sp(a, in_bytes);
     for (size_t i = ireg; i < params; i++) {
@@ -1450,7 +1587,15 @@ static void emit_adapter(GRJIT_A64Emit * e) {
   for (size_t i = 0; i < params && i < ireg; i++) {
     grjit_a64_load(a, GRJIT_A64_MEM_X64, arg_regs_internal[i], GRJIT_A64_X15, (int32_t)(8 * i));
   }
+  if (e->c.shape.has_result_buffer) {
+    grjit_a64_load(a, GRJIT_A64_MEM_X64, GRJIT_A64_X10, GRJIT_A64_SP, 0);
+    grjit_a64_add_imm(a, GRJIT_A64_X10, GRJIT_A64_X10, 8, false);
+    if (params < ireg) grjit_a64_mov_rr(a, arg_regs_internal[params], GRJIT_A64_X10);
+    else grjit_a64_store(a, GRJIT_A64_MEM_X64, GRJIT_A64_X10, GRJIT_A64_SP,
+        (int32_t)(8 * (params - ireg)));
+  }
   grjit_a64_load(a, GRJIT_A64_MEM_X64, GRJIT_A64_X9, GRJIT_A64_SP, (int32_t)(in_bytes + 8));
+  grjit_a64_load(a, GRJIT_A64_MEM_X64, GRJIT_A64_X8, GRJIT_A64_SP, (int32_t)(in_bytes + 16));
   grjit_a64_mov_ri(a, GRJIT_A64_X29, (uint64_t)GRCORE_COMPILED_CHAIN_END);
   grjit_a64_adr(a, GRJIT_A64_X16, e->internal);
   grjit_a64_blr(a, GRJIT_A64_X16);
@@ -1468,21 +1613,31 @@ static void emit_adapter(GRJIT_A64Emit * e) {
   grjit_a64_bind(a, deopted);
   grjit_a64_store(a, GRJIT_A64_MEM_X64, GRJIT_A64_X0, GRJIT_A64_X2, 0);
   grjit_a64_mov_ri(a, GRJIT_A64_X0, GRJIT_EXIT_DEOPT);
+  GRJIT_Label not_trapped = grjit_a64_label(a);
+  grjit_a64_cmp_imm(a, GRJIT_A64_X1, GRJIT_STATUS_TRAPPED);
+  grjit_a64_bcond(a, GRJIT_A64_NE, not_trapped);
+  grjit_a64_mov_ri(a, GRJIT_A64_X0, GRJIT_EXIT_TRAP);
+  grjit_a64_bind(a, not_trapped);
   /* FAILED: the engine's hook refused the rebuild; out[0] is its answer. */
   grjit_a64_cmp_imm(a, GRJIT_A64_X1, GRJIT_STATUS_FAILED);
   grjit_a64_bcond(a, GRJIT_A64_NE, not_failed);
   grjit_a64_mov_ri(a, GRJIT_A64_X0, GRJIT_EXIT_REBUILD_FAILED);
   grjit_a64_bind(a, not_failed);
+  GRJIT_Label not_exception = grjit_a64_label(a);
+  grjit_a64_cmp_imm(a, GRJIT_A64_X1, GRJIT_STATUS_EXCEPTION);
+  grjit_a64_bcond(a, GRJIT_A64_NE, not_exception);
+  grjit_a64_mov_ri(a, GRJIT_A64_X0, GRJIT_EXIT_EXCEPTION);
+  grjit_a64_bind(a, not_exception);
   grjit_a64_bind(a, done);
 #if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 27 && !(defined(GRJIT_TEST_PLANT_FORM) && GRJIT_TEST_PLANT_FORM == 2)
   /* Planted defect 27 (tests only): the adapter gives the frame record back but leaves `x29`
    * as the chain-end marker the caller of the entry then sees. */
-  grjit_a64_add_sp(a, 32);
+  grjit_a64_add_sp(a, 48);
   grjit_a64_load(a, GRJIT_A64_MEM_X64, GRJIT_A64_X30, GRJIT_A64_SP, 8);
   grjit_a64_add_sp(a, 16);
   grjit_a64_ret(a);
 #else
-  grjit_a64_add_sp(a, 32);
+  grjit_a64_add_sp(a, 48);
   grjit_a64_pop_frame_record(a);
   grjit_a64_ret(a);
 #endif
@@ -1491,7 +1646,7 @@ static void emit_adapter(GRJIT_A64Emit * e) {
   grjit_a64_load(a, GRJIT_A64_MEM_X64, GRJIT_A64_X2, GRJIT_A64_SP, 0);
   grjit_a64_store(a, GRJIT_A64_MEM_X64, GRJIT_A64_X0, GRJIT_A64_X2, 0);
   grjit_a64_mov_ri(a, GRJIT_A64_X0, GRJIT_EXIT_REFUSED);
-  grjit_a64_add_sp(a, 32);
+  grjit_a64_add_sp(a, 48);
   grjit_a64_pop_frame_record(a);
   grjit_a64_ret(a);
 }
@@ -1546,6 +1701,14 @@ static void emit_internal_prologue(GRJIT_A64Emit * e) {
   grjit_a64_bcond(a, GRJIT_A64_LO, e->overflow);
   grjit_a64_sub_sp(a, alloc);
   store_slot(e, GRJIT_A64_X9, GRJIT_SLOT_CTX);
+  store_slot(e, GRJIT_A64_X8, GRJIT_SLOT_ENV);
+  if (f->param_count < ireg) {
+    if (e->c.shape.has_result_buffer) store_slot(e, arg_regs_internal[f->param_count], GRJIT_SLOT_ARGS);
+  } else {
+    grjit_a64_load(a, GRJIT_A64_MEM_X64, GRJIT_A64_X10, GRJIT_A64_FP,
+        (int32_t)(16 + 8 * (f->param_count - ireg)));
+    if (e->c.shape.has_result_buffer) store_slot(e, GRJIT_A64_X10, GRJIT_SLOT_ARGS);
+  }
   for (size_t i = 0; i < f->param_count; i++) {
     if (i < ireg) {
 #if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 87
@@ -1598,7 +1761,8 @@ static GRJIT_Result emit_pass(const GRJIT_Function * f, GRJIT_A64Emit * e,
     while (grjit_a64_status(a) == GRJIT_A64_OK && (grjit_a64_size(a) + GRJIT_ENTRY_TAG_BYTES) % 16 != 0) {
       grjit_a64_brk(a, 0);
     }
-    grjit_a64_data64(a, GRJIT_ENTRY_TAG_WORD(f->param_count));
+    grjit_a64_data64(a, GRJIT_ENTRY_TAG_WORD(f->param_count,
+        grjit_function_result_count(f)));
     grjit_a64_data64(a, f->token);
     grjit_a64_bind(a, e->internal);
     e->internal_offset = (uint32_t)grjit_a64_size(a);
@@ -1610,8 +1774,9 @@ static GRJIT_Result emit_pass(const GRJIT_Function * f, GRJIT_A64Emit * e,
     grjit_a64_mov_sp(a, GRJIT_A64_FP, GRJIT_A64_SP);
     grjit_a64_sub_sp(a, e->c.frame_bytes);
     store_slot(e, GRJIT_A64_X0, GRJIT_SLOT_CTX);
-    store_slot(e, GRJIT_A64_X2, GRJIT_SLOT_OUT);
-    store_slot(e, GRJIT_A64_X1, GRJIT_SLOT_ARGS);
+    store_slot(e, GRJIT_A64_X1, GRJIT_SLOT_ENV);
+    store_slot(e, GRJIT_A64_X2, GRJIT_SLOT_ARGS);
+    store_slot(e, GRJIT_A64_X3, GRJIT_SLOT_OUT);
     if (e->c.hook != NULL) {
       grjit_a64_mov_ri(a, GRJIT_A64_X16, (uint64_t)(uintptr_t)e->c.hook);
       grjit_a64_blr(a, GRJIT_A64_X16);
@@ -1698,6 +1863,9 @@ GRJIT_Result grjit_a64_emit_function(const GRJIT_Function * f,
     return r;
   }
   grjit_emit_sort_sites(&e->c);
+  for (size_t i = 0; i < e->c.exception_site_count; i++)
+    e->c.exception_sites[i].landing_offset = (uint32_t)grjit_a64_label_offset(&e->as,
+        e->blocks[e->c.exception_sites[i].landing_block]);
   return GRJIT_OK;
 }
 

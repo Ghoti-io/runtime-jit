@@ -209,6 +209,7 @@ typedef uint32_t GRJIT_BlockId;
 #define GRJIT_NO_VREG UINT32_MAX
 /** @brief "No frame state" in an operation that has none. */
 #define GRJIT_NO_STATE UINT32_MAX
+#define GRJIT_NO_BLOCK UINT32_MAX
 
 /** @brief What an operand is. */
 typedef enum GRJIT_OperandKind {
@@ -264,8 +265,7 @@ static inline GRJIT_Operand grjit_operand_f64_imm(uint64_t bits) {
   return o;
 }
 
-/** @brief The operations. Terminators are `BR`, `BR_IF`, `RET` and the two tail
- *  calls. */
+/** @brief The operations. Terminators include branches, `TRAP`, returns and tail calls. */
 typedef enum GRJIT_OpKind {
   GRJIT_OP_CONST,  ///< `dst = a.imm`.
   GRJIT_OP_MOVE,   ///< `dst = a`.
@@ -378,6 +378,10 @@ typedef enum GRJIT_OpKind {
   GRJIT_OP_PROMOTE, ///< `dst = (double)a`: `F32` to `F64` (`f64.promote_f32`).
   GRJIT_OP_REINTERPRET, ///< `dst = a`'s bits: `I32` and `F32`, or `I64` and `F64`, either way
                         ///< (`i32.reinterpret_f32` and the other three).
+  GRJIT_OP_INSTANCE, ///< `dst =` the active invocation's language environment pointer.
+  GRJIT_OP_BR_TABLE, ///< Unsigned index into `targets`, otherwise `default_target`.
+  GRJIT_OP_TRAP, ///< Terminates with `trap_kind`.
+  GRJIT_OP_RETHROW, ///< Propagates the engine's pending exception to the caller.
   GRJIT_OP_COUNT   ///< Not an operation; closes the enum.
 } GRJIT_OpKind;
 
@@ -405,6 +409,18 @@ typedef enum GRJIT_CallAttr {
   GRJIT_CALL_GC_POINT, ///< Can reach one: a site, with a frame state.
   GRJIT_CALL_ATTR_COUNT ///< Not an attribute; closes the enum.
 } GRJIT_CallAttr;
+
+/** @brief Wasm trap reasons carried by ::GRJIT_EXIT_TRAP. */
+typedef enum GRJIT_TrapKind {
+  GRJIT_TRAP_UNREACHABLE = 1,
+  GRJIT_TRAP_MEMORY_OUT_OF_BOUNDS,
+  GRJIT_TRAP_TABLE_OUT_OF_BOUNDS,
+  GRJIT_TRAP_INDIRECT_CALL_TYPE,
+  GRJIT_TRAP_INTEGER_DIVIDE_BY_ZERO,
+  GRJIT_TRAP_INTEGER_OVERFLOW,
+  GRJIT_TRAP_INVALID_CONVERSION,
+  GRJIT_TRAP_KIND_COUNT
+} GRJIT_TrapKind;
 
 /** @brief What one slot of a frame state is. */
 typedef enum GRJIT_FrameSlotKind {
@@ -473,16 +489,27 @@ typedef struct GRJIT_Op {
   GRJIT_VReg dst;             ///< Result register, or ::GRJIT_NO_VREG.
   GRJIT_Operand a;            ///< First operand; the base of a memory access.
   GRJIT_Operand b;            ///< Second operand; the value of a `STORE`.
+  GRJIT_Operand environment;   ///< Explicit callee environment for guest calls; NONE means inherit.
+  GRJIT_Operand index;        ///< Optional memory index; NONE for an unindexed access.
+  uint8_t scale;             ///< Memory index scale: 1, 2, 4 or 8.
   int32_t disp;               ///< Displacement of a memory access.
   uint32_t width;             ///< Width in bits of a memory access: 8..64.
   GRJIT_Cmp cmp;              ///< The condition of a `CMP`.
   GRJIT_BlockId target;       ///< Branch target (the taken one of `BR_IF`).
   GRJIT_BlockId target_else;  ///< The other target of a `BR_IF`.
+  GRJIT_BlockId default_target; ///< The default destination of `BR_TABLE`.
+  GRJIT_BlockId landing_target; ///< Catch edge for CALL_SLOT/CALL_PTR, or GRJIT_NO_BLOCK.
+  size_t target_count;        ///< Number of entries in `targets`.
+  const GRJIT_BlockId * targets; ///< `BR_TABLE` destinations, copied by the builder.
   uint64_t address;           ///< The helper's absolute address, for `CALL`.
   GRJIT_CallAttr attr;        ///< The call's attribute.
   GRCORE_CodeSiteKind site_kind; ///< The site kind of a `GC_POINT` call.
   size_t arg_count;           ///< Arguments of a call.
   const GRJIT_Operand * args; ///< The arguments.
+  size_t result_count;        ///< Multi-result outputs (call) or return values (RET).
+  size_t callee_result_count; ///< Tail-call target arity; tail terminators have no result array.
+  const GRJIT_VReg * results; ///< Call result registers, copied by the builder.
+  const GRJIT_Operand * returns; ///< RET result operands, copied by the builder.
   uint32_t state;             ///< Index of the frame state, or
                               ///< ::GRJIT_NO_STATE.
   uint64_t callee;            ///< For the calls and tail calls: the engine's
@@ -497,6 +524,7 @@ typedef struct GRJIT_Op {
                               ///< for a native with no status.
   uint32_t native;            ///< For `CALL_NATIVE`: the native's id in the
                               ///< function's table.
+  GRJIT_TrapKind trap_kind;   ///< For `TRAP`: the reason carried by the exit.
 } GRJIT_Op;
 
 /**
@@ -518,6 +546,9 @@ typedef struct GRJIT_Op {
  *   triggers. A non-zero return refuses the push: nothing is left pushed, and the
  *   call site exits through its exit state, where the interpreter makes the call
  *   itself and reaches the same verdict (a depth limit) it would have.
+ *   `result_count` is the call site's declared result arity. The hook must
+ *   refuse a callee with a different arity because the internal ABI uses this
+ *   count to determine whether a result buffer is present.
  * - `pop` runs after the callee returned normally, and pops its guest frame and
  *   gives back the reservation it extended. It cannot refuse: the call is
  *   complete, and no frame state describes "complete but not popped". It must not
@@ -545,7 +576,8 @@ typedef struct GRJIT_Op {
  *   it, never continue in the interpreter.
  * - `tail` runs, for a tail call, where `push` runs for a call, and has the same
  *   signature and the same rules for its arguments (they are in the site's stack
- *   map, and it reads them after any collection it causes). It replaces the top
+ *   map, and it reads them after any collection it causes). `result_count` is
+ *   the tail site's declared result arity and must match the callee. It replaces the top
  *   guest frame, the calling function's, with the callee's, as one step, and
  *   replaces the reservation extension (extend by the callee's maximum, then give
  *   back the caller's). Guest depth does not change, and memory is counted as the
@@ -572,13 +604,22 @@ typedef struct GRJIT_Op {
  * `deopt` is required.
  */
 typedef struct GRJIT_CallHooks {
-  uint32_t (*push)(void * context, uint64_t callee, const uint64_t * args,
-      uint64_t arg_count);
+  uint32_t (*push)(void * context, void * callee_environment,
+      uint64_t callee, const uint64_t * args, uint64_t arg_count,
+      uint64_t result_count);
   void (*pop)(void * context);
   uint32_t (*compile)(void * context, uint64_t callee);
   uint32_t (*deopt)(void * context, uint64_t cause);
-  uint32_t (*tail)(void * context, uint64_t callee, const uint64_t * args,
-      uint64_t arg_count);
+  uint32_t (*tail)(void * context, void * callee_environment,
+      uint64_t callee, const uint64_t * args, uint64_t arg_count,
+      uint64_t result_count);
+  /** Called at each compiled boundary returning EXCEPTION. It examines the
+   * engine-owned pending exception against this caller environment's landing
+   * metadata, and pops the just-returned callee guest frame exactly once on
+   * either outcome. Zero handles and enters `landing_block`; nonzero propagates
+   * to the next outer compiled boundary. It does not unwind native/JIT frames. */
+  uint32_t (*catch_exception)(void * context, void * caller_environment,
+      uint64_t callee, uint32_t landing_block);
 } GRJIT_CallHooks;
 
 /** @brief A function. Opaque; built by ::GRJIT_Builder. */

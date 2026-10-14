@@ -63,6 +63,7 @@ struct GRJIT_Function {
   char * name;
   size_t interp_slots;
   size_t param_count;
+  size_t declared_result_count; ///< Stable callable signature, even with no reachable return.
   GRJIT_PollHelper poll_helper;
   bool callable;            ///< Has an internal entry and the hooks below.
   uint64_t token;           ///< The engine's token for this function, which a call
@@ -80,6 +81,9 @@ struct GRJIT_Function {
   size_t state_capacity;
   size_t op_count;
 };
+
+/** Result arity declared by all reachable RET and tail-call terminators. */
+GRJIT_EXTERN size_t grjit_function_result_count(const GRJIT_Function * function);
 
 struct GRJIT_Builder {
   GRJIT_Function * function;
@@ -127,5 +131,6 @@ void grjit_op_visit_uses(const GRJIT_Function * function, const GRJIT_Op * op,
 
 /** The register an operation assigns, or ::GRJIT_NO_VREG. */
 GRJIT_VReg grjit_op_def(const GRJIT_Op * op);
+void grjit_op_visit_defs(const GRJIT_Op * op, GRJIT_UseVisitor visit, void * user);
 
 #endif /* GHOTI_IO_GRJIT_SRC_IR_IR_INTERNAL_H */

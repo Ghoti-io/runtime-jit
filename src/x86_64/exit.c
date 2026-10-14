@@ -128,7 +128,11 @@ void grjit_emit_call_slow_stub(GRJIT_Emit * e, const GRJIT_Pending * p) {
   grjit_asm_jcc(a, GRJIT_COND_NE, p->exit);
   /* The hook says it installed: read the slot again, and if it is still empty
    * the hook lied and the call exits. */
-  grjit_asm_mov_ri(a, GRJIT_RAX, p->op->address);
+  if (p->op->address != 0) {
+    grjit_asm_mov_ri(a, GRJIT_RAX, p->op->address);
+  } else {
+    grjit_emit_operand_load(e, GRJIT_RAX, &p->op->a);
+  }
   grjit_asm_load64(a, GRJIT_RAX, GRJIT_RAX, 0);
   grjit_asm_cmp_ri(a, GRJIT_RAX, (int32_t)GRCORE_ENTRY_REFUSED);
   grjit_asm_jcc(a, GRJIT_COND_BE, p->exit);

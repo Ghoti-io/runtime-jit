@@ -117,7 +117,7 @@ int main(void) {
 
   uint64_t args[1] = {100};
   uint64_t out[1];
-  uint32_t exit_kind = grjit_code_call(code, context, args, out);
+  uint32_t exit_kind = grjit_code_call(code, context, context, args, out);
   printf("sum(100) exit %u, result %llu\n", exit_kind, (unsigned long long)out[0]);
   int ok = exit_kind == GRJIT_EXIT_RETURNED && out[0] == 4950;
 

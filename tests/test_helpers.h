@@ -241,8 +241,8 @@ struct B {
                   state.data(), state.size()),
         GRJIT_OK);
   }
-  void callable(const GRJIT_CallHooks & hooks) {
-    EXPECT_EQ(grjit_builder_set_callable(b, &hooks), GRJIT_OK);
+  void callable(const GRJIT_CallHooks & hooks, size_t result_count = 1) {
+    EXPECT_EQ(grjit_builder_set_callable(b, &hooks, result_count), GRJIT_OK);
   }
   /* A call through an entry slot; the result goes in `d` or nowhere. */
   void call_slot(GRJIT_VReg d, const void * slot_entry, uint64_t callee,
@@ -269,12 +269,12 @@ struct B {
       std::vector<GRJIT_Operand> args, GRCORE_PollIdentity id,
       std::vector<GRJIT_FrameSlot> state) {
     EXPECT_EQ(grjit_builder_tail_call_slot(b, reinterpret_cast<uintptr_t>(slot_entry),
-                  callee, args.data(), args.size(), id, state.data(), state.size()),
+                  callee, 1, args.data(), args.size(), id, state.data(), state.size()),
         GRJIT_OK);
   }
   void tail_call_ptr(GRJIT_Operand target, uint64_t callee, std::vector<GRJIT_Operand> args,
       GRCORE_PollIdentity id, std::vector<GRJIT_FrameSlot> state) {
-    EXPECT_EQ(grjit_builder_tail_call_ptr(b, target, callee, args.data(), args.size(), id,
+    EXPECT_EQ(grjit_builder_tail_call_ptr(b, target, callee, 1, args.data(), args.size(), id,
                   state.data(), state.size()),
         GRJIT_OK);
   }
@@ -453,10 +453,13 @@ struct Compiled {
     std::vector<uint64_t> out;
   };
   Run run(void * ctx, std::vector<uint64_t> args = {}) const {
+    return run(ctx, ctx, std::move(args));
+  }
+  Run run(void * ctx, void * environment, std::vector<uint64_t> args) const {
     Run r;
     r.out.assign(grjit_code_out_words(code), 0xDEADBEEFu);
     args.resize(std::max<size_t>(args.size(), grjit_code_param_count(code)));
-    r.exit = grjit_code_call(code, ctx, args.data(), r.out.data());
+    r.exit = grjit_code_call(code, ctx, environment, args.data(), r.out.data());
     return r;
   }
 };

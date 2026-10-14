@@ -66,7 +66,10 @@ enum class K {
   BR,        // goto t
   CALL,      // d = fn(args...) through fn's entry slot
   CALLP,     // d = fn(args...) through the code pointer in local a
+  CALLM,     // results = fn(args...) through fn's entry slot
+  CALLMP,    // results = fn(args...) through the code pointer in local a
   RET,       // return a
+  RETM,      // return several locals
   GUARD,     // compiled: deoptimize when a == 0; interpreted: nothing
   POLL,      // a poll
   NEW,       // d = a new heap object holding imm
@@ -93,11 +96,13 @@ struct Ins {
   int fn = -1;
   int native = -1; // NATIVE: the id the engine registered it under
   std::vector<int> args;
+  std::vector<int> results;
 };
 
 struct Func {
   std::string name;
   int nparams = 0;
+  size_t result_count = 1;
   std::vector<GRJIT_Type> type; // one per local, parameters first
   std::vector<Ins> code;
   /* The frame owns a budget scope or an engine call record: a tail call from it
@@ -150,6 +155,12 @@ struct P {
   void callp(int d, int ptr, int fn, std::vector<int> args) {
     auto & i = add(K::CALLP); i.d = d; i.a = ptr; i.fn = fn; i.args = std::move(args);
   }
+  void callm(std::vector<int> results, int fn, std::vector<int> args) {
+    auto & i = add(K::CALLM); i.fn = fn; i.args = std::move(args); i.results = std::move(results);
+  }
+  void callmp(std::vector<int> results, int ptr, int fn, std::vector<int> args) {
+    auto & i = add(K::CALLMP); i.a = ptr; i.fn = fn; i.args = std::move(args); i.results = std::move(results);
+  }
   void tailcall(int fn, std::vector<int> args) {
     auto & i = add(K::TAILCALL); i.fn = fn; i.args = std::move(args);
   }
@@ -161,6 +172,7 @@ struct P {
     auto & i = add(K::NATIVE); i.d = d; i.native = id; i.args = std::move(args);
   }
   void ret(int a) { auto & i = add(K::RET); i.a = a; }
+  void retm(std::vector<int> values) { f.result_count = values.size(); auto & i = add(K::RETM); i.results = std::move(values); }
   void guard(int a) { auto & i = add(K::GUARD); i.a = a; }
   void poll() { add(K::POLL); }
   void nw(int d, int64_t v) { auto & i = add(K::NEW); i.d = d; i.imm = v; }
@@ -277,6 +289,7 @@ constexpr u64 kUnwound = 0x0BADC0DE0BADC0DEull;
 struct Outcome {
   bool finished = false;   // a value was produced
   u64 value = 0;
+  std::vector<u64> values;
   bool limit = false;      // the guest-depth budget refused a call
   uint32_t exit = 99;      // the adapter's exit, for a compiled run
   bool interpreted_rest = false; // the interpreter finished after a deopt
@@ -386,10 +399,10 @@ class Engine {
   bool interpreter_never_moves = false;
   /* A tail hook to give the compiled code in place of h_tail, for a test of what the
    * hook's return value may be (see test_tail.cpp). */
-  uint32_t (*tail_override)(void *, uint64_t, const uint64_t *, uint64_t) = nullptr;
+  uint32_t (*tail_override)(void *, void *, uint64_t, const uint64_t *, uint64_t, uint64_t) = nullptr;
   /* The same for the other hooks and the poll helper (tests/calls_asm.h's `grjit_test_garbage_*`, which
    * answer with garbage above the 32 bits of the answer). */
-  uint32_t (*push_override)(void *, uint64_t, const uint64_t *, uint64_t) = nullptr;
+  uint32_t (*push_override)(void *, void *, uint64_t, const uint64_t *, uint64_t, uint64_t) = nullptr;
   uint32_t (*compile_override)(void *, uint64_t) = nullptr;
   uint32_t (*deopt_override)(void *, uint64_t) = nullptr;
   uint32_t (*poll_override)(void *, uint64_t, uint64_t) = nullptr;
@@ -497,8 +510,8 @@ class Engine {
     }
   }
   // ---- hooks (C ABI) ----
-  static uint32_t h_push(void *, uint64_t, const uint64_t *, uint64_t);
-  static uint32_t h_tail(void *, uint64_t, const uint64_t *, uint64_t);
+  static uint32_t h_push(void *, void *, uint64_t, const uint64_t *, uint64_t, uint64_t);
+  static uint32_t h_tail(void *, void *, uint64_t, const uint64_t *, uint64_t, uint64_t);
   static void h_pop(void *);
   static uint32_t h_compile(void *, uint64_t);
   static uint32_t h_deopt(void *, uint64_t);
@@ -744,7 +757,7 @@ inline GRJIT_Function * Engine::build_ir(int fn) {
   hooks.compile = compile_override != nullptr ? compile_override : Engine::h_compile;
   hooks.deopt = deopt_override != nullptr ? deopt_override : Engine::h_deopt;
   hooks.tail = tail_override != nullptr ? tail_override : Engine::h_tail;
-  b.callable(hooks);
+  b.callable(hooks, F.result_count);
   b.natives(ntable);
   EXPECT_EQ(grjit_builder_set_token(b.b, static_cast<u64>(fn)), GRJIT_OK);
   b.poll_helper(poll_override != nullptr ? poll_override : Engine::h_poll);
@@ -767,7 +780,7 @@ inline GRJIT_Function * Engine::build_ir(int fn) {
     if (in.k == K::BRZ || in.k == K::BR) {
       leaders.insert(in.t);
       leaders.insert(pc + 1);
-    } else if (in.k == K::RET || in.k == K::TAILCALL || in.k == K::TAILCALLP) {
+    } else if (in.k == K::RET || in.k == K::RETM || in.k == K::TAILCALL || in.k == K::TAILCALLP) {
       leaders.insert(pc + 1);
     }
   }
@@ -825,6 +838,13 @@ inline GRJIT_Function * Engine::build_ir(int fn) {
       case K::BRZ: b.br_if(V(in.a), blk[pc + 1], blk[in.t]); terminated = true; break;
       case K::BR: b.br(blk[in.t]); terminated = true; break;
       case K::RET: b.ret(V(in.a)); terminated = true; break;
+      case K::RETM: {
+        std::vector<GRJIT_Operand> values;
+        for (int r : in.results) values.push_back(V(static_cast<GRJIT_VReg>(r)));
+        EXPECT_EQ(grjit_builder_ret_multi(b.b, values.data(), values.size()), GRJIT_OK);
+        terminated = true;
+        break;
+      }
       case K::CALL:
         b.call_slot(in.d, &slots[in.fn]->entry, static_cast<u64>(in.fn), operands(in.args), id,
             state(pc), id, state(pc));
@@ -833,6 +853,27 @@ inline GRJIT_Function * Engine::build_ir(int fn) {
         b.call_ptr(in.d, V(in.a), static_cast<u64>(in.fn), operands(in.args), id, state(pc), id,
             state(pc));
         break;
+      case K::CALLM: {
+        std::vector<GRJIT_VReg> results;
+        for (int r : in.results) results.push_back(static_cast<GRJIT_VReg>(r));
+        const auto args = operands(in.args);
+        const auto st = state(pc);
+        EXPECT_EQ(grjit_builder_call_slot_results(b.b, results.data(), results.size(),
+                      reinterpret_cast<uintptr_t>(&slots[in.fn]->entry), static_cast<u64>(in.fn),
+                      args.data(), args.size(), id, st.data(), st.size(), id,
+                      st.data(), st.size()), GRJIT_OK);
+        break;
+      }
+      case K::CALLMP: {
+        std::vector<GRJIT_VReg> results;
+        for (int r : in.results) results.push_back(static_cast<GRJIT_VReg>(r));
+        const auto args = operands(in.args);
+        const auto st = state(pc);
+        EXPECT_EQ(grjit_builder_call_ptr_results(b.b, results.data(), results.size(), operand(in.a),
+                      static_cast<u64>(in.fn), args.data(), args.size(), id, st.data(),
+                      st.size(), id, st.data(), st.size()), GRJIT_OK);
+        break;
+      }
       case K::TAILCALL:
         b.tail_call_slot(&slots[in.fn]->entry, static_cast<u64>(in.fn), operands(in.args), id,
             state(pc));
@@ -960,10 +1001,15 @@ inline bool Engine::compile_fn(int fn) {
 
 /* ---- Hooks ------------------------------------------------------------------ */
 
-inline uint32_t Engine::h_push(void * ctx, uint64_t callee, const uint64_t * args, uint64_t n) {
+inline uint32_t Engine::h_push(void * ctx, void * environment, uint64_t callee, const uint64_t * args, uint64_t n, uint64_t result_count) {
+  (void)environment;
   Engine & e = *g_engine;
   e.check_hook_ctx(ctx);
   e.check_sp();
+  EXPECT_EQ(n, grjit_code_param_count(e.C(callee).code));
+  if (grjit_code_result_count(e.C(callee).code) != result_count) {
+    return 1u;
+  }
   if (e.torture) {
     e.collect(); // the frame-push GC point: the arguments are read afterwards
   }
@@ -1006,10 +1052,15 @@ inline uint32_t Engine::h_push(void * ctx, uint64_t callee, const uint64_t * arg
  * callee's, and its reservation extension, as one step. Everything that can fail
  * or collect is done before the guest stack is touched, so a refusal leaves
  * everything as it was; the pop and push after it cannot fail. */
-inline uint32_t Engine::h_tail(void * ctx, uint64_t callee, const uint64_t * args, uint64_t n) {
+inline uint32_t Engine::h_tail(void * ctx, void * environment, uint64_t callee, const uint64_t * args, uint64_t n, uint64_t result_count) {
+  (void)environment;
   Engine & e = *g_engine;
   e.check_hook_ctx(ctx);
   e.check_sp();
+  EXPECT_EQ(n, grjit_code_param_count(e.C(callee).code));
+  if (grjit_code_result_count(e.C(callee).code) != result_count) {
+    return 1u;
+  }
   e.st.tails++;
   if (e.torture) {
     e.collect(); // a GC point: the arguments are read afterwards
@@ -1620,7 +1671,9 @@ inline void Engine::interpret(Outcome & out) {
       case K::ENTRYOF: wr(S, fn, in.d, h_entryof(static_cast<u64>(in.fn))); S[0] = pc + 1; break;
       case K::PROBE: st.probes++; st.probed.push_back(L(in.a)); S[0] = pc + 1; break;
       case K::CALL:
-      case K::CALLP: {
+      case K::CALLP:
+      case K::CALLM:
+      case K::CALLMP: {
         // The call is the instruction at pc: the callee's frame is pushed above
         // this one, and the call is completed when the callee returns.
         u64 args[16];
@@ -1657,13 +1710,18 @@ inline void Engine::interpret(Outcome & out) {
         }
         break;
       }
-      case K::RET: {
-        u64 v = L(in.a);
+      case K::RET:
+      case K::RETM: {
+        std::vector<u64> values;
+        if (in.k == K::RET) values.push_back(L(in.a));
+        else for (int r : in.results) values.push_back(L(r));
+        const u64 v = values.empty() ? 0 : values[0];
         for (;;) {
           pop_frame();
           if (grcore_stack_frame_count(stack) <= base_frames) {
             out.finished = true;
             out.value = v;
+            out.values = values;
             return;
           }
           GRCORE_FrameRef caller = grcore_stack_top(stack);
@@ -1675,7 +1733,7 @@ inline void Engine::interpret(Outcome & out) {
           if ((CI.k == K::TAILCALL || CI.k == K::TAILCALLP) && funcs[cid.function].owns_scope) {
             continue; // the caller made its tail call as a call: it returns this
           }
-          if (CI.k != K::CALL && CI.k != K::CALLP) {
+          if (CI.k != K::CALL && CI.k != K::CALLP && CI.k != K::CALLM && CI.k != K::CALLMP) {
             // The caller was waiting at a call when the callee returned into the
             // interpreter, so its frame must have been rebuilt to that call.
             ADD_FAILURE() << "a caller's frame was not rebuilt: " << funcs[cid.function].name
@@ -1683,7 +1741,17 @@ inline void Engine::interpret(Outcome & out) {
             out.failed = true;
             return;
           }
-          wr(CS, static_cast<int>(cid.function), CI.d, v);
+          if (CI.k == K::CALLM || CI.k == K::CALLMP) {
+            if (CI.results.size() != values.size()) {
+              ADD_FAILURE() << "multi-result call arity mismatch in fixture";
+              out.failed = true;
+              return;
+            }
+            for (size_t i = 0; i < values.size(); i++)
+              wr(CS, static_cast<int>(cid.function), CI.results[i], values[i]);
+          } else {
+            wr(CS, static_cast<int>(cid.function), CI.d, v);
+          }
           CS[0] = cpc + 1;
           break;
         }
@@ -1757,7 +1825,7 @@ inline Outcome Engine::run_compiled_core(int fn, const std::vector<u64> & args, 
     in[i] = args[i];
   }
   std::vector<u64> res(grjit_code_out_words(code), 0xDEADBEEFu);
-  uint32_t exit = grjit_code_call(code, ctx, in.data(), res.data());
+  uint32_t exit = grjit_code_call(code, ctx, ctx, in.data(), res.data());
   out.exit = exit;
   GRCORE_Result left = grcore_activation_leave(stack, rec);
   if (!interpreter_cannot_recover && exit != GRJIT_EXIT_REBUILD_FAILED) {

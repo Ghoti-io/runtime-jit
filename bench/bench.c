@@ -217,7 +217,7 @@ static uint64_t run_loop(LoopKind kind, uint64_t iterations) {
   uint64_t args[1] = {iterations};
   uint64_t out[1] = {0};
   const uint64_t helper_before = g_helper_calls;
-  if (grjit_code_call(g_loop[kind], g_context, args, out) != GRJIT_EXIT_RETURNED) {
+  if (grjit_code_call(g_loop[kind], g_context, g_context, args, out) != GRJIT_EXIT_RETURNED) {
     setup_failed("the loop did not return");
   }
   /* The sum of 0 .. n - 1, and a helper called once per iteration by the call loop, never by the others
@@ -237,7 +237,9 @@ static uint64_t loop_call_run(uint64_t n) { return run_loop(LOOP_CALL, n); }
 
 /* ---- calls between compiled functions (AD-28) ---------------------------- */
 
-static uint32_t call_push(void * context, uint64_t callee, const uint64_t * args, uint64_t n) {
+static uint32_t call_push(void * context, void * environment, uint64_t callee, const uint64_t * args, uint64_t n, uint64_t result_count) {
+  (void)result_count;
+  (void)environment;
   (void)context;
   (void)callee;
   (void)args;
@@ -272,13 +274,13 @@ static void call_release(void * payload) { (void)payload; }
  * engine's guest stack. */
 static GRJIT_Function * build_callable_inc(void) {
   GRJIT_Builder * b;
-  GRJIT_CallHooks hooks = {call_push, call_pop, call_compile, call_deopt, NULL};
+  GRJIT_CallHooks hooks = {call_push, call_pop, call_compile, call_deopt, NULL, NULL};
   check(grjit_builder_create("inc", 0, NULL, NULL, &b), "builder");
   GRJIT_VReg x, r;
   GRJIT_BlockId entry;
   check(grjit_builder_param(b, GRJIT_TYPE_I64, &x), "param");
   check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &r), "vreg");
-  check(grjit_builder_set_callable(b, &hooks), "callable");
+  check(grjit_builder_set_callable(b, &hooks, 1), "callable");
   check(grjit_builder_block(b, &entry), "block");
   check(grjit_builder_set_block(b, entry), "at");
   check(grjit_builder_binary(b, GRJIT_OP_ADD, r, grjit_operand_vreg(x), grjit_operand_imm(1)), "op");
@@ -290,7 +292,7 @@ static GRJIT_Function * build_callable_inc(void) {
 
 static GRJIT_Function * build_call_loop(const GRCORE_EntrySlot * slot) {
   GRJIT_Builder * b;
-  GRJIT_CallHooks hooks = {call_push, call_pop, call_compile, call_deopt, NULL};
+  GRJIT_CallHooks hooks = {call_push, call_pop, call_compile, call_deopt, NULL, NULL};
   check(grjit_builder_create("call_loop", 2, NULL, NULL, &b), "builder");
   GRJIT_VReg n, i, sum, t;
   GRJIT_BlockId entry, head, body, done;
@@ -298,7 +300,7 @@ static GRJIT_Function * build_call_loop(const GRCORE_EntrySlot * slot) {
   check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &i), "vreg");
   check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &sum), "vreg");
   check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &t), "vreg");
-  check(grjit_builder_set_callable(b, &hooks), "callable");
+  check(grjit_builder_set_callable(b, &hooks, 1), "callable");
   check(grjit_builder_block(b, &entry), "block");
   check(grjit_builder_block(b, &head), "block");
   check(grjit_builder_block(b, &body), "block");
@@ -350,7 +352,7 @@ static uint64_t loop_compiled_call_run(uint64_t iterations) {
   }
   uint64_t args[1] = {iterations};
   uint64_t out[3] = {0, 0, 0};
-  if (grjit_code_call(g_call_loop.caller, g_context, args, out) != GRJIT_EXIT_RETURNED) {
+  if (grjit_code_call(g_call_loop.caller, g_context, g_context, args, out) != GRJIT_EXIT_RETURNED) {
     setup_failed("the call loop did not return");
   }
   if (out[0] != iterations) {
@@ -361,7 +363,9 @@ static uint64_t loop_compiled_call_run(uint64_t iterations) {
 
 /* ---- tail calls (AD-28) --------------------------------------------------- */
 
-static uint32_t call_tail(void * context, uint64_t callee, const uint64_t * args, uint64_t n) {
+static uint32_t call_tail(void * context, void * environment, uint64_t callee, const uint64_t * args, uint64_t n, uint64_t result_count) {
+  (void)result_count;
+  (void)environment;
   (void)context;
   (void)callee;
   (void)args;
@@ -382,7 +386,7 @@ static TailLoop g_tail_loop;
  * replacement, and not an engine's guest stack. */
 static GRJIT_Function * build_tail_loop(const GRCORE_EntrySlot * slot) {
   GRJIT_Builder * b;
-  GRJIT_CallHooks hooks = {call_push, call_pop, call_compile, call_deopt, call_tail};
+  GRJIT_CallHooks hooks = {call_push, call_pop, call_compile, call_deopt, call_tail, NULL};
   check(grjit_builder_create("tail_loop", 2, NULL, NULL, &b), "builder");
   GRJIT_VReg n, sum, t, n1, s1;
   GRJIT_BlockId entry, body, done;
@@ -391,7 +395,7 @@ static GRJIT_Function * build_tail_loop(const GRCORE_EntrySlot * slot) {
   check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &t), "vreg");
   check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &n1), "vreg");
   check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &s1), "vreg");
-  check(grjit_builder_set_callable(b, &hooks), "callable");
+  check(grjit_builder_set_callable(b, &hooks, 1), "callable");
   check(grjit_builder_block(b, &entry), "block");
   check(grjit_builder_block(b, &body), "block");
   check(grjit_builder_block(b, &done), "block");
@@ -405,7 +409,7 @@ static GRJIT_Function * build_tail_loop(const GRCORE_EntrySlot * slot) {
   GRJIT_FrameSlot st[2] = {grjit_frame_slot_vreg(n), grjit_frame_slot_vreg(sum)};
   GRJIT_Operand args[2] = {grjit_operand_vreg(n1), grjit_operand_vreg(s1)};
   check(grjit_builder_tail_call_slot(
-            b, (uint64_t)(uintptr_t)&slot->entry, 0, args, 2, id, st, 2),
+            b, (uint64_t)(uintptr_t)&slot->entry, 0, 1, args, 2, id, st, 2),
       "tail call");
   check(grjit_builder_set_block(b, done), "at");
   check(grjit_builder_ret(b, grjit_operand_vreg(sum)), "op");
@@ -435,7 +439,7 @@ static uint64_t loop_tail_call_run(uint64_t iterations) {
   }
   uint64_t args[2] = {iterations, 0};
   uint64_t out[3] = {0, 0, 0};
-  if (grjit_code_call(g_tail_loop.code, g_context, args, out) != GRJIT_EXIT_RETURNED) {
+  if (grjit_code_call(g_tail_loop.code, g_context, g_context, args, out) != GRJIT_EXIT_RETURNED) {
     setup_failed("the tail loop did not return");
   }
   if (out[0] != iterations) {
@@ -472,7 +476,7 @@ static GRJIT_Code * g_native_loop[3];
  * are the cost of each protocol over the same work. */
 static GRJIT_Function * build_native_loop(NativeLoopKind kind) {
   GRJIT_Builder * b;
-  GRJIT_CallHooks hooks = {call_push, call_pop, call_compile, call_deopt, NULL};
+  GRJIT_CallHooks hooks = {call_push, call_pop, call_compile, call_deopt, NULL, NULL};
   check(grjit_builder_create("native_loop", 2, NULL, NULL, &b), "builder");
   GRJIT_VReg n, i, sum, t;
   GRJIT_BlockId entry, head, body, done;
@@ -480,7 +484,7 @@ static GRJIT_Function * build_native_loop(NativeLoopKind kind) {
   check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &i), "vreg");
   check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &sum), "vreg");
   check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &t), "vreg");
-  check(grjit_builder_set_callable(b, &hooks), "callable");
+  check(grjit_builder_set_callable(b, &hooks, 1), "callable");
   check(grjit_builder_set_natives(b, g_native_table), "natives");
   check(grjit_builder_block(b, &entry), "block");
   check(grjit_builder_block(b, &head), "block");
@@ -542,7 +546,7 @@ static uint64_t run_native_loop(NativeLoopKind kind, uint64_t iterations) {
   }
   uint64_t args[1] = {iterations};
   uint64_t out[3] = {0, 0, 0};
-  if (grjit_code_call(g_native_loop[kind], g_context, args, out) != GRJIT_EXIT_RETURNED) {
+  if (grjit_code_call(g_native_loop[kind], g_context, g_context, args, out) != GRJIT_EXIT_RETURNED) {
     setup_failed("the native loop did not return");
   }
   if (out[0] != iterations) {
@@ -1019,7 +1023,7 @@ static uint64_t run_kernel(KernelKind k, int masked, uint64_t n) {
   }
   uint64_t args[1] = {n};
   uint64_t out[3] = {0, 0, 0};
-  if (grjit_code_call(g_kernel[k][masked], g_context, args, out) != GRJIT_EXIT_RETURNED) {
+  if (grjit_code_call(g_kernel[k][masked], g_context, g_context, args, out) != GRJIT_EXIT_RETURNED) {
     ++g_guard_exits;
     fprintf(stderr, "bench: kernel %s left through a guard or did not return (guard exits %llu)\n", kernel_name[k], (unsigned long long)g_guard_exits);
     setup_failed("a kernel loop left through a guard, or did not return");

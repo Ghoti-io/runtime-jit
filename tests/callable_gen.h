@@ -201,6 +201,10 @@ void each_native_function(F && visit) {
               p.push_back(b.param(rotate[i % 3]));
             }
             GRJIT_VReg dst = rt == GRJIT_NATIVE_NO_RESULT ? GRJIT_NO_VREG : b.reg(rt);
+            GRJIT_VReg fallback = GRJIT_NO_VREG;
+            if (dst != GRJIT_NO_VREG) {
+              fallback = b.reg(rt);
+            }
             GRJIT_VReg flag = b.reg(GRJIT_TYPE_I64);
             GRJIT_VReg d = GRJIT_NO_VREG;
             if (variant == 1 && params >= 2) {
@@ -258,7 +262,12 @@ void each_native_function(F && visit) {
               b.at(b1);
               b.ret(dst != GRJIT_NO_VREG ? V(dst) : I(1));
               b.at(b2);
-              b.ret(I(0));
+              if (dst != GRJIT_NO_VREG) {
+                b.cnst(fallback, 0);
+                b.ret(V(fallback));
+              } else {
+                b.ret(I(0));
+              }
             } else {
               b.ret(dst != GRJIT_NO_VREG ? V(dst) : I(1));
             }

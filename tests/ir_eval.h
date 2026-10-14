@@ -19,6 +19,7 @@
 
 #include <ghoti.io/runtime-core/a/layout.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -485,12 +486,22 @@ inline void deopt_slots(const GRJIT_Function * f, const GRJIT_Op & op,
   r->exit = GRJIT_EXIT_DEOPT;
 }
 
-/* Runs `f` on `args`. `ctx` is the context compiled polls load through. */
+/* Runs `f` on `args`. `ctx` is the context compiled polls load through;
+ * `environment` is the independent language environment returned by INSTANCE.
+ * Omitting it preserves the historic context-as-environment test behavior. */
 inline Result eval(const GRJIT_Function * f, void * ctx, GRJIT_EntryHook hook,
-    const std::vector<uint64_t> & args, size_t step_limit = 2000000) {
+    const std::vector<uint64_t> & args, size_t step_limit = 2000000,
+    void * environment = nullptr) {
   Result r;
   size_t slots = grjit_function_interp_slot_count(f);
-  r.out.assign(slots + 1, 0xDEADBEEFu);
+  size_t result_slots = 1;
+  for (size_t b = 0; b < grjit_function_block_count(f); b++) {
+    size_t count = 0;
+    const GRJIT_Op * ops = grjit_function_block_ops(f, static_cast<GRJIT_BlockId>(b), &count);
+    for (size_t i = 0; i < count; i++) if (ops[i].kind == GRJIT_OP_RET && ops[i].result_count > result_slots)
+      result_slots = ops[i].result_count;
+  }
+  r.out.assign(std::max(slots + 1, result_slots), 0xDEADBEEFu);
   if (hook != nullptr) {
     uint32_t refused = hook(ctx);
     if (refused != 0) {
@@ -527,6 +538,9 @@ inline Result eval(const GRJIT_Function * f, void * ctx, GRJIT_EntryHook hook,
       uint64_t b = op.b.kind == GRJIT_OPERAND_NONE ? 0 : operand(regs, op.b);
       const unsigned w = op.dst != GRJIT_NO_VREG ? width[op.dst] : 64;
       switch (op.kind) {
+        case GRJIT_OP_INSTANCE:
+          regs[op.dst] = reinterpret_cast<uint64_t>(environment != nullptr ? environment : ctx);
+          break;
         case GRJIT_OP_CONST: regs[op.dst] = cut(w, a); break;
         case GRJIT_OP_MOVE: regs[op.dst] = cut(w, a); break;
         case GRJIT_OP_BITCAST: regs[op.dst] = a; break;
@@ -642,7 +656,9 @@ inline Result eval(const GRJIT_Function * f, void * ctx, GRJIT_EntryHook hook,
         case GRJIT_OP_LOAD:
         case GRJIT_OP_LOAD_S: {
           uint64_t v = 0;
-          std::memcpy(&v, reinterpret_cast<const unsigned char *>(a) + op.disp, op.width / 8);
+          const uint64_t effective = a + (op.index.kind == GRJIT_OPERAND_VREG
+                  ? operand(regs, op.index) * op.scale : 0);
+          std::memcpy(&v, reinterpret_cast<const unsigned char *>(effective) + op.disp, op.width / 8);
           if (op.kind == GRJIT_OP_LOAD_S && op.width < 64 && ((v >> (op.width - 1)) & 1)) {
             v |= ~uint64_t{0} << op.width;
           }
@@ -650,7 +666,8 @@ inline Result eval(const GRJIT_Function * f, void * ctx, GRJIT_EntryHook hook,
           break;
         }
         case GRJIT_OP_STORE:
-          std::memcpy(reinterpret_cast<unsigned char *>(a) + op.disp, &b, op.width / 8);
+          std::memcpy(reinterpret_cast<unsigned char *>(a + (op.index.kind == GRJIT_OPERAND_VREG
+                  ? operand(regs, op.index) * op.scale : 0)) + op.disp, &b, op.width / 8);
           break;
         case GRJIT_OP_CALL: {
           uint64_t argv[6] = {0, 0, 0, 0, 0, 0};
@@ -687,9 +704,24 @@ inline Result eval(const GRJIT_Function * f, void * ctx, GRJIT_EntryHook hook,
           break;
         case GRJIT_OP_BR: next = op.target; jumped = true; break;
         case GRJIT_OP_BR_IF: next = a != 0 ? op.target : op.target_else; jumped = true; break;
+        case GRJIT_OP_BR_TABLE: {
+          const uint64_t ix = a;
+          next = ix < op.target_count ? op.targets[ix] : op.default_target;
+          jumped = true;
+          break;
+        }
+        case GRJIT_OP_TRAP:
+          r.exit = GRJIT_EXIT_TRAP;
+          r.out[0] = static_cast<uint64_t>(op.trap_kind);
+          return r;
+        case GRJIT_OP_RETHROW:
+          r.exit = GRJIT_EXIT_EXCEPTION;
+          return r;
         case GRJIT_OP_RET:
-          if (op.a.kind != GRJIT_OPERAND_NONE) {
-            r.out[0] = a;
+          for (size_t ri = 0; ri < op.result_count; ri++) {
+            const uint64_t value = operand(regs, op.returns[ri]);
+            r.out[ri] = op.returns[ri].kind == GRJIT_OPERAND_VREG
+                ? cut(width[op.returns[ri].vreg], value) : value;
           }
           r.exit = GRJIT_EXIT_RETURNED;
           return r;

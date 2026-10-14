@@ -1033,7 +1033,7 @@ struct Mapped {
   uint64_t call(void * ctx, uint64_t arg) const {
     uint64_t out[8] = {0xDEADBEEFu};
     uint64_t args[1] = {arg};
-    EXPECT_EQ(entry(ctx, args, out), uint32_t{GRJIT_EXIT_RETURNED});
+    EXPECT_EQ(entry(ctx, ctx, args, out), uint32_t{GRJIT_EXIT_RETURNED});
     return out[0];
   }
 };

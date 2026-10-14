@@ -32,6 +32,23 @@ namespace {
 
 int64_t fib_ref(int64_t n) { return n < 2 ? n : fib_ref(n - 1) + fib_ref(n - 2); }
 
+bool catch_accept = false;
+uint32_t catch_calls = 0;
+uint64_t catch_callee_seen = 0;
+uint32_t catch_landing_seen = GRJIT_NO_BLOCK;
+void * catch_environment_seen = nullptr;
+uint32_t test_push(void *, void *, uint64_t, const uint64_t *, uint64_t, uint64_t) { return 0; }
+void test_pop(void *) {}
+uint32_t test_compile(void *, uint64_t) { return 0; }
+uint32_t test_deopt(void *, uint64_t) { return 0; }
+uint32_t test_catch_exception(void *, void * environment, uint64_t callee, uint32_t landing) {
+  catch_environment_seen = environment;
+  catch_calls++;
+  catch_callee_seen = callee;
+  catch_landing_seen = landing;
+  return catch_accept ? 0 : 1;
+}
+
 /* fib(n) = n < 2 ? n : fib(n-1) + fib(n-2), calling itself through its slot. */
 int add_fib(Engine & e) {
   int fib = e.reserve();
@@ -55,6 +72,145 @@ int add_fib(Engine & e) {
 }
 
 } // namespace
+
+TEST(Calls, CatchCallEmitsExceptionSiteAndLandingOffset) {
+  B b("catch-edge");
+  GRJIT_CallHooks h{};
+  h.deopt = [](void *, uint64_t) -> uint32_t { return 0; };
+  h.push = reinterpret_cast<decltype(h.push)>(uintptr_t{0x30310});
+  h.pop = reinterpret_cast<decltype(h.pop)>(uintptr_t{0x30320});
+  h.compile = reinterpret_cast<decltype(h.compile)>(uintptr_t{0x30330});
+  h.catch_exception = reinterpret_cast<decltype(h.catch_exception)>(uintptr_t{0x30340});
+  b.callable(h);
+  const auto body = b.block();
+  const auto landing = b.block();
+  b.at(body);
+  const GRCORE_PollIdentity id{1, 2};
+  ASSERT_EQ(grjit_builder_call_slot_catch_results(b.b, nullptr, 0, 0x123400,
+                0x7789, nullptr, 0, id, nullptr, 0, id, nullptr, 0, landing), GRJIT_OK);
+  ASSERT_EQ(grjit_builder_ret(b.b, grjit_operand_none()), GRJIT_OK);
+  b.at(landing);
+  ASSERT_EQ(grjit_builder_rethrow(b.b), GRJIT_OK);
+  Fn f(b.finish());
+  GRJIT_Emitted e{};
+  ASSERT_EQ(grjit_emit_for(GRJIT_ARCH_X86_64, f.f, grjit_allocator_default(), nullptr,
+                nullptr, 0x40, &e), GRJIT_OK);
+  ASSERT_EQ(e.exception_site_count, 1u);
+  EXPECT_EQ(e.exception_sites[0].landing_block, landing);
+  EXPECT_LT(e.exception_sites[0].call_offset, e.size);
+  EXPECT_NE(e.exception_sites[0].landing_offset, 0u);
+  EXPECT_LT(e.exception_sites[0].landing_offset, e.size);
+  grjit_emitted_free(&e);
+}
+
+TEST(Calls, CatchCallMapKeepsPriorReferenceUsedByItsLanding) {
+  GRJIT_CallHooks hooks{};
+  hooks.push = test_push;
+  hooks.pop = test_pop;
+  hooks.compile = test_compile;
+  hooks.deopt = test_deopt;
+  hooks.catch_exception = test_catch_exception;
+  B b("catch-result-live-in");
+  b.callable(hooks);
+  const GRJIT_VReg result = b.param(GRJIT_TYPE_REF);
+  const auto body = b.block();
+  const auto landing = b.block();
+  b.at(body);
+  const GRCORE_PollIdentity id{9, 1};
+  ASSERT_EQ(grjit_builder_call_slot_catch_results(b.b, &result, 1, 0x1000, 7,
+      nullptr, 0, id, nullptr, 0, id, nullptr, 0, landing), GRJIT_OK);
+  ASSERT_EQ(grjit_builder_ret(b.b, V(result)), GRJIT_OK);
+  b.at(landing);
+  ASSERT_EQ(grjit_builder_ret(b.b, V(result)), GRJIT_OK);
+  Fn f(b.finish());
+  JitWorld w;
+  xm::for_each_target_meta(f, w.pages(), [&](const GRCORE_CodeMeta * meta, const char *) {
+    const int64_t slot = grjit_emit_slot(result);
+    const GRCORE_CodeSite * call = nullptr;
+    for (size_t i = 0; i < meta->site_count; i++) {
+      if (meta->sites[i].kind == GRCORE_SITE_GC_POINT_CALL) call = &meta->sites[i];
+    }
+    ASSERT_NE(call, nullptr);
+    bool found = false;
+    for (size_t i = 0; i < call->live_count; i++) found |= call->live[i].value == slot;
+    EXPECT_TRUE(found) << "the old result REF must be traced if the catch landing uses it";
+  });
+}
+
+TEST(Calls, CatchCallRoutesMatchingExceptionToLandingAndPropagatesUnmatched) {
+  if (!grjit_backend_calls_available()) GTEST_SKIP();
+  Engine e;
+  const int callee = e.reserve();
+  GRJIT_CallHooks hooks{};
+  hooks.push = test_push;
+  hooks.pop = test_pop;
+  hooks.compile = test_compile;
+  hooks.deopt = test_deopt;
+  hooks.catch_exception = test_catch_exception;
+
+  B callee_builder("throwing-callee");
+  callee_builder.callable(hooks);
+  ASSERT_EQ(grjit_builder_set_token(callee_builder.b, static_cast<uint64_t>(callee)), GRJIT_OK);
+  callee_builder.at(callee_builder.block());
+  ASSERT_EQ(grjit_builder_rethrow(callee_builder.b), GRJIT_OK);
+  Fn callee_fn(callee_builder.finish());
+  Compiled callee_code(callee_fn.f, e.pages());
+  ASSERT_TRUE(callee_code) << grjit_result_string(callee_code.result);
+
+  GRCORE_Code * handle = nullptr;
+  ASSERT_EQ(grcore_code_create(nullptr, callee_code.code,
+      [](void * p) { grjit_code_destroy(static_cast<GRJIT_Code *>(p)); }, &handle), GRCORE_OK);
+  const uintptr_t start = reinterpret_cast<uintptr_t>(grjit_code_address(callee_code.code));
+  ASSERT_EQ(grcore_code_register(e.ctx, e.engine, handle, start,
+      grjit_code_size(callee_code.code), grjit_code_meta(callee_code.code)), GRCORE_OK);
+  ASSERT_EQ(grjit_entry_slot_install(e.ctx, e.slots[static_cast<size_t>(callee)], handle,
+      callee_code.code, static_cast<uint64_t>(callee), 0), GRJIT_OK);
+  grcore_code_release(handle);
+  callee_code.code = nullptr; // the registry and slot now own its lifetime
+
+  B caller_builder("catching-caller");
+  caller_builder.callable(hooks);
+  const GRJIT_VReg callee_environment = caller_builder.param(GRJIT_TYPE_PTR);
+  const auto body = caller_builder.block();
+  const auto landing = caller_builder.block();
+  const auto value = caller_builder.reg();
+  caller_builder.at(body);
+  const GRCORE_PollIdentity id{3, 7};
+  ASSERT_EQ(grjit_builder_call_slot_catch_results_env(caller_builder.b, nullptr, 0,
+      reinterpret_cast<uintptr_t>(e.slots[static_cast<size_t>(callee)]),
+      static_cast<uint64_t>(callee), V(callee_environment), nullptr, 0, id, nullptr, 0, id, nullptr, 0,
+      landing), GRJIT_OK);
+  ASSERT_EQ(grjit_builder_const(caller_builder.b, value, 10), GRJIT_OK);
+  ASSERT_EQ(grjit_builder_ret(caller_builder.b, V(value)), GRJIT_OK);
+  caller_builder.at(landing);
+  ASSERT_EQ(grjit_builder_const(caller_builder.b, value, 77), GRJIT_OK);
+  ASSERT_EQ(grjit_builder_ret(caller_builder.b, V(value)), GRJIT_OK);
+  Fn caller_fn(caller_builder.finish());
+  Compiled caller_code(caller_fn.f, e.pages());
+  ASSERT_TRUE(caller_code) << grjit_result_string(caller_code.result);
+
+  int caller_environment = 0;
+  int distinct_callee_environment = 0;
+  catch_calls = 0;
+  catch_environment_seen = nullptr;
+  catch_accept = true;
+  auto caught = caller_code.run(e.ctx, &caller_environment,
+      {reinterpret_cast<uintptr_t>(&distinct_callee_environment)});
+  ASSERT_EQ(caught.exit, GRJIT_EXIT_RETURNED);
+  ASSERT_EQ(caught.out[0], 77u);
+  EXPECT_EQ(catch_calls, 1u);
+  EXPECT_EQ(catch_callee_seen, static_cast<uint64_t>(callee));
+  EXPECT_EQ(catch_landing_seen, landing);
+  EXPECT_EQ(catch_environment_seen, &caller_environment);
+
+  catch_accept = false;
+  auto propagated = caller_code.run(e.ctx, &caller_environment,
+      {reinterpret_cast<uintptr_t>(&distinct_callee_environment)});
+  EXPECT_EQ(propagated.exit, GRJIT_EXIT_EXCEPTION);
+  EXPECT_EQ(catch_calls, 2u);
+  EXPECT_EQ(grcore_entry_slot_clear(e.ctx, e.slots[static_cast<size_t>(callee)]), GRCORE_OK);
+  EXPECT_EQ(grcore_code_unregister(e.ctx, start), GRCORE_OK);
+}
 
 /* Calls are emitted for x86-64 SysV and arm64 (Win64 is story 7b's). Where they are not, a
  * test does not skip, which would count as a test that proved nothing: it shows the refusal
@@ -84,6 +240,39 @@ void expect_calls_refused_here() {
     return; \
   } while (0)
 #endif
+
+TEST(Calls, ATrapPropagatesThroughTheCallableInternalConvention) {
+  CALLS_ONLY_WHERE_EMITTED();
+  GRJIT_CallHooks h{};
+  h.deopt = [](void *, uint64_t) -> uint32_t { return 0; };
+  B b("callable-trap");
+  b.callable(h);
+  b.at(b.block());
+  ASSERT_EQ(grjit_builder_trap(b.b, GRJIT_TRAP_INTEGER_DIVIDE_BY_ZERO), GRJIT_OK);
+  Fn f(b.finish());
+  JitWorld w;
+  Compiled c(f, w.pages());
+  ASSERT_TRUE(c) << grjit_result_string(c.result);
+  const auto r = c.run(w.ctx);
+  EXPECT_EQ(r.exit, GRJIT_EXIT_TRAP);
+  EXPECT_EQ(r.out[0], GRJIT_TRAP_INTEGER_DIVIDE_BY_ZERO);
+}
+
+TEST(Calls, UncaughtRethrowBecomesThePublicExceptionExit) {
+  CALLS_ONLY_WHERE_EMITTED();
+  GRJIT_CallHooks h{};
+  h.deopt = [](void *, uint64_t) -> uint32_t { return 0; };
+  B b("callable-rethrow");
+  b.callable(h);
+  b.at(b.block());
+  ASSERT_EQ(grjit_builder_rethrow(b.b), GRJIT_OK);
+  Fn f(b.finish());
+  JitWorld w;
+  Compiled c(f, w.pages());
+  ASSERT_TRUE(c) << grjit_result_string(c.result);
+  const auto r = c.run(w.ctx);
+  EXPECT_EQ(r.exit, GRJIT_EXIT_EXCEPTION);
+}
 
 TEST(Calls, FibCompiledMatchesTheInterpreterAndTheCReferenceAndNeverLeavesCompiledCode) {
   CALLS_ONLY_WHERE_EMITTED();
@@ -196,6 +385,70 @@ TEST(Calls, ZeroToSixteenArgumentsPassedInRegistersAndOnTheStackMatchTheReferenc
   }
   EXPECT_EQ(e.st.deopts, 0);
   EXPECT_EQ(e.st.pushes, e.st.pops);
+}
+
+TEST(Calls, TwoResultsSurviveGuestSlotAndPointerCalls) {
+  CALLS_ONLY_WHERE_EMITTED();
+  for (bool through_pointer : {false, true}) {
+    SCOPED_TRACE(through_pointer ? "CALL_PTR" : "CALL_SLOT");
+    Engine e;
+    const int callee = e.reserve();
+    {
+      std::vector<GRJIT_Type> types(12, GRJIT_TYPE_I64);
+      P p("pair", types);
+      const int x = 0;
+      const int last_arg = 11;
+      const int eleven = p.local(), three = p.local(), five = p.local();
+      const int first = p.local(), second = p.local();
+      p.cnst(eleven, 11);
+      p.cnst(three, 3);
+      p.cnst(five, 5);
+      p.bin(K::ADD, first, x, eleven);
+      p.bin(K::MUL, second, last_arg, three);
+      p.bin(K::ADD, second, second, five);
+      p.retm({first, second});
+      e.set(callee, p.done());
+    }
+    if (through_pointer) {
+      ASSERT_TRUE(e.compile_fn(callee));
+    }
+    const int caller = e.reserve();
+    {
+      std::vector<GRJIT_Type> types(12, GRJIT_TYPE_I64);
+      P p("sum_pair", types);
+      std::vector<int> args;
+      for (int i = 0; i < 12; i++) args.push_back(i);
+      const int first = p.local(), second = p.local(), scaled = p.local(), thousand = p.local(), sum = p.local();
+      p.cnst(thousand, 1000);
+      if (through_pointer) {
+        const int target = p.local(GRJIT_TYPE_PTR);
+        p.entryof(target, callee);
+        p.callmp({first, second}, target, callee, args);
+      } else {
+        p.callm({first, second}, callee, args);
+      }
+      p.bin(K::MUL, scaled, first, thousand);
+      p.bin(K::ADD, sum, scaled, second);
+      p.ret(sum);
+      e.set(caller, p.done());
+    }
+    for (int64_t x : {0, 1, 5, -9}) {
+      std::vector<u64> args;
+      for (int i = 0; i < 12; i++) args.push_back(static_cast<u64>(x + i));
+      const u64 expected = static_cast<u64>(1000 * (x + 11) + 3 * (x + 11) + 5);
+      Outcome interpreted = e.run_interpreted(caller, args);
+      ASSERT_TRUE(interpreted.finished) << "fixture interpreter call result";
+      EXPECT_EQ(interpreted.value, expected);
+      Outcome compiled = e.run_compiled(caller, args);
+      ASSERT_TRUE(compiled.finished) << "compiled guest call result";
+      EXPECT_EQ(compiled.exit, uint32_t{GRJIT_EXIT_RETURNED});
+      EXPECT_EQ(compiled.value, expected);
+      EXPECT_FALSE(compiled.interpreted_rest);
+    }
+    EXPECT_EQ(e.st.deopts, 0) << "last cause " << e.st.last_cause << " at "
+        << e.st.last_innermost_fn << ":" << e.st.last_was_call_exit;
+    EXPECT_EQ(e.st.pushes, e.st.pops);
+  }
 }
 
 /* ---- Types: I64, REF and PTR through a call --------------------------------- */
@@ -778,7 +1031,7 @@ TEST(Calls, TheCauseOfAGuestCallExitIsZeroAtTheHookAndAtTheEntryWhateverMadeTheC
 }
 
 namespace {
-uint32_t h_noop_push(void *, uint64_t, const uint64_t *, uint64_t) { return 0; }
+uint32_t h_noop_push(void *, void *, uint64_t, const uint64_t *, uint64_t, uint64_t) { return 0; }
 void h_noop_pop(void *) {}
 uint32_t h_noop(void *, uint64_t) { return 0; }
 } // namespace
@@ -1395,7 +1648,8 @@ TEST(Calls, AnEntryHooksRefusalLeavesEveryCalleeSavedRegisterAsItWas) {
   for (size_t i = 0; i < fx::kSentinelCount; i++) {
     regs[i] = fx::sentinel_value(i);
   }
-  EXPECT_EQ(fx_call_with_sentinels(grjit_code_entry(c.code), w.ctx, in, out.data(), regs),
+  EXPECT_EQ(fx_call_with_sentinels(grjit_code_entry(c.code), w.ctx, w.ctx,
+      in, out.data(), regs),
       uint32_t{GRJIT_EXIT_REFUSED});
   EXPECT_EQ(out[0], 7u);
   for (size_t i = 0; i < fx::kSentinelCount; i++) {
@@ -1441,7 +1695,7 @@ TEST(Calls, TheEntryAdapterClearsTheWalkStartCellWhetherTheCallReturnsOrDeoptimi
     cell[1] = 0xBBBB0000BBBB0000ull;
     uint64_t in[1] = {9};
     std::vector<uint64_t> out(grjit_code_out_words(c.code), 0);
-    const uint32_t exit = grjit_code_call(c.code, w.ctx, in, out.data());
+    const uint32_t exit = grjit_code_call(c.code, w.ctx, w.ctx, in, out.data());
     if (how == 0) {
       EXPECT_EQ(exit, uint32_t{GRJIT_EXIT_RETURNED});
     } else if (how == 1) {
@@ -1682,7 +1936,7 @@ TEST(Calls, ACallableFunctionHasAnInternalEntryAndAPlainOneHasNone) {
   EXPECT_EQ(internal % 16, 0u);
   uint64_t tag[2];
   std::memcpy(tag, reinterpret_cast<const void *>(internal - 16), 16);
-  EXPECT_EQ(tag[0], (UINT64_C(0x4752494E) << 32) | 1u) << "the magic and the parameter count";
+  EXPECT_EQ(tag[0], GRJIT_ENTRY_TAG_WORD(1, 1)) << "the magic, result count, and parameter count";
   EXPECT_EQ(tag[1], 0u) << "the token, zero by default";
   EXPECT_EQ(reinterpret_cast<uintptr_t>(grjit_code_entry(c.code)), start);
   B plain("plain", 0);
@@ -1713,7 +1967,7 @@ TEST(Calls, EveryBackendEmitsACallableFunctionOnAnyHost) {
     EXPECT_EQ(out.internal_offset % 16, 0u) << "the code starts on a page, so the entry is 16-aligned";
     uint64_t tag[2];
     std::memcpy(tag, out.bytes + out.internal_offset - 16, sizeof tag);
-    EXPECT_EQ(tag[0], (uint64_t{0x4752494E} << 32) | 1u) << "the magic, and the parameter count";
+    EXPECT_EQ(tag[0], GRJIT_ENTRY_TAG_WORD(1, 1)) << "the magic, result count, and parameter count";
     EXPECT_EQ(tag[1], 0u) << "the function's token";
     grjit_emitted_free(&out);
   }
@@ -2500,7 +2754,7 @@ TEST(Calls, CallableCodeBuiltForAnotherLayoutIsRefusedBeforeAnyOfItRuns) {
   ASSERT_TRUE(c) << c.result;
   uint64_t args[1] = {7};
   uint64_t out[2] = {0xAAAA, 0xBBBB};
-  ASSERT_EQ(grjit_code_call(c.code, w.ctx, args, out), uint32_t{GRJIT_EXIT_RETURNED});
+  ASSERT_EQ(grjit_code_call(c.code, w.ctx, w.ctx, args, out), uint32_t{GRJIT_EXIT_RETURNED});
   EXPECT_EQ(out[0], 7u);
   // A core and a jit built from different versions disagree on where the
   // walk-start cell and the limit word are; compiled code would store through
@@ -2510,11 +2764,11 @@ TEST(Calls, CallableCodeBuiltForAnotherLayoutIsRefusedBeforeAnyOfItRuns) {
     uint32_t saved = *field;
     *field += 8;
     out[0] = 0xAAAA;
-    EXPECT_EQ(grjit_code_call(c.code, w.ctx, args, out), uint32_t{GRJIT_EXIT_REFUSED});
+    EXPECT_EQ(grjit_code_call(c.code, w.ctx, w.ctx, args, out), uint32_t{GRJIT_EXIT_REFUSED});
     EXPECT_EQ(out[0], static_cast<uint64_t>(GRCORE_ERR_INVALID)) << "refused before anything ran";
     *field = saved;
   }
-  EXPECT_EQ(grjit_code_call(c.code, w.ctx, args, out), uint32_t{GRJIT_EXIT_RETURNED});
+  EXPECT_EQ(grjit_code_call(c.code, w.ctx, w.ctx, args, out), uint32_t{GRJIT_EXIT_RETURNED});
 }
 
 /* ---- The stack pointer across a call and its return --------------------------------------- */
@@ -2664,6 +2918,7 @@ TEST(Calls, AnAddressNotOnASixteenByteBoundaryIsNoEntryEvenInsideRegisteredCodeW
   // every target.
   Engine e;
   alignas(64) static uint64_t buf[32];
+  alignas(64) static uint64_t unregistered[8];
   const uint64_t token = 4242;
   const size_t aligned_word = 8;    // byte offset 64
   const size_t misaligned_word = 17; // byte offset 136, which is 8 mod 16
@@ -2671,9 +2926,15 @@ TEST(Calls, AnAddressNotOnASixteenByteBoundaryIsNoEntryEvenInsideRegisteredCodeW
     w = 0xCCCCCCCCCCCCCCCCull;
   }
   for (size_t entry_word : {aligned_word, misaligned_word}) {
-    buf[entry_word - 2] = GRJIT_ENTRY_TAG_WORD(3);
+    buf[entry_word - 2] = GRJIT_ENTRY_TAG_WORD(3, 1);
     buf[entry_word - 1] = token;
   }
+  unregistered[2] = GRJIT_ENTRY_TAG_WORD(3, 1);
+  unregistered[3] = token;
+  const uint64_t unregistered_entry = reinterpret_cast<uintptr_t>(&unregistered[4]);
+  EXPECT_EQ(grjit_call_target_ok(e.ctx, unregistered_entry, token,
+      GRJIT_CALL_SIGNATURE(3, 1)), 0u)
+      << "a matching tag in unregistered memory is not code";
   GRCORE_Code * handle = nullptr;
   ASSERT_EQ(grcore_code_create(nullptr, nullptr, [](void *) {}, &handle), GRCORE_OK);
   GRCORE_CodeMeta meta{GRCORE_CODEMETA_FORMAT_VERSION, 0, sizeof buf, 0, nullptr};
@@ -2683,14 +2944,17 @@ TEST(Calls, AnAddressNotOnASixteenByteBoundaryIsNoEntryEvenInsideRegisteredCodeW
   const uint64_t odd = reinterpret_cast<uint64_t>(&buf[misaligned_word]);
   ASSERT_EQ(good % 16, 0u);
   ASSERT_EQ(odd % 16, 8u);
-  EXPECT_EQ(grjit_call_target_ok(e.ctx, good, token, 3), 1u) << "the control: every other check accepts it";
-  EXPECT_EQ(grjit_call_target_ok(e.ctx, good, token + 1, 3), 0u) << "and the token still matters";
-  EXPECT_EQ(grjit_call_target_ok(e.ctx, good, token, 2), 0u) << "and the parameter count";
-  EXPECT_EQ(grjit_call_target_ok(e.ctx, odd, token, 3), 0u) << "the same tag, off the boundary: refused";
+  EXPECT_EQ(grjit_call_target_ok(e.ctx, good, token, GRJIT_CALL_SIGNATURE(3, 1)), 1u) << "the control: every signature check accepts it";
+  EXPECT_EQ(grjit_call_target_ok(e.ctx, good, token + 1, GRJIT_CALL_SIGNATURE(3, 1)), 0u) << "and the token still matters";
+  EXPECT_EQ(grjit_call_target_ok(e.ctx, good, token, GRJIT_CALL_SIGNATURE(2, 1)), 0u) << "and the parameter count";
+  EXPECT_EQ(grjit_call_target_ok(e.ctx, good, token, GRJIT_CALL_SIGNATURE(3, 2)), 0u) << "and the result count";
+  EXPECT_EQ(grjit_call_target_ok(e.ctx, odd, token, GRJIT_CALL_SIGNATURE(3, 1)), 0u) << "the same tag, off the boundary: refused";
   for (uint64_t off : {1u, 2u, 4u, 8u, 12u}) {
-    EXPECT_EQ(grjit_call_target_ok(e.ctx, good + off, token, 3), 0u) << off;
+    EXPECT_EQ(grjit_call_target_ok(e.ctx, good + off, token, GRJIT_CALL_SIGNATURE(3, 1)), 0u) << off;
   }
   ASSERT_EQ(grcore_code_unregister(e.ctx, reinterpret_cast<uintptr_t>(buf)), GRCORE_OK);
+  EXPECT_EQ(grjit_call_target_ok(e.ctx, good, token, GRJIT_CALL_SIGNATURE(3, 1)), 0u)
+      << "a matching tag does not make a retired range callable";
   grcore_code_release(handle);
 }
 

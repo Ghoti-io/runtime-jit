@@ -561,7 +561,7 @@ TEST(FloatTypes, EveryValueThatExistedBeforeTheFloatsIsWhereItWasAndTheNewOnesAr
   for (size_t i = 0; i < sizeof order / sizeof order[0]; i++) {
     EXPECT_EQ(static_cast<int>(order[i]), 44 + static_cast<int>(i)) << i;
   }
-  EXPECT_EQ(static_cast<int>(GRJIT_OP_COUNT), 67);
+  EXPECT_EQ(static_cast<int>(GRJIT_OP_COUNT), 71);
 }
 
 TEST(FloatTypes, ABuilderMakesFloatRegistersAndParametersAndRefusesAnythingPastTheLastType) {

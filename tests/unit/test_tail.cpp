@@ -37,7 +37,7 @@ void expect_tail_refused_here() {
   GRJIT_VReg x = b.param(GRJIT_TYPE_I64);
   GRJIT_CallHooks h{};
   h.deopt = [](void *, uint64_t) -> uint32_t { return 0; };
-  h.tail = [](void *, uint64_t, const uint64_t *, uint64_t) -> uint32_t { return 0; };
+  h.tail = [](void *, void *, uint64_t, const uint64_t *, uint64_t, uint64_t) -> uint32_t { return 0; };
   h.compile = [](void *, uint64_t) -> uint32_t { return 0; };
   b.callable(h);
   b.at(b.block());
@@ -732,7 +732,12 @@ int add_top(Engine & e, int callee, const char * name = "top") {
   P p(name, {GRJIT_TYPE_I64});
   int z = p.local(), r = p.local(), k = p.local(), s = p.local();
   p.cnst(z, 0);
-  p.call(r, callee, {0, z});
+  // Most tail-chain functions take (n, accumulator), while a wrapper built by
+  // this helper takes only n. Preserve the callee's declared arity when a
+  // wrapper calls another wrapper.
+  std::vector<int> args{0};
+  if (e.funcs[callee].nparams == 2) args.push_back(z);
+  p.call(r, callee, args);
   p.cnst(k, 7);
   p.bin(K::ADD, s, r, k);
   p.ret(s);
@@ -1801,7 +1806,7 @@ TEST(Tail, GeneratedProgramsOfCallsAndTailCallsAgreeWithTheInterpreterAcrossColl
 
 namespace {
 
-uint32_t h_noop_push(void *, uint64_t, const uint64_t *, uint64_t) { return 0; }
+uint32_t h_noop_push(void *, void *, uint64_t, const uint64_t *, uint64_t, uint64_t) { return 0; }
 void h_noop_pop(void *) {}
 uint32_t h_noop(void *, uint64_t) { return 0; }
 
@@ -1839,7 +1844,8 @@ uint32_t frame_bytes_of(GRJIT_Arch arch, int params, int t_args) {
 } // namespace
 
 TEST(Tail, TheFramesPaddingIsExactlyWhatTheStagingAreaNeedsAndNoFunctionWithoutATailCallHasAny) {
-  // A function with `params` parameters has 3 fixed slots and one per register;
+  // A function with `params` parameters has 4 fixed slots (including its
+  // invocation environment) and one per register;
   // its tail call to a callee of `t` arguments stages them in an area of `t`
   // slots and keeps the entry in one more. The area must end at or below where the
   // return address goes (on x86-64; on arm64 there is none, and the same place is
@@ -1855,21 +1861,22 @@ TEST(Tail, TheFramesPaddingIsExactlyWhatTheStagingAreaNeedsAndNoFunctionWithoutA
         auto in_bytes = [regs](int n) { return n > regs ? (n - regs) * 8 + ((n - regs) % 2) * 8 : 0; };
         const int in_a = in_bytes(params);
         const int in_t = in_bytes(t);
-        const int slots_without_pad = params + 3 + t + 1;
+        const int slots_without_pad = params + 4 + t + 1;
         const int want_pad = std::max(0, (in_t - in_a) / 8 - (params + 4));
         const uint32_t frame = frame_bytes_of(arch, params, t);
         EXPECT_EQ(frame, static_cast<uint32_t>((slots_without_pad + want_pad) * 8 + 15) / 16 * 16);
-        // The area's end is `8 * (params + 3 + pad)` below the base; the return
+        // The area's end is `8 * (params + 4 + pad)` below the base; the return
         // address goes `8 + in_a - in_t` above it. The area ends at or below it...
-        EXPECT_LE(-8 * (params + 3 + want_pad), 8 + in_a - in_t);
-        // ...and with one slot less of padding it would not (when there is any).
+        EXPECT_LE(-8 * (params + 4 + want_pad), 8 + in_a - in_t);
+        // ...and with one slot less the highest source word is at the return
+        // address boundary (the saved frame-link word has its own reserved slot).
         if (want_pad > 0) {
-          EXPECT_GT(-8 * (params + 3 + want_pad - 1), 8 + in_a - in_t);
+          EXPECT_GE(-8 * (params + 4 + want_pad - 1), 8 + in_a - in_t);
         }
       }
-      // A function with no tail call has no padding at all: the frame of 3 slots, its
+      // A function with no tail call has no padding at all: the frame's 4 fixed slots, its
       // registers, and nothing else.
-      EXPECT_EQ(frame_bytes_of(arch, params, -1), static_cast<uint32_t>((params + 3) * 8 + 15) / 16 * 16);
+      EXPECT_EQ(frame_bytes_of(arch, params, -1), static_cast<uint32_t>((params + 4) * 8 + 15) / 16 * 16);
     }
   }
 }
@@ -2114,7 +2121,7 @@ TEST(Tail, AnAddressThatIsNotRegisteredCodeOfThisContextIsRefusedEvenWithAValidT
     uintptr_t target;
   };
   forged[0] = forged[1] = 0xCCCCCCCCCCCCCCCCull;
-  forged[2] = GRJIT_ENTRY_TAG_WORD(2);
+  forged[2] = GRJIT_ENTRY_TAG_WORD(2, 1);
   forged[3] = static_cast<uint64_t>(c2);
   forged[4] = forged[5] = 0xCCCCCCCCCCCCCCCCull;
   const Case cases[] = {

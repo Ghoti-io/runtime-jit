@@ -237,9 +237,12 @@ for entry in $DEFECTS; do
     failures=$((failures + 1))
     continue
   fi
-  if ! LD_LIBRARY_PATH="$LD_DIR:$APPS" "$APPS/$test_name" $bench_args $filter >/dev/null 2>&1; then
+  control_out="$(LD_LIBRARY_PATH="$LD_DIR:$APPS" "$APPS/$test_name" $bench_args $filter 2>&1)"
+  control_rc=$?
+  if [ "$control_rc" -ne 0 ]; then
     printf 'check-planted: FAIL: the control %s does not pass without the planted defect\n' \
       "$test_name" >&2
+    printf '%s\n' "$control_out" | tail -20 >&2
     failures=$((failures + 1))
     continue
   fi

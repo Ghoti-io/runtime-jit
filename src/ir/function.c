@@ -122,6 +122,11 @@ void grjit_function_destroy(GRJIT_Function * function) {
       if (block->ops[i].args != NULL) {
         a->free_fn(a->ctx, (void *)block->ops[i].args);
       }
+      if (block->ops[i].results != NULL) a->free_fn(a->ctx, (void *)block->ops[i].results);
+      if (block->ops[i].returns != NULL) a->free_fn(a->ctx, (void *)block->ops[i].returns);
+      if (block->ops[i].targets != NULL) {
+        a->free_fn(a->ctx, (void *)block->ops[i].targets);
+      }
     }
     if (block->ops != NULL) {
       a->free_fn(a->ctx, block->ops);
@@ -146,6 +151,9 @@ const GRJIT_Allocator * grjit_allocator_or_default(
 
 bool grjit_op_is_terminator(GRJIT_OpKind kind) {
   return kind == GRJIT_OP_BR || kind == GRJIT_OP_BR_IF || kind == GRJIT_OP_RET ||
+         kind == GRJIT_OP_BR_TABLE ||
+         kind == GRJIT_OP_TRAP ||
+         kind == GRJIT_OP_RETHROW ||
          kind == GRJIT_OP_TAIL_CALL_SLOT || kind == GRJIT_OP_TAIL_CALL_PTR;
 }
 
@@ -169,6 +177,7 @@ void grjit_op_visit_uses(const GRJIT_Function * function, const GRJIT_Op * op,
   switch (op->kind) {
     case GRJIT_OP_CONST:
     case GRJIT_OP_BR:
+    case GRJIT_OP_RETHROW:
       break;
     case GRJIT_OP_CALL:
     case GRJIT_OP_CALL_NATIVE:
@@ -176,11 +185,16 @@ void grjit_op_visit_uses(const GRJIT_Function * function, const GRJIT_Op * op,
         visit_operand(&op->args[i], visit, user);
       }
       break;
+    case GRJIT_OP_RET:
+      for (size_t i = 0; i < op->result_count; i++) visit_operand(&op->returns[i], visit, user);
+      break;
     case GRJIT_OP_CALL_SLOT:
     case GRJIT_OP_CALL_PTR:
     case GRJIT_OP_TAIL_CALL_SLOT:
     case GRJIT_OP_TAIL_CALL_PTR:
       visit_operand(&op->a, visit, user); /* the code pointer of a pointer call */
+      if (op->environment.kind != GRJIT_OPERAND_NONE)
+        visit_operand(&op->environment, visit, user);
       for (size_t i = 0; i < op->arg_count; i++) {
         visit_operand(&op->args[i], visit, user);
       }
@@ -188,6 +202,7 @@ void grjit_op_visit_uses(const GRJIT_Function * function, const GRJIT_Op * op,
     default:
       visit_operand(&op->a, visit, user);
       visit_operand(&op->b, visit, user);
+      visit_operand(&op->index, visit, user);
       break;
   }
   if (grjit_op_has_state(op)) {
@@ -223,10 +238,47 @@ GRJIT_VReg grjit_op_def(const GRJIT_Op * op) {
     case GRJIT_OP_BR:
     case GRJIT_OP_BR_IF:
     case GRJIT_OP_RET:
+    case GRJIT_OP_RETHROW:
     case GRJIT_OP_TAIL_CALL_SLOT:
     case GRJIT_OP_TAIL_CALL_PTR:
       return GRJIT_NO_VREG;
     default:
       return op->dst;
   }
+}
+
+void grjit_op_visit_defs(const GRJIT_Op * op, GRJIT_UseVisitor visit, void * user) {
+  if ((op->kind == GRJIT_OP_CALL_SLOT || op->kind == GRJIT_OP_CALL_PTR) &&
+      op->result_count != 0) {
+    for (size_t i = 0; i < op->result_count; i++) visit(user, op->results[i]);
+  } else {
+    const GRJIT_VReg d = grjit_op_def(op);
+    if (d != GRJIT_NO_VREG) visit(user, d);
+  }
+}
+
+size_t grjit_function_result_count(const GRJIT_Function * function) {
+  if (function == NULL) return 0;
+  if (function->callable) return function->declared_result_count;
+  for (size_t b = 0; b < function->block_count; b++) {
+    const GRJIT_BlockInfo * block = &function->blocks[b];
+    if (block->count == 0) continue;
+    const GRJIT_Op * last = &block->ops[block->count - 1];
+    bool reachable = true;
+    for (size_t i = 0; i + 1 < block->count; i++) {
+      const GRJIT_Op * op = &block->ops[i];
+      if (op->kind == GRJIT_OP_GUARD && op->a.kind == GRJIT_OPERAND_IMM &&
+          op->a.imm == 0) {
+        reachable = false;
+        break;
+      }
+    }
+    if (!reachable) continue;
+    if (last->kind == GRJIT_OP_RET || last->kind == GRJIT_OP_TAIL_CALL_SLOT ||
+        last->kind == GRJIT_OP_TAIL_CALL_PTR) {
+      return last->kind == GRJIT_OP_RET
+          ? last->result_count : last->callee_result_count;
+    }
+  }
+  return 0;
 }

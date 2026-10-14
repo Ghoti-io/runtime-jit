@@ -35,7 +35,9 @@
 #include <string.h>
 
 uint32_t grjit_call_target_ok(
-    void * context, uint64_t target, uint64_t callee, uint64_t arg_count) {
+    void * context, uint64_t target, uint64_t callee, uint64_t signature) {
+  const uint32_t arg_count = (uint32_t)signature;
+  const uint32_t result_count = (uint32_t)(signature >> 32);
   GRCORE_CodeRange range;
   /* Every internal entry is on a sixteen-byte boundary with its tag before it (both emitters
    * pad to it), so an address that is not is no entry, whatever bytes lie before it: a branch
@@ -52,5 +54,6 @@ uint32_t grjit_call_target_ok(
    * range because the entry is at least that far in. */
   uint64_t tag[2];
   memcpy(tag, (const void *)(uintptr_t)(target - sizeof tag), sizeof tag);
-  return tag[0] == GRJIT_ENTRY_TAG_WORD(arg_count) && tag[1] == callee ? 1u : 0u;
+  return tag[0] == GRJIT_ENTRY_TAG_WORD(arg_count, result_count) &&
+      tag[1] == callee ? 1u : 0u;
 }

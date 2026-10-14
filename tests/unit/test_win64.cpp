@@ -748,7 +748,7 @@ TEST(Win64Unwind, TheOffsetsNameTheEndOfEachInstructionOfThePrologueThatWasEmitt
   grjit_limits_default(&limits);
   limits.max_vregs = 140000;
   for (size_t registers : {size_t{1}, size_t{2}, size_t{7}, size_t{8}, size_t{9}, size_t{10}, size_t{100}, size_t{600},
-           size_t{1000}, size_t{60000}, size_t{70000}, size_t{131069}}) {
+           size_t{1000}, size_t{60000}, size_t{70000}, size_t{131068}}) {
     SCOPED_TRACE(registers);
     Fn f(frame_of(registers, &limits));
     Emit em(f, GRJIT_ARCH_X86_64_WIN64, &limits);
@@ -1176,7 +1176,7 @@ TEST(CalleeSaved, TheCallersCalleeSavedRegistersSurviveAReturnADeoptARefusalAndA
   grcore_port_release(port);
 }
 
-/* The largest frame the cap allows: 131069 registers is a base frame of exactly
+/* The largest frame the cap allows: 131068 registers is a base frame of exactly
  * 1 MiB (and, on Win64, 48 bytes more), which a Windows stack commits a page
  * at a time and so has to be probed in order. It must compile and run. */
 TEST(LargestFrame, TheFrameTheCapAllowsCompilesAndRuns) {
@@ -1185,7 +1185,7 @@ TEST(LargestFrame, TheFrameTheCapAllowsCompilesAndRuns) {
   GRJIT_Limits limits;
   grjit_limits_default(&limits);
   limits.max_vregs = 140000;
-  Fn f(frame_of(131069, &limits));
+  Fn f(frame_of(131068, &limits));
   Compiled c(f, w.pages(), nullptr, &limits);
   ASSERT_TRUE(c) << grjit_result_string(c.result);
   /* The first and the last slot of the frame are both used, and the frame is
@@ -1194,7 +1194,7 @@ TEST(LargestFrame, TheFrameTheCapAllowsCompilesAndRuns) {
   EXPECT_EQ(r.exit, static_cast<uint32_t>(GRJIT_EXIT_RETURNED));
   EXPECT_EQ(r.out[0], 5u);
   /* One register over the cap is refused, as on Linux. */
-  Fn over(frame_of(131070, &limits));
+  Fn over(frame_of(131069, &limits));
   Compiled d(over, w.pages(), nullptr, &limits);
   EXPECT_FALSE(d);
   EXPECT_EQ(d.result, GRJIT_ERR_LIMIT);

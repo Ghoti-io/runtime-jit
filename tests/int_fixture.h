@@ -61,7 +61,7 @@ inline int guarded_call(const GRJIT_Code * code, void * context, const uint64_t 
   int caught = 0;
   g_fault_signal = 0;
   if (sigsetjmp(g_fault_env, 1) == 0) {
-    *exit_status = grjit_code_call(code, context, args, out);
+    *exit_status = grjit_code_call(code, context, context, args, out);
   } else {
     caught = static_cast<int>(g_fault_signal);
   }
@@ -73,7 +73,7 @@ inline int guarded_call(const GRJIT_Code * code, void * context, const uint64_t 
 #else
 inline int guarded_call(const GRJIT_Code * code, void * context, const uint64_t * args,
     uint64_t * out, uint32_t * exit_status) {
-  *exit_status = grjit_code_call(code, context, args, out);
+  *exit_status = grjit_code_call(code, context, context, args, out);
   return 0;
 }
 #endif

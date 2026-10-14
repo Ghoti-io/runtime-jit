@@ -98,11 +98,18 @@ void grjit_code_destroy(GRJIT_Code * code) {
   grjit_memory_destroy(
       code->pages, code->mapping, code->mapped_size, code->unwind_table);
   grjit_metadata_free(&code->meta);
+  a->free_fn(a->ctx, code->exception_sites);
   a->free_fn(a->ctx, code);
 }
 
 const GRCORE_CodeMeta * grjit_code_meta(const GRJIT_Code * code) {
   return code == NULL ? NULL : &code->meta.meta;
+}
+
+const GRJIT_ExceptionSite * grjit_code_exception_sites(
+    const GRJIT_Code * code, size_t * count) {
+  if (count != NULL) *count = code == NULL ? 0 : code->exception_site_count;
+  return code == NULL ? NULL : code->exception_sites;
 }
 
 GRJIT_EntryFn grjit_code_entry(const GRJIT_Code * code) {
@@ -175,6 +182,10 @@ size_t grjit_code_param_count(const GRJIT_Code * code) {
   return code == NULL ? 0 : code->param_count;
 }
 
+size_t grjit_code_result_count(const GRJIT_Code * code) {
+  return code == NULL ? 0 : code->result_count;
+}
+
 /* The entry is generated code, which carries no type signature in front of it.
  * clang's -fsanitize=function reads one (the 8 bytes before the callee) at every
  * indirect call, and the first byte of the code is the first byte of its
@@ -185,7 +196,7 @@ size_t grjit_code_param_count(const GRJIT_Code * code) {
 __attribute__((no_sanitize("function")))
 #endif
 uint32_t grjit_code_call(const GRJIT_Code * code, void * context,
-    const uint64_t * args, uint64_t * out) {
+    void * environment, const uint64_t * args, uint64_t * out) {
   /* Code is compiled against one build's layout of the context; a core that
    * moved the request word makes every poll in it read the wrong word, so the
    * call is refused before any of it runs. The same refusal answers a NULL
@@ -202,7 +213,12 @@ uint32_t grjit_code_call(const GRJIT_Code * code, void * context,
     }
     return GRJIT_EXIT_REFUSED;
   }
-  return code->entry(context, args, out);
+  return code->entry(context, environment, args, out);
+}
+
+uint32_t grjit_code_call_legacy(const GRJIT_Code * code, void * context,
+    const uint64_t * args, uint64_t * out) {
+  return grjit_code_call(code, context, context, args, out);
 }
 
 #if GRJIT_HAVE_BACKEND
@@ -230,7 +246,7 @@ GRJIT_Result grjit_emit_for_features(GRJIT_Arch arch, const GRJIT_Function * fun
   GRJIT_Limits limits;
   grjit_limits_resolve(limits_in, &limits);
   memset(out, 0, sizeof *out);
-  /* Three fixed slots and one per register, rounded to keep the stack pointer
+  /* Four fixed slots and one per register, rounded to keep the stack pointer
    * 16-aligned. */
   GRJIT_CallableShape shape;
   grjit_callable_shape(function, internal_reg_args(arch), &shape);
@@ -248,6 +264,8 @@ GRJIT_Result grjit_emit_for_features(GRJIT_Arch arch, const GRJIT_Function * fun
   size_t code_bytes = 0;
   const GRJIT_SiteRec * recs = NULL;
   size_t rec_count = 0;
+  const GRJIT_ExceptionSitePending * exception_recs = NULL;
+  size_t exception_count = 0;
   GRJIT_Emit x86;
   GRJIT_A64Emit a64;
   memset(&x86, 0, sizeof x86);
@@ -261,6 +279,8 @@ GRJIT_Result grjit_emit_for_features(GRJIT_Arch arch, const GRJIT_Function * fun
     out->fp_regs_used = grjit_a64_vregs_used(&a64.as);
     recs = a64.c.sites;
     rec_count = a64.c.site_count;
+    exception_recs = a64.c.exception_sites;
+    exception_count = a64.c.exception_site_count;
   } else {
     r = grjit_emit_function(function, a, limits.max_code_bytes, hook,
         request_offset, (uint32_t)frame, arch == GRJIT_ARCH_X86_64_WIN64,
@@ -274,6 +294,8 @@ GRJIT_Result grjit_emit_for_features(GRJIT_Arch arch, const GRJIT_Function * fun
     code_bytes = grjit_asm_size(&x86.as);
     recs = x86.c.sites;
     rec_count = x86.c.site_count;
+    exception_recs = x86.c.exception_sites;
+    exception_count = x86.c.exception_site_count;
   }
   if (r != GRJIT_OK) {
     goto done;
@@ -295,11 +317,25 @@ GRJIT_Result grjit_emit_for_features(GRJIT_Arch arch, const GRJIT_Function * fun
   memcpy(out->bytes, bytes, code_bytes);
   out->size = code_bytes;
   out->allocator = a;
+  if (exception_count != 0) {
+    out->exception_sites = a->malloc_fn(a->ctx, exception_count * sizeof *out->exception_sites);
+    if (out->exception_sites == NULL) {
+      r = GRJIT_ERR_OOM;
+      goto done;
+    }
+    for (size_t i = 0; i < exception_count; i++) {
+      out->exception_sites[i].call_offset = exception_recs[i].call_offset;
+      out->exception_sites[i].landing_block = exception_recs[i].landing_block;
+      out->exception_sites[i].landing_offset = exception_recs[i].landing_offset;
+    }
+    out->exception_site_count = exception_count;
+  }
   out->meta.meta.sites = out->meta.sites;
   r = GRJIT_OK;
 done:
   if (r != GRJIT_OK) {
     grjit_metadata_free(&out->meta);
+    a->free_fn(a->ctx, out->exception_sites);
     memset(out, 0, sizeof *out);
   }
   grjit_emit_free(&x86);
@@ -313,6 +349,7 @@ void grjit_emitted_free(GRJIT_Emitted * emitted) {
     return;
   }
   emitted->allocator->free_fn(emitted->allocator->ctx, emitted->bytes);
+  emitted->allocator->free_fn(emitted->allocator->ctx, emitted->exception_sites);
   grjit_metadata_free(&emitted->meta);
   memset(emitted, 0, sizeof *emitted);
 }
@@ -363,13 +400,27 @@ GRJIT_Result grjit_compile(const GRJIT_CompileOptions * options,
   code->internal_offset = emitted.internal_offset;
   code->features_used = emitted.features_used;
   code->meta = emitted.meta;
+  code->exception_sites = emitted.exception_sites;
+  code->exception_site_count = emitted.exception_site_count;
   code->meta.meta.sites = code->meta.sites;
   /* The metadata now belongs to the code; the bytes were copied into the
    * mapping and are ours to free. */
   memset(&emitted.meta, 0, sizeof emitted.meta);
+  emitted.exception_sites = NULL;
   grjit_emitted_free(&emitted);
   code->out_words = function->interp_slots + 1;
+  for (size_t b = 0; b < function->block_count; b++) {
+    const GRJIT_BlockInfo * block = &function->blocks[b];
+    for (size_t i = 0; i < block->count; i++) {
+      const GRJIT_Op * op = &block->ops[i];
+      if (op->kind == GRJIT_OP_RET && op->result_count > code->out_words)
+        code->out_words = op->result_count;
+    }
+  }
+  if (grjit_function_result_count(function) > code->out_words)
+    code->out_words = grjit_function_result_count(function);
   code->param_count = function->param_count;
+  code->result_count = grjit_function_result_count(function);
   code->request_offset = grcore_jit_layout()->request_word_offset;
   code->walk_cell_offset = grcore_jit_layout()->walk_cell_offset;
   code->native_limit_offset = grcore_jit_layout()->native_limit_offset;

@@ -2549,3 +2549,39 @@ The arms do not exist on arm64: the harness printed all fourteen pairs' rows as 
 - **An in-JIT pause.** A poll's non-zero answer ends the function; see above.
 - **The AD-21 prologue check as more than a hook.**
 - **A fuzzer**, for the reason above.
+
+## Wasm-oriented IR operations and invocation environments
+
+The public IR includes `TRAP(kind)` exits, unsigned `BR_TABLE`, multi-value
+`RET` and compiled calls, `INSTANCE`, indexed loads and stores, and a catch
+edge on guest calls. The test evaluator defines the shared semantics. Values
+remain in eight-byte slots; this does not reserve a representation for future
+`v128` values. Indexed addresses are `base + index * scale + displacement`;
+the base is `PTR`, the index is `I32` or `I64`, and scale is a byte multiplier
+of 1, 2, 4, or 8. Larger memory64 offsets are formed with ordinary IR adds.
+Bounds checks are explicit IR, and guard-page traps are not provided.
+
+The public entry ABI is
+`(GRCORE_Context *context, void *environment, const uint64_t *args, uint64_t *out)`.
+The runtime context supplies polls and runtime services. The opaque language
+environment is separate, is saved in each activation, and is not a GC root.
+`INSTANCE` reads the active activation's environment. Each guest call and tail
+call can supply its callee's environment; an omitted environment inherits the
+current one. No invocation pointer is stored in `GRJIT_Code`, so compiled code
+can be shared by instances. Tang passes its execution object as the environment.
+
+The first result travels in the internal return register. Additional results
+travel in a caller-owned result buffer whose address is part of the internal
+call arguments. Each target uses its existing internal register/stack argument
+convention. Zero and one-result calls retain their former convention.
+
+Call catch tables are guest exception routing metadata, separate from native
+unwind metadata and GC/deoptimization sites. A call's `call_offset` is the
+instruction offset immediately after the call. On an exception status, the
+`catch_exception` hook receives the runtime context and caller environment,
+matches the engine-owned pending exception, and pops the returned callee guest
+frame once. A match branches to the landing block with caller state restored;
+otherwise the exception status propagates to the next compiled boundary.
+Generated code does not unwind native/JIT frames, and operating-system or C++
+exceptions do not cross it. Exception values and tag matching remain engine
+owned.

@@ -11,6 +11,8 @@
 #include "test_helpers.h"
 
 #include "../../src/code/code_internal.h"
+#include "../../src/backend/backend_internal.h"
+#include "../ir_eval.h"
 
 #include <cstdint>
 #include <cstring>
@@ -27,6 +29,22 @@ uint64_t g_last = 0;
 uint64_t helper_record(uint64_t a) {
   g_last = a;
   return a ^ 0xFF;
+}
+
+uint32_t environment_push(void *, void *, uint64_t, const uint64_t *, uint64_t, uint64_t) { return 0; }
+void environment_pop(void *) {}
+uint32_t environment_compile(void *, uint64_t) { return 1; }
+uint32_t environment_deopt(void *, uint64_t) { return 0; }
+uint32_t environment_tail(void *, void *, uint64_t, const uint64_t *, uint64_t, uint64_t) { return 0; }
+
+GRJIT_CallHooks environment_hooks() {
+  GRJIT_CallHooks hooks{};
+  hooks.push = environment_push;
+  hooks.pop = environment_pop;
+  hooks.compile = environment_compile;
+  hooks.deopt = environment_deopt;
+  hooks.tail = environment_tail;
+  return hooks;
 }
 
 /* A function of two I64 parameters that computes `dst = a OP b` and returns it. */
@@ -64,6 +82,282 @@ uint64_t reference(GRJIT_OpKind op, uint64_t a, uint64_t b) {
 
 TEST(Compile, TheBackendExistsOnTheGatedTarget) {
   GRJIT_REQUIRE_BACKEND();
+}
+
+TEST(Compile, ReturnWritesEveryResultWordInOrder) {
+  GRJIT_REQUIRE_BACKEND();
+  JitWorld w;
+  B b("multi-return");
+  b.at(b.block());
+  const GRJIT_VReg first = b.reg();
+  const GRJIT_VReg second = b.reg();
+  b.cnst(first, 0x1122334455667788ll);
+  b.cnst(second, 0x7766554433221100ll);
+  const GRJIT_Operand values[] = {V(first), V(second)};
+  ASSERT_EQ(grjit_builder_ret_multi(b.b, values, 2), GRJIT_OK);
+  Fn f(b.finish());
+  Compiled c(f, w.pages());
+  ASSERT_TRUE(c) << grjit_result_string(c.result);
+  const auto run = c.run(w.ctx);
+  ASSERT_EQ(run.exit, uint32_t{GRJIT_EXIT_RETURNED});
+  ASSERT_GE(run.out.size(), 2u);
+  EXPECT_EQ(run.out[0], 0x1122334455667788ull);
+  EXPECT_EQ(run.out[1], 0x7766554433221100ull);
+}
+
+TEST(Compile, CallableEntryPassesItsResultBufferToTheInternalReturn) {
+  GRJIT_REQUIRE_BACKEND();
+  JitWorld w;
+  B b("callable-multi-return");
+  GRJIT_CallHooks hooks{};
+  hooks.deopt = [](void *, uint64_t) -> uint32_t { return 0; };
+  ASSERT_EQ(grjit_builder_set_callable(b.b, &hooks, 2), GRJIT_OK);
+  b.at(b.block());
+  const auto first = b.reg();
+  const auto second = b.reg();
+  b.cnst(first, 0x1122334455667788ll);
+  b.cnst(second, 0x7766554433221100ll);
+  const GRJIT_Operand values[] = {V(first), V(second)};
+  ASSERT_EQ(grjit_builder_ret_multi(b.b, values, 2), GRJIT_OK);
+  Fn f(b.finish());
+  Compiled c(f, w.pages());
+  ASSERT_TRUE(c) << grjit_result_string(c.result);
+  uint64_t out[2] = {};
+  const auto exit = grjit_code_entry(c.code)(w.ctx, w.ctx, nullptr, out);
+  EXPECT_EQ(exit, uint32_t{GRJIT_EXIT_RETURNED});
+  EXPECT_EQ(out[0], 0x1122334455667788ull);
+  EXPECT_EQ(out[1], 0x7766554433221100ull);
+}
+
+TEST(Compile, OneResultCallableKeepsTheLegacyInternalArgumentArea) {
+  B b("single-result-callable");
+  GRJIT_CallHooks hooks{};
+  hooks.deopt = [](void *, uint64_t) -> uint32_t { return 0; };
+  ASSERT_EQ(grjit_builder_set_callable(b.b, &hooks, 1), GRJIT_OK);
+  const auto p0 = b.param(GRJIT_TYPE_I64);
+  const auto p1 = b.param(GRJIT_TYPE_I64);
+  const auto p2 = b.param(GRJIT_TYPE_I64);
+  b.at(b.block());
+  ASSERT_EQ(grjit_builder_ret(b.b, V(p0)), GRJIT_OK);
+  Fn f(b.finish());
+  GRJIT_CallableShape shape{};
+  grjit_callable_shape(f.f, GRJIT_SYSV_INTERNAL_REG_ARGS, &shape);
+  EXPECT_FALSE(shape.has_result_buffer);
+  EXPECT_EQ(shape.incoming_bytes,
+      grjit_stack_arg_bytes(grjit_function_param_count(f.f),
+          GRJIT_SYSV_INTERNAL_REG_ARGS));
+  EXPECT_EQ(shape.area_slots, shape.args_area);
+  EXPECT_EQ(p1, 1u);
+  EXPECT_EQ(p2, 2u);
+}
+
+TEST(Compile, CallableResultCountIsTheDeclaredSignatureWhenNoReturnIsReachable) {
+  GRJIT_REQUIRE_BACKEND();
+  JitWorld w;
+  B b("callable-no-reachable-return");
+  GRJIT_CallHooks hooks{};
+  hooks.deopt = [](void *, uint64_t) -> uint32_t { return 0; };
+  b.callable(hooks, 1);
+  b.at(b.block());
+  b.guard(I(0), {1, 1});
+  ASSERT_EQ(grjit_builder_ret_multi(b.b, nullptr, 0), GRJIT_OK);
+  Fn f(b.finish());
+  Compiled c(f, w.pages());
+  ASSERT_TRUE(c) << grjit_result_string(c.result);
+  EXPECT_EQ(grjit_code_result_count(c.code), 1u);
+}
+
+TEST(Compile, InstanceReadReturnsTheEntryEnvironment) {
+  GRJIT_REQUIRE_BACKEND();
+  JitWorld w;
+  B b("instance");
+  GRJIT_VReg instance = b.reg(GRJIT_TYPE_PTR);
+  b.at(b.block());
+  ASSERT_EQ(grjit_builder_instance(b.b, instance), GRJIT_OK);
+  b.ret(V(instance));
+  Fn f(b.finish());
+  Compiled c(f, w.pages());
+  ASSERT_TRUE(c) << grjit_result_string(c.result);
+  int environment = 17;
+  const auto r = c.run(w.ctx, &environment, {});
+  ASSERT_EQ(r.exit, GRJIT_EXIT_RETURNED);
+  EXPECT_EQ(r.out[0], reinterpret_cast<uintptr_t>(&environment));
+  int distinct_context = 23;
+  const auto interpreted = ireval::eval(f.f, &distinct_context, nullptr, {},
+      2000000, &environment);
+  ASSERT_EQ(interpreted.exit, GRJIT_EXIT_RETURNED);
+  EXPECT_EQ(interpreted.out[0], r.out[0]);
+  int second_environment = 29;
+  const auto second = c.run(w.ctx, &second_environment, {});
+  ASSERT_EQ(second.exit, GRJIT_EXIT_RETURNED);
+  EXPECT_EQ(second.out[0], reinterpret_cast<uintptr_t>(&second_environment));
+}
+
+TEST(Compile, NestedSlotCallUsesCalleeEnvironmentAndRestoresCallerEnvironment) {
+  GRJIT_REQUIRE_BACKEND();
+  JitWorld w;
+  const GRJIT_CallHooks hooks = environment_hooks();
+
+  B callee_builder("environment-callee");
+  ASSERT_EQ(grjit_builder_set_callable(callee_builder.b, &hooks, 1), GRJIT_OK);
+  const GRJIT_VReg callee_instance = callee_builder.reg(GRJIT_TYPE_PTR);
+  callee_builder.at(callee_builder.block());
+  ASSERT_EQ(grjit_builder_instance(callee_builder.b, callee_instance), GRJIT_OK);
+  ASSERT_EQ(grjit_builder_ret(callee_builder.b, V(callee_instance)), GRJIT_OK);
+  Fn callee_function(callee_builder.finish());
+  Compiled callee(callee_function, w.pages());
+  ASSERT_TRUE(callee) << grjit_result_string(callee.result);
+
+  uint64_t callee_entry = grjit_code_internal_entry(callee.code);
+  B caller_builder("environment-caller", 1);
+  ASSERT_EQ(grjit_builder_set_callable(caller_builder.b, &hooks, 3), GRJIT_OK);
+  const GRJIT_VReg target_environment = caller_builder.param(GRJIT_TYPE_PTR);
+  const GRJIT_VReg before = caller_builder.reg(GRJIT_TYPE_PTR);
+  const GRJIT_VReg returned = caller_builder.reg(GRJIT_TYPE_PTR);
+  const GRJIT_VReg after = caller_builder.reg(GRJIT_TYPE_PTR);
+  caller_builder.at(caller_builder.block());
+  ASSERT_EQ(grjit_builder_instance(caller_builder.b, before), GRJIT_OK);
+  const GRCORE_PollIdentity id{1, 1};
+  const GRJIT_FrameSlot state[] = {grjit_frame_slot_dead()};
+  ASSERT_EQ(grjit_builder_call_slot_results_env(caller_builder.b, &returned, 1,
+      reinterpret_cast<uintptr_t>(&callee_entry), 77, V(target_environment),
+      nullptr, 0, id, state, 1, id, state, 1), GRJIT_OK);
+  ASSERT_EQ(grjit_builder_instance(caller_builder.b, after), GRJIT_OK);
+  const GRJIT_Operand results[] = {V(before), V(returned), V(after)};
+  ASSERT_EQ(grjit_builder_ret_multi(caller_builder.b, results, 3), GRJIT_OK);
+  Fn caller_function(caller_builder.finish());
+  Compiled caller(caller_function, w.pages());
+  ASSERT_TRUE(caller) << grjit_result_string(caller.result);
+
+  int caller_environment_a = 17;
+  int caller_environment_a2 = 19;
+  int callee_environment_b = 23;
+  auto first = caller.run(w.ctx, &caller_environment_a,
+      {reinterpret_cast<uintptr_t>(&callee_environment_b)});
+  ASSERT_EQ(first.exit, GRJIT_EXIT_RETURNED);
+  ASSERT_EQ(first.out.size(), 3u);
+  EXPECT_EQ(first.out[0], reinterpret_cast<uintptr_t>(&caller_environment_a));
+  EXPECT_EQ(first.out[1], reinterpret_cast<uintptr_t>(&callee_environment_b));
+  EXPECT_EQ(first.out[2], reinterpret_cast<uintptr_t>(&caller_environment_a));
+  auto second = caller.run(w.ctx, &caller_environment_a2,
+      {reinterpret_cast<uintptr_t>(&callee_environment_b)});
+  ASSERT_EQ(second.exit, GRJIT_EXIT_RETURNED);
+  EXPECT_EQ(second.out[0], reinterpret_cast<uintptr_t>(&caller_environment_a2));
+  EXPECT_EQ(second.out[1], reinterpret_cast<uintptr_t>(&callee_environment_b));
+  EXPECT_EQ(second.out[2], reinterpret_cast<uintptr_t>(&caller_environment_a2));
+}
+
+TEST(Compile, TailSlotCallTransfersItsExplicitCalleeEnvironment) {
+  GRJIT_REQUIRE_BACKEND();
+  JitWorld w;
+  const GRJIT_CallHooks hooks = environment_hooks();
+  B callee_builder("tail-environment-callee");
+  ASSERT_EQ(grjit_builder_set_callable(callee_builder.b, &hooks, 1), GRJIT_OK);
+  const GRJIT_VReg callee_instance = callee_builder.reg(GRJIT_TYPE_PTR);
+  callee_builder.at(callee_builder.block());
+  ASSERT_EQ(grjit_builder_instance(callee_builder.b, callee_instance), GRJIT_OK);
+  ASSERT_EQ(grjit_builder_ret(callee_builder.b, V(callee_instance)), GRJIT_OK);
+  Fn callee_function(callee_builder.finish());
+  Compiled callee(callee_function, w.pages());
+  ASSERT_TRUE(callee) << grjit_result_string(callee.result);
+
+  uint64_t callee_entry = grjit_code_internal_entry(callee.code);
+  B tail_builder("tail-environment-caller", 1);
+  ASSERT_EQ(grjit_builder_set_callable(tail_builder.b, &hooks, 1), GRJIT_OK);
+  const GRJIT_VReg target_environment = tail_builder.param(GRJIT_TYPE_PTR);
+  tail_builder.at(tail_builder.block());
+  const GRCORE_PollIdentity id{1, 1};
+  const GRJIT_FrameSlot state[] = {grjit_frame_slot_dead()};
+  ASSERT_EQ(grjit_builder_tail_call_slot_env(tail_builder.b,
+      reinterpret_cast<uintptr_t>(&callee_entry), 77, 1, V(target_environment),
+      nullptr, 0, id, state, 1), GRJIT_OK);
+  Fn tail_function(tail_builder.finish());
+  Compiled tail(tail_function, w.pages());
+  ASSERT_TRUE(tail) << grjit_result_string(tail.result);
+
+  int caller_environment_a = 29;
+  int callee_environment_b = 31;
+  auto result = tail.run(w.ctx, &caller_environment_a,
+      {reinterpret_cast<uintptr_t>(&callee_environment_b)});
+  ASSERT_EQ(result.exit, GRJIT_EXIT_RETURNED);
+  ASSERT_GE(result.out.size(), 1u);
+  EXPECT_EQ(result.out[0], reinterpret_cast<uintptr_t>(&callee_environment_b));
+}
+
+TEST(Compile, IndexedLoadUsesScaledAddressOnTheActiveBackend) {
+  GRJIT_REQUIRE_BACKEND();
+  JitWorld w;
+  uint64_t values[] = {11, 22, 33, 44};
+  B b("indexed-load");
+  GRJIT_VReg base = b.param(GRJIT_TYPE_PTR);
+  GRJIT_VReg index = b.param(GRJIT_TYPE_I64);
+  GRJIT_VReg result = b.reg();
+  b.at(b.block());
+  ASSERT_EQ(grjit_builder_load_indexed(b.b, result, base, index, 8, 0, 64, false), GRJIT_OK);
+  b.ret(V(result));
+  Fn f(b.finish());
+  Compiled c(f, w.pages());
+  ASSERT_TRUE(c) << grjit_result_string(c.result);
+  const auto r = c.run(w.ctx, {reinterpret_cast<uintptr_t>(values), 2});
+  ASSERT_EQ(r.exit, GRJIT_EXIT_RETURNED);
+  EXPECT_EQ(r.out[0], 33u);
+}
+
+TEST(Compile, IndexedStoreUsesScaledAddressOnTheActiveBackend) {
+  GRJIT_REQUIRE_BACKEND();
+  JitWorld w;
+  uint64_t values[] = {1, 2, 3, 4};
+  B b("indexed-store");
+  GRJIT_VReg base = b.param(GRJIT_TYPE_PTR);
+  GRJIT_VReg index = b.param(GRJIT_TYPE_I64);
+  b.at(b.block());
+  ASSERT_EQ(grjit_builder_store_indexed(b.b, base, index, 8, 0, 64, I(91)), GRJIT_OK);
+  b.ret();
+  Fn f(b.finish());
+  Compiled c(f, w.pages());
+  ASSERT_TRUE(c) << grjit_result_string(c.result);
+  const auto r = c.run(w.ctx, {reinterpret_cast<uintptr_t>(values), 1});
+  ASSERT_EQ(r.exit, GRJIT_EXIT_RETURNED);
+  EXPECT_EQ(values[1], 91u);
+}
+
+TEST(Compile, BranchTableSelectsTargetsAndUsesDefaultAtOrAboveItsLength) {
+  GRJIT_REQUIRE_BACKEND();
+  JitWorld w;
+  B b("br-table");
+  GRJIT_VReg index = b.param(GRJIT_TYPE_I64);
+  GRJIT_VReg result = b.reg();
+  const GRJIT_BlockId entry = b.block();
+  const GRJIT_BlockId first = b.block();
+  const GRJIT_BlockId second = b.block();
+  const GRJIT_BlockId fallback = b.block();
+  const GRJIT_BlockId targets[] = {first, second};
+  b.at(entry);
+  ASSERT_EQ(grjit_builder_br_table(b.b, V(index), targets, 2, fallback), GRJIT_OK);
+  b.at(first); b.cnst(result, 10); b.ret(V(result));
+  b.at(second); b.cnst(result, 20); b.ret(V(result));
+  b.at(fallback); b.cnst(result, 30); b.ret(V(result));
+  Fn f(b.finish());
+  Compiled c(f, w.pages());
+  ASSERT_TRUE(c) << grjit_result_string(c.result);
+  EXPECT_EQ(c.run(w.ctx, {0}).out[0], 10u);
+  EXPECT_EQ(c.run(w.ctx, {1}).out[0], 20u);
+  EXPECT_EQ(c.run(w.ctx, {2}).out[0], 30u);
+  EXPECT_EQ(c.run(w.ctx, {UINT64_MAX}).out[0], 30u);
+}
+
+TEST(Compile, TrapReturnsItsKindAsTheTrapExitOutput) {
+  GRJIT_REQUIRE_BACKEND();
+  JitWorld w;
+  B b("trap");
+  b.at(b.block());
+  ASSERT_EQ(grjit_builder_trap(b.b, GRJIT_TRAP_INTEGER_OVERFLOW), GRJIT_OK);
+  Fn f(b.finish());
+  Compiled c(f, w.pages());
+  ASSERT_TRUE(c) << grjit_result_string(c.result);
+  const auto r = c.run(w.ctx);
+  EXPECT_EQ(r.exit, GRJIT_EXIT_TRAP);
+  EXPECT_EQ(r.out[0], GRJIT_TRAP_INTEGER_OVERFLOW);
 }
 
 TEST(Compile, EveryBinaryOperationMatchesCxxOnTheEdgeValues) {
@@ -216,6 +510,21 @@ TEST(Compile, ReturnWithNoValueLeavesOutAlone) {
   EXPECT_EQ(grjit_code_out_words(c.code), 1u);
 }
 
+TEST(Compile, TailOnlyMultiResultIncludesTheWholeOutBuffer) {
+  GRJIT_REQUIRE_BACKEND();
+  JitWorld w;
+  B b("tail-only-three-results");
+  b.callable(environment_hooks(), 3);
+  b.at(b.block());
+  ASSERT_EQ(grjit_builder_tail_call_slot(b.b, 0x1000, 7, 3, nullptr, 0,
+      GRCORE_PollIdentity{1, 1}, nullptr, 0), GRJIT_OK);
+  Fn f(b.finish());
+  Compiled c(f, w.pages());
+  ASSERT_TRUE(c);
+  EXPECT_EQ(grjit_code_out_words(c.code), 3u);
+  EXPECT_EQ(grjit_code_result_count(c.code), 3u);
+}
+
 TEST(Compile, MemoryWidthsLoadStoreAndSignExtension) {
   GRJIT_REQUIRE_BACKEND();
   JitWorld w;
@@ -340,10 +649,10 @@ TEST(Compile, ACallOfNullCodeOrOfCodeMadeForAnotherLayoutIsRefusedAndNothingRuns
 
   // A NULL code, with and without somewhere to put the reason.
   uint64_t out[2] = {0xDEADBEEF, 0xDEADBEEF};
-  EXPECT_EQ(grjit_code_call(nullptr, w.ctx, nullptr, out),
+  EXPECT_EQ(grjit_code_call(nullptr, w.ctx, w.ctx, nullptr, out),
       static_cast<uint32_t>(GRJIT_EXIT_REFUSED));
   EXPECT_EQ(out[0], static_cast<uint64_t>(GRCORE_ERR_INVALID));
-  EXPECT_EQ(grjit_code_call(nullptr, w.ctx, nullptr, nullptr),
+  EXPECT_EQ(grjit_code_call(nullptr, w.ctx, w.ctx, nullptr, nullptr),
       static_cast<uint32_t>(GRJIT_EXIT_REFUSED));
 
   // The same code, as if a different core had compiled it: no instruction of
@@ -352,7 +661,7 @@ TEST(Compile, ACallOfNullCodeOrOfCodeMadeForAnotherLayoutIsRefusedAndNothingRuns
   uint32_t real = *offset;
   *offset = real + 8;
   out[0] = 0xDEADBEEF;
-  EXPECT_EQ(grjit_code_call(c.code, w.ctx, nullptr, out), static_cast<uint32_t>(GRJIT_EXIT_REFUSED));
+  EXPECT_EQ(grjit_code_call(c.code, w.ctx, w.ctx, nullptr, out), static_cast<uint32_t>(GRJIT_EXIT_REFUSED));
   EXPECT_EQ(out[0], static_cast<uint64_t>(GRCORE_ERR_INVALID));
   *offset = real;
   EXPECT_EQ(c.run(w.ctx).exit, static_cast<uint32_t>(GRJIT_EXIT_RETURNED));

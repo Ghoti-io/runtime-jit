@@ -26,9 +26,9 @@
  * instruction encoding, and the metadata builder. Never installed.
  *
  * Frame layout, below the frame base (`rbp` on x86-64, `x29` on arm64; it is
- * the frame base of the metadata): three fixed slots (the context at -8, `out`
- * at -16, `args` at -24) and then one slot per virtual register, register `v`
- * at `-8 * (v + 4)`. Nothing is ever pushed or allocated after the prologue, so
+ * the frame base of the metadata): four fixed slots (the context at -8, `out`
+ * at -16, `args` at -24, and environment at -32) and then one slot per virtual
+ * register, register `v` at `-8 * (v + 5)`. Nothing is ever pushed or allocated after the prologue, so
  * the stack pointer is 16-byte aligned at every call. Both backends use this
  * layout, which is why the stack-map and deopt format, the liveness pass and
  * every consumer's frame walk are the same for both. (The Windows x86-64 flavour
@@ -58,7 +58,8 @@ extern "C" {
 #define GRJIT_SLOT_CTX (-8)
 #define GRJIT_SLOT_OUT (-16)
 #define GRJIT_SLOT_ARGS (-24)
-#define GRJIT_FIXED_SLOTS 3
+#define GRJIT_SLOT_ENV (-32)
+#define GRJIT_FIXED_SLOTS 4
 
 /** Where the instructions of the x86-64 prologue (`push rbp; mov rbp, rsp;
  *  sub rsp, N`) end, as offsets from the first byte of code, and `N`. The
@@ -103,6 +104,12 @@ typedef struct GRJIT_SiteRec {
                        ///< for every other site.
 } GRJIT_SiteRec;
 
+typedef struct GRJIT_ExceptionSitePending {
+  uint32_t call_offset;
+  uint32_t landing_block;
+  uint32_t landing_offset;
+} GRJIT_ExceptionSitePending;
+
 /* ---- Calls between compiled functions (AD-28), x86-64 SysV ----------------
  *
  * The internal calling convention:
@@ -137,14 +144,17 @@ typedef struct GRJIT_SiteRec {
 #define GRJIT_STATUS_DEOPTED 1u
 /** The engine's `deopt` hook refused the rebuild; `rax` is its answer. */
 #define GRJIT_STATUS_FAILED 2u
+#define GRJIT_STATUS_TRAPPED 3u
+#define GRJIT_STATUS_EXCEPTION 4u
 /** The sixteen bytes before every internal entry: a word holding the magic in
- *  its high half and the parameter count in its low half, then the function's
- *  token. A call through a code pointer checks all three, so a target that is
- *  not compiled code, or not the function the call means, or takes a different
- *  number of arguments, is never entered. */
+ *  its high half, result count in the next 16 bits, and parameter count in the
+ *  low 16 bits, then the function's token. Calls check the complete signature. */
 #define GRJIT_ENTRY_TAG_MAGIC UINT32_C(0x4752494E)
-#define GRJIT_ENTRY_TAG_WORD(params) \
-  ((UINT64_C(0x4752494E) << 32) | (uint64_t)(uint32_t)(params))
+#define GRJIT_ENTRY_TAG_WORD(params, results) \
+  ((UINT64_C(0x4752494E) << 32) | \
+      (((uint64_t)(uint16_t)(results)) << 16) | (uint64_t)(uint16_t)(params))
+#define GRJIT_CALL_SIGNATURE(params, results) \
+  ((((uint64_t)(uint32_t)(results)) << 32) | (uint64_t)(uint32_t)(params))
 #define GRJIT_ENTRY_TAG_BYTES 16u
 /** The most arguments an internal convention passes in registers, by target:
  *  `rdi, rsi, rdx, rcx, r8, r9` on x86-64 SysV, `x0`-`x7` on arm64. (Win64's,
@@ -157,6 +167,9 @@ typedef struct GRJIT_SiteRec {
 /** How a callable function's frame is shaped. */
 typedef struct GRJIT_CallableShape {
   size_t args_area;    ///< Slots in the arguments area: the widest call.
+  size_t result_area;  ///< Maximum extra results staged after the arguments.
+  size_t area_slots;   ///< args_area + result_area.
+  bool has_result_buffer; ///< At least one RET returns more than one word.
   bool has_calls;      ///< Whether it calls compiled code at all (a tail call
                        ///< included).
   size_t pad;          ///< Slots between the vreg slots and the arguments area
@@ -183,9 +196,10 @@ static inline uint32_t grjit_stack_arg_bytes(size_t n, unsigned reg_args) {
 /** Whether `target` is the internal entry of compiled code registered in the
  *  context (src/code/target.c): the check a call through a code pointer makes.
  *  Called from compiled code, through the C ABI. It also requires the tag
- *  before the entry to name `callee` and `arg_count` parameters. */
+ *  before the entry to name `callee` and the argument/result arities packed in
+ *  `signature` (`params` in its low word, `results` in its high word). */
 uint32_t grjit_call_target_ok(
-    void * context, uint64_t target, uint64_t callee, uint64_t arg_count);
+    void * context, uint64_t target, uint64_t callee, uint64_t signature);
 
 /** The shape of `f`, which need not be callable (then all zero), for a target
  *  whose internal convention passes `reg_args` arguments in registers. */
@@ -199,7 +213,7 @@ void grjit_callable_shape(const GRJIT_Function * f, unsigned reg_args, GRJIT_Cal
   (-8 * ((int32_t)(vreg_count) + GRJIT_FIXED_SLOTS + (int32_t)(area)) + 8 * (int32_t)(k))
 /** The slot that holds the entry across the push: the one below the area. */
 #define GRJIT_ENTRY_SAVE_SLOT(vreg_count, shape) \
-  (-8 * ((int32_t)(vreg_count) + GRJIT_FIXED_SLOTS + (int32_t)(shape).args_area + 1))
+  (-8 * ((int32_t)(vreg_count) + GRJIT_FIXED_SLOTS + (int32_t)(shape).area_slots + 1))
 
 /** An out-of-line stub still to be emitted after the blocks. */
 typedef enum GRJIT_PendingKind {
@@ -237,6 +251,9 @@ typedef struct GRJIT_EmitCommon {
   GRJIT_SiteRec * sites;
   size_t site_count;
   size_t site_capacity;
+  GRJIT_ExceptionSitePending * exception_sites;
+  size_t exception_site_count;
+  size_t exception_site_capacity;
   GRJIT_Pending * pending;
   size_t pending_count;
   size_t pending_capacity;
@@ -260,6 +277,9 @@ void grjit_emit_add_site(GRJIT_EmitCommon * c, uint32_t offset,
 void grjit_emit_add_site_for(GRJIT_EmitCommon * c, uint32_t offset,
     GRCORE_CodeSiteKind kind, GRCORE_PollIdentity identity, size_t live_index,
     uint32_t state, const GRJIT_Op * op);
+
+void grjit_emit_add_exception_site(GRJIT_EmitCommon * c, uint32_t call_offset,
+    uint32_t landing_block);
 
 /** Queues a stub. Sets `error` on out-of-memory. */
 void grjit_emit_add_pending(GRJIT_EmitCommon * c, const GRJIT_Pending * p);

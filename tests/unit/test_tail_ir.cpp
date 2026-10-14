@@ -12,15 +12,16 @@
 #include "test_helpers.h"
 
 #include "../../src/backend/liveness_internal.h"
+#include "../../src/backend/backend_internal.h"
 #include "../../src/code/code_internal.h"
 
 namespace {
 
-uint32_t h_push(void *, uint64_t, const uint64_t *, uint64_t) { return 0; }
+uint32_t h_push(void *, void *, uint64_t, const uint64_t *, uint64_t, uint64_t) { return 0; }
 void h_pop(void *) {}
 uint32_t h_compile(void *, uint64_t) { return 0; }
 uint32_t h_deopt(void *, uint64_t) { return 0; }
-uint32_t h_tail(void *, uint64_t, const uint64_t *, uint64_t) { return 0; }
+uint32_t h_tail(void *, void *, uint64_t, const uint64_t *, uint64_t, uint64_t) { return 0; }
 
 GRJIT_CallHooks all_hooks() {
   GRJIT_CallHooks h{};
@@ -66,6 +67,23 @@ void tail_slot(B & b, GRJIT_CallHooks & h, GRJIT_VReg x, GRJIT_VReg, GRJIT_VReg)
 TEST(TailIr, ATailCallThroughASlotEndsItsBlockAndIsWellFormed) {
   auto r = check(tail_slot);
   EXPECT_EQ(r.first, GRJIT_OK) << r.second;
+}
+
+TEST(TailIr, TailOnlyMultiResultCallableHasAResultBufferInItsEntryShape) {
+  B b("tail-only-multi-result", 1);
+  GRJIT_CallHooks h = all_hooks();
+  GRJIT_VReg x = b.param(GRJIT_TYPE_I64);
+  b.callable(h, 2);
+  b.at(b.block());
+  const GRJIT_Operand args[] = {V(x)};
+  const GRJIT_FrameSlot state[] = {grjit_frame_slot_vreg(x)};
+  ASSERT_EQ(grjit_builder_tail_call_slot(b.b,
+      reinterpret_cast<uintptr_t>(&g_entry_word), 99, 2, args, 1, kId,
+      state, 1), GRJIT_OK);
+  Fn f(b.finish());
+  GRJIT_CallableShape shape{};
+  grjit_callable_shape(f.f, 6, &shape);
+  EXPECT_TRUE(shape.has_result_buffer);
 }
 
 TEST(TailIr, ATailCallThroughAPointerTakesAPtrRegisterOrANonNullImmediate) {
@@ -114,6 +132,38 @@ TEST(TailIr, TheBuilderRecordsTheKindTheTargetTheTokenTheArgumentsAndOneState) {
   EXPECT_EQ(st->identity.offset, 3u);
   EXPECT_EQ(st->slots[1].kind, GRJIT_FRAME_SLOT_CONSTANT);
   EXPECT_EQ(grjit_liveness_site_count(&ops[0]), 2u);
+}
+
+TEST(TailIr, SlotAndPointerTailCallsRecordTheExplicitCalleeEnvironment) {
+  for (bool through_pointer : {false, true}) {
+    B b("tail-environment", 1);
+    GRJIT_CallHooks h = all_hooks();
+    GRJIT_VReg x = b.param(GRJIT_TYPE_I64);
+    GRJIT_VReg env = b.param(GRJIT_TYPE_PTR);
+    GRJIT_VReg target = b.reg(GRJIT_TYPE_PTR);
+    const GRJIT_Operand args[] = {V(x)};
+    const GRJIT_FrameSlot state[] = {grjit_frame_slot_vreg(x)};
+    b.callable(h);
+    b.at(b.block());
+    if (through_pointer) {
+      b.cnst(target, 0x1000);
+      EXPECT_EQ(grjit_builder_tail_call_ptr_env(b.b, V(target), 77, 1, V(env),
+          args, 1, kId, state, 1), GRJIT_OK);
+    } else {
+      EXPECT_EQ(grjit_builder_tail_call_slot_env(b.b,
+          reinterpret_cast<uintptr_t>(&g_entry_word), 77, 1, V(env),
+          args, 1, kId, state, 1), GRJIT_OK);
+    }
+    Fn f(b.finish());
+    ASSERT_EQ(grjit_function_block_count(f), 1u);
+    size_t count = 0;
+    const GRJIT_Op * ops = grjit_function_block_ops(f, 0, &count);
+    ASSERT_EQ(count, through_pointer ? 2u : 1u);
+    const GRJIT_Op & tail = ops[count - 1];
+    EXPECT_EQ(tail.kind, through_pointer ? GRJIT_OP_TAIL_CALL_PTR : GRJIT_OP_TAIL_CALL_SLOT);
+    EXPECT_EQ(tail.environment.kind, GRJIT_OPERAND_VREG);
+    EXPECT_EQ(tail.environment.vreg, env);
+  }
 }
 
 TEST(TailIr, ATailCallIsRefusedAnywhereButLastInItsBlockNamingTheOperation) {
@@ -214,7 +264,7 @@ TEST(TailIr, SixteenArgumentsAreAllowedSeventeenAreALimitErrorAndTheVerifierHold
   b.at(b.block());
   std::vector<GRJIT_Operand> seventeen(17, I(1));
   auto fs = st2(x);
-  EXPECT_EQ(grjit_builder_tail_call_slot(b.b, reinterpret_cast<uintptr_t>(&g_entry_word), 1,
+  EXPECT_EQ(grjit_builder_tail_call_slot(b.b, reinterpret_cast<uintptr_t>(&g_entry_word), 1, 1,
                 seventeen.data(), seventeen.size(), kId, fs.data(), fs.size()),
       GRJIT_ERR_LIMIT);
   // And the verifier, judging a function by a lower limit than it was built
@@ -299,7 +349,7 @@ TEST(TailIr, AnAddressForASlotAndNoneForAPointerAreRequiredOfTheOperation) {
   auto r = check([](B & b, GRJIT_CallHooks & h, GRJIT_VReg x, GRJIT_VReg, GRJIT_VReg) {
     b.callable(h);
     b.at(b.block());
-    EXPECT_EQ(grjit_builder_tail_call_slot(b.b, 0, 1, nullptr, 0, kId,
+    EXPECT_EQ(grjit_builder_tail_call_slot(b.b, 0, 1, 0, nullptr, 0, kId,
                   st2(x).data(), 2),
         GRJIT_OK);
   });
@@ -359,9 +409,9 @@ TEST(TailIr, ThePrinterShowsBothFormsWithTheirTokensAndTheOneState) {
   b.tail_call_ptr(V(p), 6, {}, kId, {grjit_frame_slot_dead(), grjit_frame_slot_constant(7)});
   Fn f(b.finish());
   std::string text = print(f);
-  EXPECT_NE(text.find("tail_call.slot 0x2000 callee=5(v0, #9) state fn=7 off=3 [v0, dead]\n"),
+  EXPECT_NE(text.find("tail_call.slot 0x2000 callee=5 results=1(v0, #9) state fn=7 off=3 [v0, dead]\n"),
       std::string::npos) << text;
-  EXPECT_NE(text.find("tail_call.ptr v1 callee=6() state fn=7 off=3 [dead, #7]\n"),
+  EXPECT_NE(text.find("tail_call.ptr v1 callee=6 results=1() state fn=7 off=3 [dead, #7]\n"),
       std::string::npos) << text;
   EXPECT_EQ(text.find("exit"), std::string::npos) << "a tail call has no exit state: " << text;
 }

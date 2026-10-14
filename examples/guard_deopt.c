@@ -98,12 +98,12 @@ int main(void) {
 
   uint64_t out[8];
   uint64_t holds[2] = {5, 10};
-  uint32_t exit_kind = grjit_code_call(code, context, holds, out);
+  uint32_t exit_kind = grjit_code_call(code, context, context, holds, out);
   printf("f(5, 10): exit %u (returned), result %llu\n", exit_kind, (unsigned long long)out[0]);
   int ok = exit_kind == GRJIT_EXIT_RETURNED && out[0] == 26;
 
   uint64_t fails[2] = {0, 10};
-  exit_kind = grjit_code_call(code, context, fails, out);
+  exit_kind = grjit_code_call(code, context, context, fails, out);
   printf("f(0, 10): exit %u (deopt)\n", exit_kind);
   printf("  slots: a=%llu b=%llu constant=%llu dead=%llu\n", (unsigned long long)out[0],
       (unsigned long long)out[1], (unsigned long long)out[2], (unsigned long long)out[3]);

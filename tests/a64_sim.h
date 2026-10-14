@@ -88,7 +88,7 @@ constexpr bool kSignatures = true;
 struct Config {
   const uint8_t * code = nullptr;
   size_t size = 0;
-  uint64_t args[3] = {0, 0, 0};          // x0, x1, x2 on entry
+  uint64_t args[4] = {0, 0, 0, 0};       // x0..x3 on entry
   std::set<uint64_t> returns32;          // host functions that return a uint32_t
   std::map<uint64_t, Sig> sigs;          // host functions with float arguments or results
   uint64_t d_args[8] = {0, 0, 0, 0, 0, 0, 0, 0};  // d0..d7 on entry (bits)
@@ -340,7 +340,7 @@ class Cpu {
       x_[i] = noise(static_cast<uint64_t>(i));
       d_[i] = noise(static_cast<uint64_t>(100 + i));
     }
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 4; i++) {
       x_[i] = cfg.args[i];
     }
     for (int i = 0; i < 8; i++) {

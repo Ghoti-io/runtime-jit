@@ -262,6 +262,9 @@ static GRJIT_Result append_ex(GRJIT_Builder * b, const GRJIT_Op * op,
   const GRJIT_Allocator * a = f->allocator;
   GRJIT_BlockInfo * blk = &f->blocks[b->current];
   GRJIT_Operand * arg_copy = NULL;
+  GRJIT_VReg * result_copy = NULL;
+  GRJIT_Operand * return_copy = NULL;
+  GRJIT_BlockId * target_copy = NULL;
   GRJIT_FrameSlot * slot_copy = NULL;
   GRJIT_FrameSlot * slot_copy2 = NULL;
   if (arg_count != 0) {
@@ -271,10 +274,46 @@ static GRJIT_Result append_ex(GRJIT_Builder * b, const GRJIT_Op * op,
     }
     memcpy(arg_copy, args, arg_count * sizeof *arg_copy);
   }
+  if (op->result_count != 0) {
+    if (op->kind == GRJIT_OP_RET) {
+      if (op->returns == NULL || op->result_count > SIZE_MAX / sizeof *return_copy) {
+        a->free_fn(a->ctx, arg_copy); return GRJIT_ERR_INVALID;
+      }
+      return_copy = a->malloc_fn(a->ctx, op->result_count * sizeof *return_copy);
+      if (return_copy == NULL) { a->free_fn(a->ctx, arg_copy); return GRJIT_ERR_OOM; }
+      memcpy(return_copy, op->returns, op->result_count * sizeof *return_copy);
+    } else {
+      if (op->results == NULL || op->result_count > SIZE_MAX / sizeof *result_copy) {
+        a->free_fn(a->ctx, arg_copy); return GRJIT_ERR_INVALID;
+      }
+      result_copy = a->malloc_fn(a->ctx, op->result_count * sizeof *result_copy);
+      if (result_copy == NULL) { a->free_fn(a->ctx, arg_copy); return GRJIT_ERR_OOM; }
+      memcpy(result_copy, op->results, op->result_count * sizeof *result_copy);
+    }
+  }
+  if (op->target_count != 0) {
+    if (op->targets == NULL || op->target_count > SIZE_MAX / sizeof *target_copy) {
+      a->free_fn(a->ctx, arg_copy);
+      a->free_fn(a->ctx, result_copy);
+      a->free_fn(a->ctx, return_copy);
+      return GRJIT_ERR_INVALID;
+    }
+    target_copy = a->malloc_fn(a->ctx, op->target_count * sizeof *target_copy);
+    if (target_copy == NULL) {
+      a->free_fn(a->ctx, arg_copy);
+      a->free_fn(a->ctx, result_copy);
+      a->free_fn(a->ctx, return_copy);
+      return GRJIT_ERR_OOM;
+    }
+    memcpy(target_copy, op->targets, op->target_count * sizeof *target_copy);
+  }
   if (state != NULL && slot_count != 0) {
     slot_copy = a->malloc_fn(a->ctx, slot_count * sizeof *slot_copy);
     if (slot_copy == NULL) {
       a->free_fn(a->ctx, arg_copy);
+      a->free_fn(a->ctx, result_copy);
+      a->free_fn(a->ctx, return_copy);
+      a->free_fn(a->ctx, target_copy);
       return GRJIT_ERR_OOM;
     }
     memcpy(slot_copy, slots, slot_count * sizeof *slot_copy);
@@ -283,6 +322,9 @@ static GRJIT_Result append_ex(GRJIT_Builder * b, const GRJIT_Op * op,
     slot_copy2 = a->malloc_fn(a->ctx, slot_count2 * sizeof *slot_copy2);
     if (slot_copy2 == NULL) {
       a->free_fn(a->ctx, arg_copy);
+      a->free_fn(a->ctx, result_copy);
+      a->free_fn(a->ctx, return_copy);
+      a->free_fn(a->ctx, target_copy);
       a->free_fn(a->ctx, slot_copy);
       return GRJIT_ERR_OOM;
     }
@@ -304,6 +346,9 @@ static GRJIT_Result append_ex(GRJIT_Builder * b, const GRJIT_Op * op,
   }
   if (ops == NULL || (new_states != 0 && states == NULL)) {
     a->free_fn(a->ctx, arg_copy);
+    a->free_fn(a->ctx, result_copy);
+    a->free_fn(a->ctx, return_copy);
+    a->free_fn(a->ctx, target_copy);
     a->free_fn(a->ctx, slot_copy);
     a->free_fn(a->ctx, slot_copy2);
     return GRJIT_ERR_OOM;
@@ -311,6 +356,9 @@ static GRJIT_Result append_ex(GRJIT_Builder * b, const GRJIT_Op * op,
   GRJIT_Op * dst = &blk->ops[blk->count];
   *dst = *op;
   dst->args = arg_copy;
+  dst->results = result_copy;
+  dst->returns = return_copy;
+  dst->targets = target_copy;
   dst->arg_count = arg_count;
   if (state != NULL) {
     GRJIT_FrameState * s = &f->states[f->state_count];
@@ -353,6 +401,7 @@ static GRJIT_Op blank(GRJIT_OpKind kind) {
   op.b = grjit_operand_none();
   op.state = GRJIT_NO_STATE;
   op.exit_state = GRJIT_NO_STATE;
+  op.landing_target = GRJIT_NO_BLOCK;
   return op;
 }
 
@@ -446,6 +495,7 @@ GRJIT_Result grjit_builder_load(GRJIT_Builder * builder, GRJIT_VReg dst,
   op.a = grjit_operand_vreg(base);
   op.disp = disp;
   op.width = width_bits;
+  op.scale = 1;
   return append(builder, &op, NULL, 0, NULL, NULL, 0);
 }
 
@@ -456,6 +506,48 @@ GRJIT_Result grjit_builder_store(GRJIT_Builder * builder, GRJIT_VReg base,
   }
   GRJIT_Op op = blank(GRJIT_OP_STORE);
   op.a = grjit_operand_vreg(base);
+  op.b = value;
+  op.disp = disp;
+  op.width = width_bits;
+  op.scale = 1;
+  return append(builder, &op, NULL, 0, NULL, NULL, 0);
+}
+
+GRJIT_Result grjit_builder_instance(GRJIT_Builder * builder, GRJIT_VReg dst) {
+  if (builder == NULL) {
+    return GRJIT_ERR_INVALID;
+  }
+  GRJIT_Op op = blank(GRJIT_OP_INSTANCE);
+  op.dst = dst;
+  return append(builder, &op, NULL, 0, NULL, NULL, 0);
+}
+
+GRJIT_Result grjit_builder_load_indexed(GRJIT_Builder * builder, GRJIT_VReg dst,
+    GRJIT_VReg base, GRJIT_VReg index, uint8_t scale, int32_t disp,
+    uint32_t width_bits, bool sign_extend) {
+  if (builder == NULL ||
+      (scale != 1 && scale != 2 && scale != 4 && scale != 8))
+    return GRJIT_ERR_INVALID;
+  GRJIT_Op op = blank(sign_extend ? GRJIT_OP_LOAD_S : GRJIT_OP_LOAD);
+  op.dst = dst;
+  op.a = grjit_operand_vreg(base);
+  op.index = grjit_operand_vreg(index);
+  op.scale = scale;
+  op.disp = disp;
+  op.width = width_bits;
+  return append(builder, &op, NULL, 0, NULL, NULL, 0);
+}
+
+GRJIT_Result grjit_builder_store_indexed(GRJIT_Builder * builder,
+    GRJIT_VReg base, GRJIT_VReg index, uint8_t scale, int32_t disp,
+    uint32_t width_bits, GRJIT_Operand value) {
+  if (builder == NULL ||
+      (scale != 1 && scale != 2 && scale != 4 && scale != 8))
+    return GRJIT_ERR_INVALID;
+  GRJIT_Op op = blank(GRJIT_OP_STORE);
+  op.a = grjit_operand_vreg(base);
+  op.index = grjit_operand_vreg(index);
+  op.scale = scale;
   op.b = value;
   op.disp = disp;
   op.width = width_bits;
@@ -483,11 +575,14 @@ GRJIT_Result grjit_builder_call(GRJIT_Builder * builder, GRJIT_VReg dst,
 }
 
 GRJIT_Result grjit_builder_set_callable(
-    GRJIT_Builder * builder, const GRJIT_CallHooks * hooks) {
+    GRJIT_Builder * builder, const GRJIT_CallHooks * hooks,
+    size_t result_count) {
   if (builder == NULL || hooks == NULL) {
     return GRJIT_ERR_INVALID;
   }
+  if (result_count > GRJIT_BUILDER_MAX_ARGS) return GRJIT_ERR_LIMIT;
   builder->function->callable = true;
+  builder->function->declared_result_count = result_count;
   builder->function->hooks = *hooks;
   return GRJIT_OK;
 }
@@ -509,8 +604,24 @@ GRJIT_Result grjit_builder_call_slot(GRJIT_Builder * builder, GRJIT_VReg dst,
   if (builder == NULL) {
     return GRJIT_ERR_INVALID;
   }
+  const GRJIT_VReg result = dst;
+  return grjit_builder_call_slot_results(builder,
+      dst == GRJIT_NO_VREG ? NULL : &result, dst == GRJIT_NO_VREG ? 0 : 1,
+      slot_address, callee, args, arg_count, identity, state_slots, state_count,
+      exit_identity, exit_slots, exit_count);
+}
+
+GRJIT_Result grjit_builder_call_slot_results(GRJIT_Builder * builder,
+    const GRJIT_VReg * results, size_t result_count, uint64_t slot_address,
+    uint64_t callee, const GRJIT_Operand * args, size_t arg_count,
+    GRCORE_PollIdentity identity, const GRJIT_FrameSlot * state_slots,
+    size_t state_count, GRCORE_PollIdentity exit_identity,
+    const GRJIT_FrameSlot * exit_slots, size_t exit_count) {
+  if (builder == NULL || (result_count != 0 && results == NULL)) return GRJIT_ERR_INVALID;
   GRJIT_Op op = blank(GRJIT_OP_CALL_SLOT);
-  op.dst = dst;
+  op.dst = result_count == 0 ? GRJIT_NO_VREG : results[0];
+  op.results = results;
+  op.result_count = result_count;
   op.address = slot_address;
   op.callee = callee;
   op.attr = GRJIT_CALL_GC_POINT;
@@ -533,8 +644,24 @@ GRJIT_Result grjit_builder_call_ptr(GRJIT_Builder * builder, GRJIT_VReg dst,
   if (builder == NULL) {
     return GRJIT_ERR_INVALID;
   }
+  const GRJIT_VReg result = dst;
+  return grjit_builder_call_ptr_results(builder,
+      dst == GRJIT_NO_VREG ? NULL : &result, dst == GRJIT_NO_VREG ? 0 : 1,
+      target, callee, args, arg_count, identity, state_slots, state_count,
+      exit_identity, exit_slots, exit_count);
+}
+
+GRJIT_Result grjit_builder_call_ptr_results(GRJIT_Builder * builder,
+    const GRJIT_VReg * results, size_t result_count, GRJIT_Operand target,
+    uint64_t callee, const GRJIT_Operand * args, size_t arg_count,
+    GRCORE_PollIdentity identity, const GRJIT_FrameSlot * state_slots,
+    size_t state_count, GRCORE_PollIdentity exit_identity,
+    const GRJIT_FrameSlot * exit_slots, size_t exit_count) {
+  if (builder == NULL || (result_count != 0 && results == NULL)) return GRJIT_ERR_INVALID;
   GRJIT_Op op = blank(GRJIT_OP_CALL_PTR);
-  op.dst = dst;
+  op.dst = result_count == 0 ? GRJIT_NO_VREG : results[0];
+  op.results = results;
+  op.result_count = result_count;
   op.a = target;
   op.callee = callee;
   op.attr = GRJIT_CALL_GC_POINT;
@@ -548,8 +675,165 @@ GRJIT_Result grjit_builder_call_ptr(GRJIT_Builder * builder, GRJIT_VReg dst,
       state_count, &exit_state, exit_slots, exit_count);
 }
 
+GRJIT_Result grjit_builder_call_slot_catch_results(GRJIT_Builder * builder,
+    const GRJIT_VReg * results, size_t result_count, uint64_t slot_address,
+    uint64_t callee, const GRJIT_Operand * args, size_t arg_count,
+    GRCORE_PollIdentity identity, const GRJIT_FrameSlot * state_slots,
+    size_t state_count, GRCORE_PollIdentity exit_identity,
+    const GRJIT_FrameSlot * exit_slots, size_t exit_count,
+    GRJIT_BlockId landing_block) {
+  if (builder == NULL || landing_block >= builder->function->block_count)
+    return GRJIT_ERR_INVALID;
+  GRJIT_Result r = grjit_builder_call_slot_results(builder, results, result_count,
+      slot_address, callee, args, arg_count, identity, state_slots, state_count,
+      exit_identity, exit_slots, exit_count);
+  if (r == GRJIT_OK)
+    builder->function->blocks[builder->current].ops[
+        builder->function->blocks[builder->current].count - 1].landing_target = landing_block;
+  return r;
+}
+
+GRJIT_Result grjit_builder_call_ptr_catch_results(GRJIT_Builder * builder,
+    const GRJIT_VReg * results, size_t result_count, GRJIT_Operand target,
+    uint64_t callee, const GRJIT_Operand * args, size_t arg_count,
+    GRCORE_PollIdentity identity, const GRJIT_FrameSlot * state_slots,
+    size_t state_count, GRCORE_PollIdentity exit_identity,
+    const GRJIT_FrameSlot * exit_slots, size_t exit_count,
+    GRJIT_BlockId landing_block) {
+  if (builder == NULL || landing_block >= builder->function->block_count)
+    return GRJIT_ERR_INVALID;
+  GRJIT_Result r = grjit_builder_call_ptr_results(builder, results, result_count,
+      target, callee, args, arg_count, identity, state_slots, state_count,
+      exit_identity, exit_slots, exit_count);
+  if (r == GRJIT_OK)
+    builder->function->blocks[builder->current].ops[
+        builder->function->blocks[builder->current].count - 1].landing_target = landing_block;
+  return r;
+}
+
+GRJIT_Result grjit_builder_call_slot_catch_results_env(
+    GRJIT_Builder * builder, const GRJIT_VReg * results, size_t result_count,
+    uint64_t slot_address, uint64_t callee, GRJIT_Operand environment,
+    const GRJIT_Operand * args, size_t arg_count,
+    GRCORE_PollIdentity identity, const GRJIT_FrameSlot * state_slots,
+    size_t state_count, GRCORE_PollIdentity exit_identity,
+    const GRJIT_FrameSlot * exit_slots, size_t exit_count,
+    GRJIT_BlockId landing_block) {
+  if (builder == NULL || landing_block >= builder->function->block_count)
+    return GRJIT_ERR_INVALID;
+  GRJIT_Result r = grjit_builder_call_slot_results_env(builder, results,
+      result_count, slot_address, callee, environment, args, arg_count,
+      identity, state_slots, state_count, exit_identity, exit_slots, exit_count);
+  if (r == GRJIT_OK) {
+    GRJIT_BlockInfo * block = &builder->function->blocks[builder->current];
+    block->ops[block->count - 1].landing_target = landing_block;
+  }
+  return r;
+}
+
+GRJIT_Result grjit_builder_call_slot_results_env(GRJIT_Builder * builder,
+    const GRJIT_VReg * results, size_t result_count, uint64_t slot_address,
+    uint64_t callee, GRJIT_Operand environment, const GRJIT_Operand * args,
+    size_t arg_count, GRCORE_PollIdentity identity,
+    const GRJIT_FrameSlot * state_slots, size_t state_count,
+    GRCORE_PollIdentity exit_identity, const GRJIT_FrameSlot * exit_slots,
+    size_t exit_count) {
+  GRJIT_Result r = grjit_builder_call_slot_results(builder, results, result_count,
+      slot_address, callee, args, arg_count, identity, state_slots, state_count,
+      exit_identity, exit_slots, exit_count);
+  if (r == GRJIT_OK) {
+    GRJIT_BlockInfo * block = &builder->function->blocks[builder->current];
+    block->ops[block->count - 1].environment = environment;
+  }
+  return r;
+}
+
+GRJIT_Result grjit_builder_call_slot_operand_results_env(
+    GRJIT_Builder * builder, const GRJIT_VReg * results, size_t result_count,
+    GRJIT_Operand slot_entry_address, uint64_t callee,
+    GRJIT_Operand environment, const GRJIT_Operand * args, size_t arg_count,
+    GRCORE_PollIdentity identity, const GRJIT_FrameSlot * state_slots,
+    size_t state_count, GRCORE_PollIdentity exit_identity,
+    const GRJIT_FrameSlot * exit_slots, size_t exit_count) {
+  if (slot_entry_address.kind != GRJIT_OPERAND_VREG &&
+      slot_entry_address.kind != GRJIT_OPERAND_IMM) return GRJIT_ERR_INVALID;
+  GRJIT_Result r = grjit_builder_call_slot_results_env(builder, results,
+      result_count, 1, callee, environment, args, arg_count, identity,
+      state_slots, state_count, exit_identity, exit_slots, exit_count);
+  if (r == GRJIT_OK) {
+    GRJIT_BlockInfo * block = &builder->function->blocks[builder->current];
+    GRJIT_Op * op = &block->ops[block->count - 1];
+    op->address = 0;
+    op->a = slot_entry_address;
+  }
+  return r;
+}
+
+GRJIT_Result grjit_builder_call_ptr_results_env(GRJIT_Builder * builder,
+    const GRJIT_VReg * results, size_t result_count, GRJIT_Operand target,
+    uint64_t callee, GRJIT_Operand environment, const GRJIT_Operand * args,
+    size_t arg_count, GRCORE_PollIdentity identity,
+    const GRJIT_FrameSlot * state_slots, size_t state_count,
+    GRCORE_PollIdentity exit_identity, const GRJIT_FrameSlot * exit_slots,
+    size_t exit_count) {
+  GRJIT_Result r = grjit_builder_call_ptr_results(builder, results, result_count,
+      target, callee, args, arg_count, identity, state_slots, state_count,
+      exit_identity, exit_slots, exit_count);
+  if (r == GRJIT_OK) {
+    GRJIT_BlockInfo * block = &builder->function->blocks[builder->current];
+    block->ops[block->count - 1].environment = environment;
+  }
+  return r;
+}
+
+GRJIT_Result grjit_builder_call_ptr_catch_results_env(
+    GRJIT_Builder * builder, const GRJIT_VReg * results, size_t result_count,
+    GRJIT_Operand target, uint64_t callee, GRJIT_Operand environment,
+    const GRJIT_Operand * args, size_t arg_count,
+    GRCORE_PollIdentity identity, const GRJIT_FrameSlot * state_slots,
+    size_t state_count, GRCORE_PollIdentity exit_identity,
+    const GRJIT_FrameSlot * exit_slots, size_t exit_count,
+    GRJIT_BlockId landing_block) {
+  if (builder == NULL || landing_block >= builder->function->block_count)
+    return GRJIT_ERR_INVALID;
+  GRJIT_Result r = grjit_builder_call_ptr_results_env(builder, results,
+      result_count, target, callee, environment, args, arg_count,
+      identity, state_slots, state_count, exit_identity, exit_slots, exit_count);
+  if (r == GRJIT_OK) {
+    GRJIT_BlockInfo * block = &builder->function->blocks[builder->current];
+    block->ops[block->count - 1].landing_target = landing_block;
+  }
+  return r;
+}
+
+GRJIT_Result grjit_builder_call_slot_operand_catch_results_env(
+    GRJIT_Builder * builder, const GRJIT_VReg * results, size_t result_count,
+    GRJIT_Operand slot_entry_address, uint64_t callee,
+    GRJIT_Operand environment, const GRJIT_Operand * args, size_t arg_count,
+    GRCORE_PollIdentity identity, const GRJIT_FrameSlot * state_slots,
+    size_t state_count, GRCORE_PollIdentity exit_identity,
+    const GRJIT_FrameSlot * exit_slots, size_t exit_count,
+    GRJIT_BlockId landing_block) {
+  if (builder == NULL || landing_block >= builder->function->block_count ||
+      (slot_entry_address.kind != GRJIT_OPERAND_VREG &&
+          slot_entry_address.kind != GRJIT_OPERAND_IMM))
+    return GRJIT_ERR_INVALID;
+  GRJIT_Result r = grjit_builder_call_slot_catch_results_env(builder, results,
+      result_count, 1, callee, environment, args, arg_count, identity,
+      state_slots, state_count, exit_identity, exit_slots, exit_count,
+      landing_block);
+  if (r == GRJIT_OK) {
+    GRJIT_BlockInfo * block = &builder->function->blocks[builder->current];
+    GRJIT_Op * op = &block->ops[block->count - 1];
+    op->address = 0;
+    op->a = slot_entry_address;
+  }
+  return r;
+}
+
 GRJIT_Result grjit_builder_tail_call_slot(GRJIT_Builder * builder,
-    uint64_t slot_address, uint64_t callee, const GRJIT_Operand * args,
+    uint64_t slot_address, uint64_t callee, size_t result_count,
+    const GRJIT_Operand * args,
     size_t arg_count, GRCORE_PollIdentity identity,
     const GRJIT_FrameSlot * state_slots, size_t state_count) {
   if (builder == NULL) {
@@ -558,6 +842,7 @@ GRJIT_Result grjit_builder_tail_call_slot(GRJIT_Builder * builder,
   GRJIT_Op op = blank(GRJIT_OP_TAIL_CALL_SLOT);
   op.address = slot_address;
   op.callee = callee;
+  op.callee_result_count = result_count;
   op.attr = GRJIT_CALL_GC_POINT;
   op.site_kind = GRCORE_SITE_GC_POINT_FRAME_PUSH;
   GRJIT_FrameState state;
@@ -567,7 +852,8 @@ GRJIT_Result grjit_builder_tail_call_slot(GRJIT_Builder * builder,
 }
 
 GRJIT_Result grjit_builder_tail_call_ptr(GRJIT_Builder * builder,
-    GRJIT_Operand target, uint64_t callee, const GRJIT_Operand * args,
+    GRJIT_Operand target, uint64_t callee, size_t result_count,
+    const GRJIT_Operand * args,
     size_t arg_count, GRCORE_PollIdentity identity,
     const GRJIT_FrameSlot * state_slots, size_t state_count) {
   if (builder == NULL) {
@@ -576,12 +862,43 @@ GRJIT_Result grjit_builder_tail_call_ptr(GRJIT_Builder * builder,
   GRJIT_Op op = blank(GRJIT_OP_TAIL_CALL_PTR);
   op.a = target;
   op.callee = callee;
+  op.callee_result_count = result_count;
   op.attr = GRJIT_CALL_GC_POINT;
   op.site_kind = GRCORE_SITE_GC_POINT_FRAME_PUSH;
   GRJIT_FrameState state;
   memset(&state, 0, sizeof state);
   state.identity = identity;
   return append(builder, &op, args, arg_count, &state, state_slots, state_count);
+}
+
+GRJIT_Result grjit_builder_tail_call_slot_env(GRJIT_Builder * builder,
+    uint64_t slot_address, uint64_t callee, size_t result_count,
+    GRJIT_Operand environment,
+    const GRJIT_Operand * args, size_t arg_count,
+    GRCORE_PollIdentity identity, const GRJIT_FrameSlot * state_slots,
+    size_t state_count) {
+  GRJIT_Result r = grjit_builder_tail_call_slot(builder, slot_address, callee,
+      result_count, args, arg_count, identity, state_slots, state_count);
+  if (r == GRJIT_OK) {
+    GRJIT_BlockInfo * block = &builder->function->blocks[builder->current];
+    block->ops[block->count - 1].environment = environment;
+  }
+  return r;
+}
+
+GRJIT_Result grjit_builder_tail_call_ptr_env(GRJIT_Builder * builder,
+    GRJIT_Operand target, uint64_t callee, size_t result_count,
+    GRJIT_Operand environment,
+    const GRJIT_Operand * args, size_t arg_count,
+    GRCORE_PollIdentity identity, const GRJIT_FrameSlot * state_slots,
+    size_t state_count) {
+  GRJIT_Result r = grjit_builder_tail_call_ptr(builder, target, callee,
+      result_count, args, arg_count, identity, state_slots, state_count);
+  if (r == GRJIT_OK) {
+    GRJIT_BlockInfo * block = &builder->function->blocks[builder->current];
+    block->ops[block->count - 1].environment = environment;
+  }
+  return r;
 }
 
 GRJIT_Result grjit_builder_set_natives(
@@ -657,11 +974,52 @@ GRJIT_Result grjit_builder_br_if(GRJIT_Builder * builder, GRJIT_Operand cond,
   return append(builder, &op, NULL, 0, NULL, NULL, 0);
 }
 
+GRJIT_Result grjit_builder_br_table(GRJIT_Builder * builder,
+    GRJIT_Operand index, const GRJIT_BlockId * targets, size_t target_count,
+    GRJIT_BlockId default_target) {
+  if (builder == NULL || (target_count != 0 && targets == NULL)) {
+    return GRJIT_ERR_INVALID;
+  }
+  if (target_count > builder->limits.max_operations) {
+    return GRJIT_ERR_LIMIT;
+  }
+  GRJIT_Op op = blank(GRJIT_OP_BR_TABLE);
+  op.a = index;
+  op.targets = targets;
+  op.target_count = target_count;
+  op.default_target = default_target;
+  return append(builder, &op, NULL, 0, NULL, NULL, 0);
+}
+
+GRJIT_Result grjit_builder_trap(GRJIT_Builder * builder, GRJIT_TrapKind kind) {
+  if (builder == NULL) return GRJIT_ERR_INVALID;
+  GRJIT_Op op = blank(GRJIT_OP_TRAP);
+  op.trap_kind = kind;
+  return append(builder, &op, NULL, 0, NULL, NULL, 0);
+}
+
 GRJIT_Result grjit_builder_ret(GRJIT_Builder * builder, GRJIT_Operand value) {
   if (builder == NULL) {
     return GRJIT_ERR_INVALID;
   }
   GRJIT_Op op = blank(GRJIT_OP_RET);
   op.a = value;
+  if (value.kind != GRJIT_OPERAND_NONE) { op.returns = &value; op.result_count = 1; }
+  return append(builder, &op, NULL, 0, NULL, NULL, 0);
+}
+
+GRJIT_Result grjit_builder_ret_multi(GRJIT_Builder * builder,
+    const GRJIT_Operand * values, size_t value_count) {
+  if (builder == NULL || (value_count != 0 && values == NULL)) return GRJIT_ERR_INVALID;
+  GRJIT_Op op = blank(GRJIT_OP_RET);
+  op.a = value_count == 0 ? grjit_operand_none() : values[0];
+  op.returns = values;
+  op.result_count = value_count;
+  return append(builder, &op, NULL, 0, NULL, NULL, 0);
+}
+
+GRJIT_Result grjit_builder_rethrow(GRJIT_Builder * builder) {
+  if (builder == NULL) return GRJIT_ERR_INVALID;
+  GRJIT_Op op = blank(GRJIT_OP_RETHROW);
   return append(builder, &op, NULL, 0, NULL, NULL, 0);
 }

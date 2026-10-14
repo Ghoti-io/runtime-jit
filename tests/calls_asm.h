@@ -177,7 +177,8 @@ inline uint64_t sentinel_value(size_t i) {
 /* `regs` holds `fx::kSentinelCount` words: the values to load before the call, and,
  * after it, the registers as the call left them. */
 extern "C" uint32_t fx_call_with_sentinels(
-    GRJIT_EntryFn entry, void * ctx, const uint64_t * args, uint64_t * out, uint64_t * regs);
+    GRJIT_EntryFn entry, void * ctx, void * environment,
+    const uint64_t * args, uint64_t * out, uint64_t * regs);
 
 namespace fx {
 
@@ -204,7 +205,8 @@ uint32_t call_with_sentinels_and_check(E & e, int fn, std::vector<uint64_t> in, 
   }
   // Through a trampoline that sets the registers and reads them back: calling a callee that does
   // not preserve them directly would corrupt this very function, which is what the test is for.
-  const uint32_t exit = fx_call_with_sentinels(grjit_code_entry(code), e.ctx, in.data(), out.data(), regs);
+  const uint32_t exit = fx_call_with_sentinels(grjit_code_entry(code), e.ctx,
+      e.ctx, in.data(), out.data(), regs);
   for (size_t i = 0; i < kSentinelCount; i++) {
     EXPECT_EQ(regs[i], sentinel_value(i)) << sentinel_name(i) << " after " << what;
   }
@@ -229,23 +231,24 @@ fx_call_with_sentinels:
   push %r13
   push %r14
   push %r15
-  push %r8
+  push %r9
   mov %rdi, %rax
   mov %rsi, %rdi
   mov %rdx, %rsi
   mov %rcx, %rdx
-  mov 0(%r8), %rbx
-  mov 8(%r8), %r12
-  mov 16(%r8), %r13
-  mov 24(%r8), %r14
-  mov 32(%r8), %r15
+  mov %r8, %rcx
+  mov 0(%r9), %rbx
+  mov 8(%r9), %r12
+  mov 16(%r9), %r13
+  mov 24(%r9), %r14
+  mov 32(%r9), %r15
   call *%rax
-  pop %r8
-  mov %rbx, 0(%r8)
-  mov %r12, 8(%r8)
-  mov %r13, 16(%r8)
-  mov %r14, 24(%r8)
-  mov %r15, 32(%r8)
+  pop %r9
+  mov %rbx, 0(%r9)
+  mov %r12, 8(%r9)
+  mov %r13, 16(%r9)
+  mov %r14, 24(%r9)
+  mov %r15, 32(%r9)
   pop %r15
   pop %r14
   pop %r13
@@ -256,7 +259,7 @@ fx_call_with_sentinels:
   .size fx_call_with_sentinels, .-fx_call_with_sentinels
 )");
 #elif FX_ASM_WIN64
-/* rcx entry, rdx context, r8 args, r9 out, [rsp + 40] regs: rbx, rbp, rdi, rsi, r12-r15 at words 0 to 7 and
+/* rcx entry, rdx context, r8 environment, r9 args, [rsp + 40] out, [rsp + 48] regs: rbx, rbp, rdi, rsi, r12-r15 at words 0 to 7 and
  * the low halves of xmm6-xmm15 at 8 to 17. Everything after the call is addressed from `rsp`, which the
  * callee gives back, because `rbp` is a sentinel by then. The trampoline saves and restores every
  * callee-saved register itself, so that what the callee did not restore is the test's finding and not
@@ -274,7 +277,7 @@ fx_call_with_sentinels:
   pushq %r14
   pushq %r15
   subq $200, %rsp
-  movq 304(%rsp), %rax
+  movq 312(%rsp), %rax
   movq %rax, 32(%rsp)
   movups %xmm6, 40(%rsp)
   movups %xmm7, 56(%rsp)
@@ -290,6 +293,7 @@ fx_call_with_sentinels:
   movq %rdx, %rcx
   movq %r8, %rdx
   movq %r9, %r8
+  movq 304(%rsp), %r9
   movq 0(%rax), %rbx
   movq 8(%rax), %rbp
   movq 16(%rax), %rdi
@@ -350,7 +354,7 @@ fx_call_with_sentinels:
   ret
 )");
 #else
-/* x0 entry, x1 context, x2 args, x3 out, x4 regs: x19-x28 at words 0 to 9, x29 at 10,
+/* x0 entry, x1 context, x2 environment, x3 args, x4 out, x5 regs: x19-x28 at words 0 to 9, x29 at 10,
  * d8-d15 at 11 to 18. Everything after the call is addressed from `sp`, which the
  * callee gives back, because `x29` is a sentinel by then. */
 asm(R"(
@@ -369,25 +373,26 @@ fx_call_with_sentinels:
   stp d10, d11, [sp, #112]
   stp d12, d13, [sp, #128]
   stp d14, d15, [sp, #144]
-  str x4, [sp, #160]
+  str x5, [sp, #160]
   mov x16, x0
   mov x0, x1
   mov x1, x2
   mov x2, x3
-  ldp x19, x20, [x4, #0]
-  ldp x21, x22, [x4, #16]
-  ldp x23, x24, [x4, #32]
-  ldp x25, x26, [x4, #48]
-  ldp x27, x28, [x4, #64]
-  ldr d8, [x4, #88]
-  ldr d9, [x4, #96]
-  ldr d10, [x4, #104]
-  ldr d11, [x4, #112]
-  ldr d12, [x4, #120]
-  ldr d13, [x4, #128]
-  ldr d14, [x4, #136]
-  ldr d15, [x4, #144]
-  ldr x29, [x4, #80]
+  mov x3, x4
+  ldp x19, x20, [x5, #0]
+  ldp x21, x22, [x5, #16]
+  ldp x23, x24, [x5, #32]
+  ldp x25, x26, [x5, #48]
+  ldp x27, x28, [x5, #64]
+  ldr d8, [x5, #88]
+  ldr d9, [x5, #96]
+  ldr d10, [x5, #104]
+  ldr d11, [x5, #112]
+  ldr d12, [x5, #120]
+  ldr d13, [x5, #128]
+  ldr d14, [x5, #136]
+  ldr d15, [x5, #144]
+  ldr x29, [x5, #80]
   blr x16
   ldr x15, [sp, #160]
   stp x19, x20, [x15, #0]
@@ -618,10 +623,10 @@ grjit_test_status_garbage_three:
 #if FX_HAVE_CALLS_ASM && defined(FX_ASM_TAIL_GARBAGE)
 
 extern "C" {
-uint32_t (*grjit_test_real_tail)(void *, uint64_t, const uint64_t *, uint64_t) = nullptr;
+uint32_t (*grjit_test_real_tail)(void *, void *, uint64_t, const uint64_t *, uint64_t, uint64_t) = nullptr;
 /* Calls the real hook and returns what it returned in the low 32 bits with the high half
  * of the register set to garbage, as the ABI allows for a function returning 32 bits. */
-uint32_t grjit_test_tail_garbage(void *, uint64_t, const uint64_t *, uint64_t);
+uint32_t grjit_test_tail_garbage(void *, void *, uint64_t, const uint64_t *, uint64_t, uint64_t);
 }
 
 #if FX_ASM_X86_64
@@ -642,10 +647,17 @@ asm(".text\n"
 asm(".text\n"
     ".globl grjit_test_tail_garbage\n"
     "grjit_test_tail_garbage:\n"
-    "  subq $40, %rsp\n"
+    /* Six hook arguments: preserve the incoming fifth and sixth words while
+     * reserving shadow space for the nested call. At entry they are at +40/+48;
+     * after reserving 56 bytes they are at +96/+104. */
+    "  subq $56, %rsp\n"
+    "  movq 96(%rsp), %r10\n"
+    "  movq %r10, 32(%rsp)\n"
+    "  movq 104(%rsp), %r10\n"
+    "  movq %r10, 40(%rsp)\n"
     "  movq grjit_test_real_tail(%rip), %r11\n"
     "  call *%r11\n"
-    "  addq $40, %rsp\n"
+    "  addq $56, %rsp\n"
     "  movl %eax, %eax\n"
     "  movabsq $0x1357924600000000, %rcx\n"
     "  orq %rcx, %rax\n"
@@ -686,7 +698,7 @@ void * grjit_test_real_compile = nullptr;
 void * grjit_test_real_deopt = nullptr;
 void * grjit_test_real_poll = nullptr;
 void * grjit_test_real_entry = nullptr;
-uint32_t grjit_test_garbage_push(void *, uint64_t, const uint64_t *, uint64_t);
+uint32_t grjit_test_garbage_push(void *, void *, uint64_t, const uint64_t *, uint64_t, uint64_t);
 uint32_t grjit_test_garbage_compile(void *, uint64_t);
 uint32_t grjit_test_garbage_deopt(void *, uint64_t);
 uint32_t grjit_test_garbage_poll(void *, uint64_t, uint64_t);
@@ -713,10 +725,14 @@ uint32_t grjit_test_garbage_entry(void *);
   asm(".text\n"                                                                  \
       ".globl grjit_test_garbage_" #hook "\n"                                    \
       "grjit_test_garbage_" #hook ":\n"                                          \
-      "  subq $40, %rsp\n"                                                       \
+      "  subq $56, %rsp\n"                                                       \
+      "  movq 96(%rsp), %r10\n"                                                  \
+      "  movq %r10, 32(%rsp)\n"                                                  \
+      "  movq 104(%rsp), %r10\n"                                                 \
+      "  movq %r10, 40(%rsp)\n"                                                  \
       "  movq grjit_test_real_" #hook "(%rip), %r11\n"                           \
       "  call *%r11\n"                                                           \
-      "  addq $40, %rsp\n"                                                       \
+      "  addq $56, %rsp\n"                                                       \
       "  movl %eax, %eax\n"                                                      \
       "  movabsq $0x1357924600000000, %rcx\n"                                    \
       "  orq %rcx, %rax\n"                                                       \

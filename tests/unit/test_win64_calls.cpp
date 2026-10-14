@@ -468,20 +468,44 @@ TEST(Win64Calls, ACallableTwoResultSlotCallEmitsItsBufferAndReturnPath) {
   B b("multi-result-slot", 0);
   GRJIT_CallHooks h{};
   h.deopt = reinterpret_cast<decltype(h.deopt)>(uintptr_t{0x30300});
-  ASSERT_EQ(grjit_builder_set_callable(b.b, &h), GRJIT_OK);
+  ASSERT_EQ(grjit_builder_set_callable(b.b, &h, 1), GRJIT_OK);
   ASSERT_EQ(grjit_builder_set_token(b.b, 0x7788), GRJIT_OK);
   const auto a = b.reg();
   const auto c = b.reg();
   b.at(b.block());
   const GRJIT_VReg results[] = {a, c};
+  const GRJIT_Operand args[] = {I(0), I(1), I(2), I(3), I(4), I(5), I(6), I(7), I(8), I(9), I(10), I(11)};
   const GRCORE_PollIdentity id{1, 2};
   ASSERT_EQ(grjit_builder_call_slot_results(b.b, results, 2, 0x123400,
-                0x7789, nullptr, 0, id, nullptr, 0, id, nullptr, 0), GRJIT_OK);
+                0x7789, args, 12, id, nullptr, 0, id, nullptr, 0), GRJIT_OK);
   const GRJIT_Operand values[] = {V(a), V(c)};
   ASSERT_EQ(grjit_builder_ret_multi(b.b, values, 2), GRJIT_OK);
   Fn f(b.finish());
   Emit em(f.f);
   ASSERT_TRUE(em.ok());
+  GRJIT_CallableShape shape{};
+  grjit_callable_shape(f.f, GRJIT_WIN64_INTERNAL_REG_ARGS, &shape);
+  GRJIT_Asm expected{};
+  grjit_asm_init(&expected, grjit_allocator_default(), 32);
+  grjit_asm_load64(&expected, GRJIT_RAX, GRJIT_RBP,
+      GRJIT_ARGS_SLOT(grjit_function_vreg_count(f.f), shape.area_slots, shape.args_area));
+  grjit_asm_store64(&expected, GRJIT_RBP, grjit_emit_slot(c), GRJIT_RAX);
+  const Bytes second_result_copy(grjit_asm_bytes(&expected),
+      grjit_asm_bytes(&expected) + grjit_asm_size(&expected));
+  grjit_asm_free(&expected);
+  EXPECT_GT(em.count(second_result_copy, em.e.internal_offset, em.e.size), 0u)
+      << "the second call result is loaded from its buffer and stored in its vreg slot";
+  GRJIT_Asm buffer_arg{};
+  grjit_asm_init(&buffer_arg, grjit_allocator_default(), 16);
+  grjit_asm_lea(&buffer_arg, GRJIT_RAX, GRJIT_RBP,
+      GRJIT_ARGS_SLOT(grjit_function_vreg_count(f.f), shape.area_slots, shape.args_area));
+  grjit_asm_store64(&buffer_arg, GRJIT_RSP,
+      (int32_t)(8 * (12 - GRJIT_WIN64_INTERNAL_REG_ARGS)), GRJIT_RAX);
+  const Bytes outgoing_buffer_arg(grjit_asm_bytes(&buffer_arg),
+      grjit_asm_bytes(&buffer_arg) + grjit_asm_size(&buffer_arg));
+  grjit_asm_free(&buffer_arg);
+  EXPECT_GT(em.count(outgoing_buffer_arg, em.e.internal_offset, em.e.size), 0u)
+      << "the result-buffer pointer occupies the stack argument slot after 12 arguments";
   EXPECT_GT(em.e.size, 0u);
   bool call_site = false;
   for (size_t i = 0; i < em.e.meta.meta.site_count; i++)
@@ -497,7 +521,7 @@ TEST(Win64Calls, CatchCallHasSeparateLandingMetadataAndRethrowPath) {
   h.pop = reinterpret_cast<decltype(h.pop)>(uintptr_t{0x30320});
   h.compile = reinterpret_cast<decltype(h.compile)>(uintptr_t{0x30330});
   h.catch_exception = reinterpret_cast<decltype(h.catch_exception)>(uintptr_t{0x30340});
-  ASSERT_EQ(grjit_builder_set_callable(b.b, &h), GRJIT_OK);
+  ASSERT_EQ(grjit_builder_set_callable(b.b, &h, 1), GRJIT_OK);
   ASSERT_EQ(grjit_builder_set_token(b.b, 0x7788), GRJIT_OK);
   const auto body = b.block();
   const auto landing = b.block();
@@ -1162,7 +1186,10 @@ TEST(Win64CallsUnwind, RtlVirtualUnwindFromInsideANativeGoesUpThroughThreeFrames
   EXPECT_EQ(after.rbp, sentinel_value(1)) << "the adapter's pop gives rbp back: the caller's, not the marker";
   EXPECT_GE(after.rip, g_trampoline);
   EXPECT_LT(after.rip, g_trampoline + 1024);
-  EXPECT_EQ(after.rsp, adapter.rsp + 64 + 16) << "N' = 64 for two stack arguments: the allocation, the saved rbp and the return address";
+  const uint32_t incoming = stack_args(6);
+  const uint32_t adapter_frame = (incoming > 32 ? incoming : 32) + 48;
+  EXPECT_EQ(after.rsp, adapter.rsp + adapter_frame + 16)
+      << "the adapter allocation, saved rbp and return address";
   EXPECT_FALSE(after.found) << "the trampoline is assembly with no unwind information, where the walk stops";
   /* Each body frame's link and return address, as the unwinder recovered them. */
   for (size_t k = 0; k < 3; k++) {

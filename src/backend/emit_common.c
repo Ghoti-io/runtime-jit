@@ -65,7 +65,8 @@ void grjit_callable_shape(
     return;
   }
   /* Whole 16-byte units, so the stack stays 16-aligned across the call. */
-  out->incoming_bytes = grjit_stack_arg_bytes(f->param_count, reg_args);
+  size_t incoming_count = f->param_count;
+  out->has_result_buffer = grjit_function_result_count(f) > 1;
   for (size_t b = 0; b < f->block_count; b++) {
     for (size_t i = 0; i < f->blocks[b].count; i++) {
       const GRJIT_Op * op = &f->blocks[b].ops[i];
@@ -76,12 +77,17 @@ void grjit_callable_shape(
           out->args_area = op->arg_count;
         }
       }
+      if (!tail && (op->kind == GRJIT_OP_CALL_SLOT || op->kind == GRJIT_OP_CALL_PTR) &&
+          op->result_count > 1 && op->result_count - 1 > out->result_area) {
+        out->result_area = op->result_count - 1;
+      }
       if (tail) {
         /* The replacement writes down to `ra' = ra + in_A - in_T` (emit.c), and
          * the area, which holds the sources, must end at or below it: the area
          * ends `pad + vreg_count + 3` slots below the frame base and `ra'` is
          * `8 + in_A - in_T` above it. */
-        int64_t in_t = grjit_stack_arg_bytes(op->arg_count, reg_args);
+        int64_t in_t = grjit_stack_arg_bytes(op->arg_count +
+            (out->has_result_buffer ? 1u : 0u), reg_args);
         int64_t want = (in_t - (int64_t)out->incoming_bytes) / 8 - ((int64_t)f->vreg_count + 4);
 #if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 13
         /* Planted defect 13 (tests only): no padding, so the staging area
@@ -94,7 +100,10 @@ void grjit_callable_shape(
       }
     }
   }
-  out->extra_slots = out->pad + out->args_area + (out->has_calls ? 1u : 0u);
+  if (out->has_result_buffer) incoming_count++;
+  out->incoming_bytes = grjit_stack_arg_bytes(incoming_count, reg_args);
+  out->area_slots = out->args_area + out->result_area;
+  out->extra_slots = out->pad + out->area_slots + (out->has_calls ? 1u : 0u);
 }
 
 void grjit_emit_add_site(GRJIT_EmitCommon * c, uint32_t offset,
@@ -127,6 +136,20 @@ void grjit_emit_add_site_for(GRJIT_EmitCommon * c, uint32_t offset,
   s->live_index = live_index;
   s->state = state;
   s->op = op;
+}
+
+void grjit_emit_add_exception_site(GRJIT_EmitCommon * c, uint32_t call_offset,
+    uint32_t landing_block) {
+  if (c->exception_site_count == c->exception_site_capacity) {
+    size_t cap = c->exception_site_capacity == 0 ? 4 : c->exception_site_capacity * 2;
+    GRJIT_ExceptionSitePending * p = c->allocator->realloc_fn(c->allocator->ctx,
+        c->exception_sites, cap * sizeof *p);
+    if (p == NULL) { c->error = GRJIT_ERR_OOM; return; }
+    c->exception_sites = p;
+    c->exception_site_capacity = cap;
+  }
+  c->exception_sites[c->exception_site_count++] =
+      (GRJIT_ExceptionSitePending){call_offset, landing_block, 0};
 }
 
 void grjit_emit_add_pending(GRJIT_EmitCommon * c, const GRJIT_Pending * p) {
@@ -165,5 +188,6 @@ void grjit_emit_common_free(GRJIT_EmitCommon * c) {
   }
   c->allocator->free_fn(c->allocator->ctx, c->sites);
   c->allocator->free_fn(c->allocator->ctx, c->pending);
+  c->allocator->free_fn(c->allocator->ctx, c->exception_sites);
   memset(c, 0, sizeof *c);
 }

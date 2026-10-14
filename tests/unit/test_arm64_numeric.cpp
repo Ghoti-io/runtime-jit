@@ -1033,8 +1033,9 @@ SimRun sim_function(const GRJIT_Function * f, JitWorld & w, std::vector<uint64_t
   cfg.size = e.size;
   cfg.stack_bytes = 1u << 18;
   cfg.args[0] = reinterpret_cast<uint64_t>(w.ctx);
-  cfg.args[1] = reinterpret_cast<uint64_t>(args.data());
-  cfg.args[2] = reinterpret_cast<uint64_t>(r.out.data());
+  cfg.args[1] = reinterpret_cast<uint64_t>(w.ctx);
+  cfg.args[2] = reinterpret_cast<uint64_t>(args.data());
+  cfg.args[3] = reinterpret_cast<uint64_t>(r.out.data());
   cfg.sigs = sigs;
   Cpu cpu;
   Result res = cpu.run(cfg);
@@ -1159,8 +1160,9 @@ TEST(Arm64Offsets, ManyFloatRegistersAreAddressedThroughTheRegisterFormAndEveryV
   cfg.code = e.bytes;
   cfg.size = e.size;
   cfg.args[0] = reinterpret_cast<uint64_t>(w.ctx);
-  cfg.args[1] = reinterpret_cast<uint64_t>(args.data());
-  cfg.args[2] = reinterpret_cast<uint64_t>(out.data());
+  cfg.args[1] = reinterpret_cast<uint64_t>(w.ctx);
+  cfg.args[2] = reinterpret_cast<uint64_t>(args.data());
+  cfg.args[3] = reinterpret_cast<uint64_t>(out.data());
   Cpu cpu;
   Result r = cpu.run(cfg);
   ASSERT_TRUE(r.ok) << r.error;

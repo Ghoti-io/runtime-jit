@@ -30,6 +30,11 @@ std::pair<GRJIT_Result, std::string> check(F body, size_t slots = 0) {
 }
 
 uint32_t poll_helper(void *, uint64_t, uint64_t) { return 0; }
+uint32_t verify_hook_push(void *, void *, uint64_t, const uint64_t *, uint64_t, uint64_t) { return 0; }
+void verify_hook_pop(void *) {}
+uint32_t verify_hook_compile(void *, uint64_t) { return 0; }
+uint32_t verify_hook_deopt(void *, uint64_t) { return 0; }
+uint32_t verify_hook_tail(void *, void *, uint64_t, const uint64_t *, uint64_t, uint64_t) { return 0; }
 
 } // namespace
 
@@ -43,6 +48,164 @@ TEST(Verify, AWellFormedFunctionPasses) {
   });
   EXPECT_EQ(r.first, GRJIT_OK) << r.second;
   EXPECT_EQ(r.second, "");
+}
+
+TEST(Verify, IndexedMemoryBuilderRejectsUnsupportedScaleImmediately) {
+  B b("bad-index-scale");
+  GRJIT_VReg base = b.param(GRJIT_TYPE_PTR);
+  GRJIT_VReg index = b.param(GRJIT_TYPE_I64);
+  GRJIT_VReg value = b.reg();
+  b.at(b.block());
+  EXPECT_EQ(grjit_builder_load_indexed(b.b, value, base, index, 3, 0, 64, false),
+      GRJIT_ERR_INVALID);
+  EXPECT_EQ(grjit_builder_store_indexed(b.b, base, index, 16, 0, 64, V(value)),
+      GRJIT_ERR_INVALID);
+  b.ret(I(0));
+  Fn f(b.finish());
+  std::string why;
+  EXPECT_EQ(verify(f, &why), GRJIT_OK) << why;
+}
+
+TEST(Verify, ReturnBlocksMustAgreeOnResultArity) {
+  B b("inconsistent-return-arity");
+  const auto condition = b.param(GRJIT_TYPE_I32);
+  const auto entry = b.block();
+  const auto one_result = b.block();
+  const auto no_results = b.block();
+  b.at(entry);
+  b.br_if(V(condition), one_result, no_results);
+  b.at(one_result);
+  b.ret(I(1));
+  b.at(no_results);
+  b.ret();
+  Fn f(b.finish());
+  std::string why;
+  EXPECT_EQ(verify(f, &why), GRJIT_ERR_INVALID);
+  EXPECT_NE(why.find("other returns"), std::string::npos) << why;
+}
+
+TEST(Verify, CallableReturnsMustMatchTheDeclaredResultSignature) {
+  B b("callable-result-signature");
+  GRJIT_CallHooks hooks{};
+  hooks.deopt = verify_hook_deopt;
+  ASSERT_EQ(grjit_builder_set_callable(b.b, &hooks, 1), GRJIT_OK);
+  b.at(b.block());
+  const GRJIT_Operand values[] = {I(1), I(2)};
+  ASSERT_EQ(grjit_builder_ret_multi(b.b, values, 2), GRJIT_OK);
+  Fn f(b.finish());
+  std::string why;
+  EXPECT_EQ(verify(f, &why), GRJIT_ERR_INVALID);
+  EXPECT_NE(why.find("callable declares 1 results"), std::string::npos) << why;
+}
+
+TEST(Verify, ConstantFailingGuardMakesFollowingReturnUnreachable) {
+  B b("unreachable-return-after-guard");
+  const GRJIT_VReg condition = b.param(GRJIT_TYPE_I32);
+  const GRJIT_VReg value = b.param(GRJIT_TYPE_I64);
+  const auto entry = b.block();
+  const auto guarded = b.block();
+  const auto value_return = b.block();
+  b.at(entry);
+  ASSERT_EQ(grjit_builder_br_if(b.b, V(condition), guarded, value_return), GRJIT_OK);
+  b.at(guarded);
+  ASSERT_EQ(grjit_builder_guard(b.b, I(0), GRCORE_PollIdentity{1, 1}, nullptr, 0), GRJIT_OK);
+  ASSERT_EQ(grjit_builder_ret(b.b, grjit_operand_none()), GRJIT_OK);
+  b.at(value_return);
+  ASSERT_EQ(grjit_builder_ret(b.b, V(value)), GRJIT_OK);
+  Fn f(b.finish());
+  std::string why;
+  EXPECT_EQ(verify(f, &why), GRJIT_OK) << why;
+}
+
+TEST(Verify, ReturnBlocksMustAgreeOnResultTypes) {
+  B b("inconsistent-return-type");
+  const GRJIT_VReg condition = b.param(GRJIT_TYPE_I32);
+  const GRJIT_VReg narrow = b.param(GRJIT_TYPE_I32);
+  const GRJIT_VReg wide = b.param(GRJIT_TYPE_I64);
+  const auto entry = b.block();
+  const auto left = b.block();
+  const auto right = b.block();
+  b.at(entry);
+  ASSERT_EQ(grjit_builder_br_if(b.b, V(condition), left, right), GRJIT_OK);
+  b.at(left);
+  ASSERT_EQ(grjit_builder_ret(b.b, V(narrow)), GRJIT_OK);
+  b.at(right);
+  ASSERT_EQ(grjit_builder_ret(b.b, V(wide)), GRJIT_OK);
+  Fn f(b.finish());
+  std::string why;
+  EXPECT_EQ(verify(f, &why), GRJIT_ERR_INVALID);
+  EXPECT_NE(why.find("return result 0 has a different type"), std::string::npos) << why;
+}
+
+TEST(Verify, TailCallDoesNotDisableTypeChecksBetweenReturnBlocks) {
+  B b("mixed-return-types-and-tail");
+  const GRJIT_VReg choose_return = b.param(GRJIT_TYPE_I32);
+  const GRJIT_VReg choose_wide = b.param(GRJIT_TYPE_I32);
+  const GRJIT_VReg narrow = b.param(GRJIT_TYPE_I32);
+  const GRJIT_VReg wide = b.param(GRJIT_TYPE_I64);
+  GRJIT_CallHooks hooks{};
+  hooks.push = verify_hook_push;
+  hooks.pop = verify_hook_pop;
+  hooks.compile = verify_hook_compile;
+  hooks.deopt = verify_hook_deopt;
+  hooks.tail = verify_hook_tail;
+  b.callable(hooks);
+  const auto entry = b.block();
+  const auto first_return = b.block();
+  const auto second_choice = b.block();
+  const auto second_return = b.block();
+  const auto tail = b.block();
+  b.at(entry);
+  ASSERT_EQ(grjit_builder_br_if(b.b, V(choose_return), first_return, second_choice), GRJIT_OK);
+  b.at(first_return);
+  ASSERT_EQ(grjit_builder_ret(b.b, V(narrow)), GRJIT_OK);
+  b.at(second_choice);
+  ASSERT_EQ(grjit_builder_br_if(b.b, V(choose_wide), second_return, tail), GRJIT_OK);
+  b.at(second_return);
+  ASSERT_EQ(grjit_builder_ret(b.b, V(wide)), GRJIT_OK);
+  b.at(tail);
+  const GRJIT_Operand args[] = {V(wide)};
+  ASSERT_EQ(grjit_builder_tail_call_slot(b.b, 0x1000, 99, 1, args, 1,
+      GRCORE_PollIdentity{1, 1}, nullptr, 0), GRJIT_OK);
+  Fn f(b.finish());
+  std::string why;
+  EXPECT_EQ(verify(f, &why), GRJIT_ERR_INVALID);
+  EXPECT_NE(why.find("return result 0 has a different type"), std::string::npos) << why;
+}
+
+TEST(Verify, F32ImmediateReturnMustFitItsWidth) {
+  B b("bad-f32-return");
+  b.at(b.block());
+  GRJIT_Operand bad = grjit_operand_f32_imm(0);
+  bad.imm = INT64_C(0x100000000);
+  ASSERT_EQ(grjit_builder_ret_multi(b.b, &bad, 1), GRJIT_OK);
+  Fn f(b.finish());
+  std::string why;
+  EXPECT_EQ(verify(f, &why), GRJIT_ERR_INVALID);
+  EXPECT_NE(why.find("f32 immediate"), std::string::npos) << why;
+}
+
+TEST(Verify, BranchTableRefusesUnknownTargets) {
+  B b("bad-br-table");
+  GRJIT_VReg index = b.param(GRJIT_TYPE_I32);
+  const auto entry = b.block();
+  b.at(entry);
+  const GRJIT_BlockId targets[] = {999};
+  ASSERT_EQ(grjit_builder_br_table(b.b, V(index), targets, 1, entry), GRJIT_OK);
+  Fn f(b.finish());
+  std::string why;
+  EXPECT_EQ(verify(f, &why), GRJIT_ERR_INVALID);
+  EXPECT_NE(why.find("br_table target 0 does not exist"), std::string::npos);
+}
+
+TEST(Verify, TrapRefusesUnknownKind) {
+  B b("bad-trap");
+  b.at(b.block());
+  ASSERT_EQ(grjit_builder_trap(b.b, static_cast<GRJIT_TrapKind>(999)), GRJIT_OK);
+  Fn f(b.finish());
+  std::string why;
+  EXPECT_EQ(verify(f, &why), GRJIT_ERR_INVALID);
+  EXPECT_NE(why.find("trap kind is invalid"), std::string::npos);
 }
 
 TEST(Verify, TheReasonIsWrittenOnlyWhenTheFunctionIsRefused) {

@@ -147,12 +147,17 @@ GRJIT_API GRJIT_Result grjit_builder_set_block(
  * exactly as before and may not contain `CALL_SLOT`, `CALL_PTR`, `TAIL_CALL_SLOT` or
  * `TAIL_CALL_PTR`. `hooks` is
  * copied; its `deopt` is required, and its other members as the function's
- * operations need (the verifier says which).
+ * operations need (the verifier says which). `result_count` is the callable's
+ * declared result shape, including when no return is reachable (for example,
+ * a function that always traps). Every reachable return and tail call must
+ * agree with it.
  *
- * @return ::GRJIT_OK, or ::GRJIT_ERR_INVALID for NULL.
+ * @return ::GRJIT_OK, ::GRJIT_ERR_INVALID for NULL, or ::GRJIT_ERR_LIMIT when
+ *   `result_count` exceeds the builder's result limit.
  */
 GRJIT_API GRJIT_Result grjit_builder_set_callable(
-    GRJIT_Builder * builder, const GRJIT_CallHooks * hooks);
+    GRJIT_Builder * builder, const GRJIT_CallHooks * hooks,
+    size_t result_count);
 
 /**
  * @brief Names a callable function for the engine's calls to it: the token a
@@ -282,6 +287,24 @@ GRJIT_API GRJIT_Result grjit_builder_load(GRJIT_Builder * builder,
 GRJIT_API GRJIT_Result grjit_builder_store(GRJIT_Builder * builder,
     GRJIT_VReg base, int32_t disp, uint32_t width_bits, GRJIT_Operand value);
 
+/** @brief `dst =` the active language environment/instance pointer passed to this entry.
+ * The environment is an opaque, stable, nonmoving host pointer for the duration of
+ * every compiled activation that receives it. It is not a GC root. */
+GRJIT_API GRJIT_Result grjit_builder_instance(GRJIT_Builder * builder,
+    GRJIT_VReg dst);
+
+/** @brief Indexed load/store address: base + index * scale + displacement.
+ * `base` is a PTR; `index` is I32 or I64. An I32 index is zero-extended to
+ * pointer width before multiplication. `scale` is a byte multiplier of 1, 2,
+ * 4 or 8. Address arithmetic wraps modulo pointer width; these operations do
+ * not add bounds checks or trap behavior. */
+GRJIT_API GRJIT_Result grjit_builder_load_indexed(GRJIT_Builder * builder,
+    GRJIT_VReg dst, GRJIT_VReg base, GRJIT_VReg index, uint8_t scale,
+    int32_t disp, uint32_t width_bits, bool sign_extend);
+GRJIT_API GRJIT_Result grjit_builder_store_indexed(GRJIT_Builder * builder,
+    GRJIT_VReg base, GRJIT_VReg index, uint8_t scale, int32_t disp,
+    uint32_t width_bits, GRJIT_Operand value);
+
 /**
  * @brief Calls the native helper at `address` with integer, pointer or float
  *   arguments (x86-64 SysV; the other backends refuse a float here).
@@ -316,6 +339,8 @@ GRJIT_API GRJIT_Result grjit_builder_call(GRJIT_Builder * builder,
  * Only in a callable function. The call loads the slot's entry word: compiled
  * code is called directly; an empty slot asks the `compile` hook; a refused
  * one exits. See ::GRJIT_CallHooks for the order and what each hook does.
+ * This convenience form explicitly inherits the active caller environment;
+ * use the `_env` form when the callee needs a different environment.
  *
  * @param dst The result register of any type, or ::GRJIT_NO_VREG for none.
  * @param slot_address The address of a `GRCORE_EntrySlot`'s `entry` word
@@ -338,6 +363,66 @@ GRJIT_API GRJIT_Result grjit_builder_call_slot(GRJIT_Builder * builder,
     GRCORE_PollIdentity exit_identity, const GRJIT_FrameSlot * exit_slots,
     size_t exit_count);
 
+/** Multi-result form of ::grjit_builder_call_slot. Results use the internal
+ * convention: result zero is in the return register; remaining words are
+ * copied from the call's result buffer. The buffer has `result_count - 1`
+ * words and is owned by the caller for the duration of the call. */
+GRJIT_API GRJIT_Result grjit_builder_call_slot_results(GRJIT_Builder * builder,
+    const GRJIT_VReg * results, size_t result_count, uint64_t slot_address,
+    uint64_t callee, const GRJIT_Operand * args, size_t arg_count,
+    GRCORE_PollIdentity identity, const GRJIT_FrameSlot * state_slots,
+    size_t state_count, GRCORE_PollIdentity exit_identity,
+    const GRJIT_FrameSlot * exit_slots, size_t exit_count);
+
+/** A matching exception enters `landing_block` with the caller's pre-call
+ * state restored. Call result registers are not assigned on this exceptional
+ * edge; they are assigned only when the callee returns normally. The landing
+ * block may also have ordinary control-flow predecessors, whose values are
+ * checked independently by the verifier. */
+GRJIT_API GRJIT_Result grjit_builder_call_slot_catch_results(GRJIT_Builder * builder,
+    const GRJIT_VReg * results, size_t result_count, uint64_t slot_address,
+    uint64_t callee, const GRJIT_Operand * args, size_t arg_count,
+    GRCORE_PollIdentity identity, const GRJIT_FrameSlot * state_slots,
+    size_t state_count, GRCORE_PollIdentity exit_identity,
+    const GRJIT_FrameSlot * exit_slots, size_t exit_count,
+    GRJIT_BlockId landing_block);
+
+/** Catching variant with an explicit callee environment. */
+GRJIT_API GRJIT_Result grjit_builder_call_slot_catch_results_env(
+    GRJIT_Builder * builder, const GRJIT_VReg * results, size_t result_count,
+    uint64_t slot_address, uint64_t callee, GRJIT_Operand environment,
+    const GRJIT_Operand * args, size_t arg_count,
+    GRCORE_PollIdentity identity, const GRJIT_FrameSlot * state_slots,
+    size_t state_count, GRCORE_PollIdentity exit_identity,
+    const GRJIT_FrameSlot * exit_slots, size_t exit_count,
+    GRJIT_BlockId landing_block);
+
+/** Variant that supplies the callee's opaque environment explicitly. */
+GRJIT_API GRJIT_Result grjit_builder_call_slot_results_env(GRJIT_Builder * builder,
+    const GRJIT_VReg * results, size_t result_count, uint64_t slot_address,
+    uint64_t callee, GRJIT_Operand environment, const GRJIT_Operand * args,
+    size_t arg_count, GRCORE_PollIdentity identity,
+    const GRJIT_FrameSlot * state_slots, size_t state_count,
+    GRCORE_PollIdentity exit_identity, const GRJIT_FrameSlot * exit_slots,
+    size_t exit_count);
+GRJIT_API GRJIT_Result grjit_builder_call_slot_operand_results_env(
+    GRJIT_Builder * builder, const GRJIT_VReg * results, size_t result_count,
+    GRJIT_Operand slot_entry_address, uint64_t callee,
+    GRJIT_Operand environment, const GRJIT_Operand * args, size_t arg_count,
+    GRCORE_PollIdentity identity, const GRJIT_FrameSlot * state_slots,
+    size_t state_count, GRCORE_PollIdentity exit_identity,
+    const GRJIT_FrameSlot * exit_slots, size_t exit_count);
+
+/** Dynamic-slot catching variant with an explicit callee environment. */
+GRJIT_API GRJIT_Result grjit_builder_call_slot_operand_catch_results_env(
+    GRJIT_Builder * builder, const GRJIT_VReg * results, size_t result_count,
+    GRJIT_Operand slot_entry_address, uint64_t callee,
+    GRJIT_Operand environment, const GRJIT_Operand * args, size_t arg_count,
+    GRCORE_PollIdentity identity, const GRJIT_FrameSlot * state_slots,
+    size_t state_count, GRCORE_PollIdentity exit_identity,
+    const GRJIT_FrameSlot * exit_slots, size_t exit_count,
+    GRJIT_BlockId landing_block);
+
 /**
  * @brief Calls a compiled function through a code pointer.
  *
@@ -356,6 +441,42 @@ GRJIT_API GRJIT_Result grjit_builder_call_ptr(GRJIT_Builder * builder,
     GRCORE_PollIdentity exit_identity, const GRJIT_FrameSlot * exit_slots,
     size_t exit_count);
 
+/** Multi-result form of ::grjit_builder_call_ptr; see
+ * ::grjit_builder_call_slot_results for the result-buffer convention. */
+GRJIT_API GRJIT_Result grjit_builder_call_ptr_results(GRJIT_Builder * builder,
+    const GRJIT_VReg * results, size_t result_count, GRJIT_Operand target,
+    uint64_t callee, const GRJIT_Operand * args, size_t arg_count,
+    GRCORE_PollIdentity identity, const GRJIT_FrameSlot * state_slots,
+    size_t state_count, GRCORE_PollIdentity exit_identity,
+    const GRJIT_FrameSlot * exit_slots, size_t exit_count);
+
+GRJIT_API GRJIT_Result grjit_builder_call_ptr_catch_results(GRJIT_Builder * builder,
+    const GRJIT_VReg * results, size_t result_count, GRJIT_Operand target,
+    uint64_t callee, const GRJIT_Operand * args, size_t arg_count,
+    GRCORE_PollIdentity identity, const GRJIT_FrameSlot * state_slots,
+    size_t state_count, GRCORE_PollIdentity exit_identity,
+    const GRJIT_FrameSlot * exit_slots, size_t exit_count,
+    GRJIT_BlockId landing_block);
+
+/** Catching variant with an explicit callee environment. */
+GRJIT_API GRJIT_Result grjit_builder_call_ptr_catch_results_env(
+    GRJIT_Builder * builder, const GRJIT_VReg * results, size_t result_count,
+    GRJIT_Operand target, uint64_t callee, GRJIT_Operand environment,
+    const GRJIT_Operand * args, size_t arg_count,
+    GRCORE_PollIdentity identity, const GRJIT_FrameSlot * state_slots,
+    size_t state_count, GRCORE_PollIdentity exit_identity,
+    const GRJIT_FrameSlot * exit_slots, size_t exit_count,
+    GRJIT_BlockId landing_block);
+
+/** Variant that supplies the callee's opaque environment explicitly. */
+GRJIT_API GRJIT_Result grjit_builder_call_ptr_results_env(GRJIT_Builder * builder,
+    const GRJIT_VReg * results, size_t result_count, GRJIT_Operand target,
+    uint64_t callee, GRJIT_Operand environment, const GRJIT_Operand * args,
+    size_t arg_count, GRCORE_PollIdentity identity,
+    const GRJIT_FrameSlot * state_slots, size_t state_count,
+    GRCORE_PollIdentity exit_identity, const GRJIT_FrameSlot * exit_slots,
+    size_t exit_count);
+
 /**
  * @brief A tail call through an entry slot: ends the block.
  *
@@ -367,7 +488,10 @@ GRJIT_API GRJIT_Result grjit_builder_call_ptr(GRJIT_Builder * builder,
  * that the arguments suit the callee or that its result suits this function's
  * callers: what a tail call is held to at run time is the callee's token and
  * parameter count, which the slot's binding checks, and agreement of types is the
- * engine's compiler's, as for a call.
+ * engine's compiler's, as for a call. `result_count` is the callee's result
+ * arity; it must match this function's other return paths and the target's entry
+ * signature. The tail hook receives it and must refuse a target whose result
+ * arity differs.
  *
  * @param slot_address The address of a `GRCORE_EntrySlot`'s `entry` word.
  * @param callee The engine's token for the callee, passed to the hooks.
@@ -380,23 +504,37 @@ GRJIT_API GRJIT_Result grjit_builder_call_ptr(GRJIT_Builder * builder,
  *   ::GRJIT_ERR_OOM.
  */
 GRJIT_API GRJIT_Result grjit_builder_tail_call_slot(GRJIT_Builder * builder,
-    uint64_t slot_address, uint64_t callee, const GRJIT_Operand * args,
+    uint64_t slot_address, uint64_t callee, size_t result_count,
+    const GRJIT_Operand * args,
     size_t arg_count, GRCORE_PollIdentity identity,
     const GRJIT_FrameSlot * state_slots, size_t state_count);
+GRJIT_API GRJIT_Result grjit_builder_tail_call_slot_env(GRJIT_Builder * builder,
+    uint64_t slot_address, uint64_t callee, size_t result_count,
+    GRJIT_Operand environment,
+    const GRJIT_Operand * args, size_t arg_count,
+    GRCORE_PollIdentity identity, const GRJIT_FrameSlot * state_slots,
+    size_t state_count);
 
 /**
  * @brief A tail call through a code pointer: ends the block.
  *
  * `target` is a `ptr` register or a non-null immediate holding the internal entry
  * of registered compiled code, checked at run time as for
- * ::grjit_builder_call_ptr (registered, not retired, tagged with `callee`'s token
- * and this call's argument count); a target that fails is an exit. Otherwise as
+ * ::grjit_builder_call_ptr (registered, not retired, tagged with `callee`'s token,
+ * argument count, and `result_count`); a target that fails is an exit. Otherwise as
  * ::grjit_builder_tail_call_slot.
  */
 GRJIT_API GRJIT_Result grjit_builder_tail_call_ptr(GRJIT_Builder * builder,
-    GRJIT_Operand target, uint64_t callee, const GRJIT_Operand * args,
+    GRJIT_Operand target, uint64_t callee, size_t result_count,
+    const GRJIT_Operand * args,
     size_t arg_count, GRCORE_PollIdentity identity,
     const GRJIT_FrameSlot * state_slots, size_t state_count);
+GRJIT_API GRJIT_Result grjit_builder_tail_call_ptr_env(GRJIT_Builder * builder,
+    GRJIT_Operand target, uint64_t callee, size_t result_count,
+    GRJIT_Operand environment,
+    const GRJIT_Operand * args, size_t arg_count,
+    GRCORE_PollIdentity identity, const GRJIT_FrameSlot * state_slots,
+    size_t state_count);
 
 /**
  * @brief Calls the registered native `id` (natives.h): a GC point, and no exit to
@@ -449,9 +587,31 @@ GRJIT_API GRJIT_Result grjit_builder_br(
 GRJIT_API GRJIT_Result grjit_builder_br_if(GRJIT_Builder * builder,
     GRJIT_Operand cond, GRJIT_BlockId then_block, GRJIT_BlockId else_block);
 
+/** @brief Terminates the block with an unsigned multi-way branch.
+ * `index` must be an I32/I64 vreg or an unsigned immediate. An immediate is
+ * interpreted as its unsigned 64-bit value; values outside the table select
+ * `default_target`. */
+GRJIT_API GRJIT_Result grjit_builder_br_table(GRJIT_Builder * builder,
+    GRJIT_Operand index, const GRJIT_BlockId * targets, size_t target_count,
+    GRJIT_BlockId default_target);
+
+/** @brief Terminates with a typed Wasm trap exit. */
+GRJIT_API GRJIT_Result grjit_builder_trap(GRJIT_Builder * builder,
+    GRJIT_TrapKind kind);
+
 /** @brief Return `value`, or nothing for ::grjit_operand_none. */
 GRJIT_API GRJIT_Result grjit_builder_ret(
     GRJIT_Builder * builder, GRJIT_Operand value);
+
+/** Return zero or several typed values. The first value uses the ordinary
+ * return register; subsequent values are written to the caller's result buffer. */
+GRJIT_API GRJIT_Result grjit_builder_ret_multi(
+    GRJIT_Builder * builder, const GRJIT_Operand * values, size_t value_count);
+
+/** @brief Propagate the engine's pending guest exception to the caller.
+ * An uncaught rethrow reaches the public entry as ::GRJIT_EXIT_EXCEPTION;
+ * the engine then cleans up the guest activations that remain on its stack. */
+GRJIT_API GRJIT_Result grjit_builder_rethrow(GRJIT_Builder * builder);
 
 #ifdef __cplusplus
 }

@@ -333,14 +333,15 @@ TEST(Arm64Calls, TheStackPointerIsMovedOnlyByThePrologueTheEpilogueAndTheArgumen
   EXPECT_GT(movers, 5000u);
 }
 
-TEST(Arm64Calls, TheTagIsTheMagicAndTheParameterCountThenTheTokenOnASixteenByteBoundaryBeforeTheInternalEntry) {
+TEST(Arm64Calls, TheTagIsTheMagicAndTheSignatureThenTheTokenOnASixteenByteBoundaryBeforeTheInternalEntry) {
   for_every_callable_function([&](const GRJIT_Emitted & e, const GRJIT_Function * f, unsigned id, const char * family) {
     ASSERT_GE(e.internal_offset, 16u) << family << " " << id;
     ASSERT_LE(e.internal_offset, e.size);
     EXPECT_EQ(e.internal_offset % 16, 0u) << family << " " << id << ": the code starts on a page, so the entry is aligned";
     uint64_t tag[2];
     std::memcpy(tag, e.bytes + e.internal_offset - 16, sizeof tag);
-    EXPECT_EQ(tag[0], (uint64_t{0x4752494E} << 32) | f->param_count) << family << " " << id;
+    EXPECT_EQ(tag[0], GRJIT_ENTRY_TAG_WORD(f->param_count,
+        grjit_function_result_count(f))) << family << " " << id;
     EXPECT_EQ(tag[1], f->token) << family << " " << id;
     // The padding between the adapter and the tag is trap words, so a branch into it never executes it.
     size_t pad = e.internal_offset - 16;
@@ -372,6 +373,105 @@ TEST(Arm64Calls, TheTagIsTheMagicAndTheParameterCountThenTheTokenOnASixteenByteB
       EXPECT_FALSE(i.writes_sp) << family << " " << id << ": sp moves before the stack check";
     }
   });
+}
+
+TEST(Arm64Calls, ACallableTwoResultSlotCallEmitsItsBufferAndReturnPath) {
+  B b("multi-result-slot", 0);
+  GRJIT_CallHooks h{};
+  h.deopt = reinterpret_cast<decltype(h.deopt)>(uintptr_t{0x30300});
+  ASSERT_EQ(grjit_builder_set_callable(b.b, &h, 1), GRJIT_OK);
+  ASSERT_EQ(grjit_builder_set_token(b.b, 0x7788), GRJIT_OK);
+  const auto a = b.reg();
+  const auto c = b.reg();
+  const auto block = b.block();
+  b.at(block);
+  const GRJIT_VReg results[] = {a, c};
+  const GRJIT_Operand args[] = {I(0), I(1), I(2), I(3), I(4), I(5), I(6), I(7), I(8), I(9), I(10), I(11)};
+  const GRCORE_PollIdentity id{1, 2};
+  ASSERT_EQ(grjit_builder_call_slot_results(b.b, results, 2, 0x123400,
+                0x7789, args, 12, id, nullptr, 0, id, nullptr, 0), GRJIT_OK);
+  const GRJIT_Operand values[] = {V(a), V(c)};
+  ASSERT_EQ(grjit_builder_ret_multi(b.b, values, 2), GRJIT_OK);
+  Fn f(b.finish());
+  GRJIT_Emitted e{};
+  ASSERT_EQ(grjit_emit_for(GRJIT_ARCH_ARM64, f.f, grjit_allocator_default(), nullptr,
+                nullptr, kRequestOffset, &e), GRJIT_OK);
+  EXPECT_GT(e.size, 0u);
+  GRJIT_CallableShape shape{};
+  grjit_callable_shape(f.f, GRJIT_ARM64_INTERNAL_REG_ARGS, &shape);
+  GRJIT_A64Asm expected{};
+  grjit_a64_init(&expected, grjit_allocator_default(), 32);
+  grjit_a64_load(&expected, GRJIT_A64_MEM_X64, GRJIT_A64_X10, GRJIT_A64_FP,
+      GRJIT_ARGS_SLOT(grjit_function_vreg_count(f.f), shape.area_slots, shape.args_area));
+  grjit_a64_store(&expected, GRJIT_A64_MEM_X64, GRJIT_A64_X10, GRJIT_A64_FP,
+      grjit_emit_slot(c));
+  bool copies_second_result = false;
+  for (size_t i = e.internal_offset; i + grjit_a64_size(&expected) <= e.size; i += 4) {
+    if (std::memcmp(e.bytes + i, grjit_a64_bytes(&expected), grjit_a64_size(&expected)) == 0) {
+      copies_second_result = true;
+      break;
+    }
+  }
+  grjit_a64_free(&expected);
+  EXPECT_TRUE(copies_second_result) << "the second call result is loaded from its buffer and stored in its vreg slot";
+  GRJIT_A64Asm buffer_arg{};
+  grjit_a64_init(&buffer_arg, grjit_allocator_default(), 16);
+  const int32_t buffer_offset = GRJIT_ARGS_SLOT(grjit_function_vreg_count(f.f), shape.area_slots, shape.args_area);
+  ASSERT_GT(buffer_offset, -4096);
+  ASSERT_LT(buffer_offset, 4096);
+  if (buffer_offset < 0) {
+    grjit_a64_sub_imm(&buffer_arg, GRJIT_A64_X10, GRJIT_A64_FP,
+        static_cast<uint32_t>(-buffer_offset), false);
+  } else {
+    grjit_a64_add_imm(&buffer_arg, GRJIT_A64_X10, GRJIT_A64_FP,
+        static_cast<uint32_t>(buffer_offset), false);
+  }
+  grjit_a64_store(&buffer_arg, GRJIT_A64_MEM_X64, GRJIT_A64_X10, GRJIT_A64_SP,
+      (int32_t)(8 * (12 - GRJIT_ARM64_INTERNAL_REG_ARGS)));
+  bool buffer_follows_stack_args = false;
+  for (size_t i = e.internal_offset; i + grjit_a64_size(&buffer_arg) <= e.size; i += 4) {
+    if (std::memcmp(e.bytes + i, grjit_a64_bytes(&buffer_arg), grjit_a64_size(&buffer_arg)) == 0) {
+      buffer_follows_stack_args = true;
+      break;
+    }
+  }
+  grjit_a64_free(&buffer_arg);
+  EXPECT_TRUE(buffer_follows_stack_args) << "the result-buffer pointer occupies the stack argument slot after 12 arguments";
+  bool call_site = false;
+  for (size_t i = 0; i < e.meta.meta.site_count; i++)
+    call_site = call_site || e.meta.meta.sites[i].kind == GRCORE_SITE_GC_POINT_CALL;
+  EXPECT_TRUE(call_site);
+  grjit_emitted_free(&e);
+}
+
+TEST(Arm64Calls, CatchCallHasSeparateLandingMetadataAndRethrowPath) {
+  B b("catch-edge", 0);
+  GRJIT_CallHooks h{};
+  h.deopt = reinterpret_cast<decltype(h.deopt)>(uintptr_t{0x30300});
+  h.push = reinterpret_cast<decltype(h.push)>(uintptr_t{0x30310});
+  h.pop = reinterpret_cast<decltype(h.pop)>(uintptr_t{0x30320});
+  h.compile = reinterpret_cast<decltype(h.compile)>(uintptr_t{0x30330});
+  h.catch_exception = reinterpret_cast<decltype(h.catch_exception)>(uintptr_t{0x30340});
+  ASSERT_EQ(grjit_builder_set_callable(b.b, &h, 1), GRJIT_OK);
+  ASSERT_EQ(grjit_builder_set_token(b.b, 0x7788), GRJIT_OK);
+  const auto body = b.block();
+  const auto landing = b.block();
+  b.at(body);
+  const GRCORE_PollIdentity id{1, 2};
+  ASSERT_EQ(grjit_builder_call_slot_catch_results(b.b, nullptr, 0, 0x123400,
+                0x7789, nullptr, 0, id, nullptr, 0, id, nullptr, 0, landing), GRJIT_OK);
+  ASSERT_EQ(grjit_builder_ret(b.b, grjit_operand_none()), GRJIT_OK);
+  b.at(landing);
+  ASSERT_EQ(grjit_builder_rethrow(b.b), GRJIT_OK);
+  Fn f(b.finish());
+  GRJIT_Emitted e{};
+  ASSERT_EQ(grjit_emit_for(GRJIT_ARCH_ARM64, f.f, grjit_allocator_default(), nullptr,
+                nullptr, kRequestOffset, &e), GRJIT_OK);
+  ASSERT_EQ(e.exception_site_count, 1u);
+  EXPECT_EQ(e.exception_sites[0].landing_block, landing);
+  EXPECT_LT(e.exception_sites[0].call_offset, e.size);
+  EXPECT_LT(e.exception_sites[0].landing_offset, e.size);
+  grjit_emitted_free(&e);
 }
 
 TEST(Arm64Calls, EveryAdrNamesASiteOrTheInternalEntryAndTheCellsTwoWordsAreStoredRightAfterIt) {

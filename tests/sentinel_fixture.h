@@ -199,7 +199,8 @@ inline SentinelRun run_with_sentinels(JitWorld & w, const GRJIT_Code * code, std
   for (size_t i = 0; i < fx::kSentinelCount; i++) {
     regs[i] = fx::sentinel_value(i);
   }
-  r.exit = fx_call_with_sentinels(grjit_code_entry(code), w.ctx, args.data(), r.out.data(), regs);
+  r.exit = fx_call_with_sentinels(grjit_code_entry(code), w.ctx, w.ctx,
+      args.data(), r.out.data(), regs);
   for (size_t i = 0; i < fx::kSentinelCount; i++) {
     if (regs[i] != fx::sentinel_value(i)) {
       r.intact = false;

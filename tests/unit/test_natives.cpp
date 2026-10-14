@@ -137,7 +137,7 @@ uint64_t call_c(size_t n, const void * fn, void * ctx, const uint64_t * a) {
 
 /* ---- A callable function the tests build without the fixture ------------------- */
 
-uint32_t h_unused_push(void *, uint64_t, const uint64_t *, uint64_t) { return 1; }
+uint32_t h_unused_push(void *, void *, uint64_t, const uint64_t *, uint64_t, uint64_t) { return 1; }
 void h_unused_pop(void *) {}
 uint32_t h_unused_compile(void *, uint64_t) { return 1; }
 long g_deopts = 0;
@@ -2792,7 +2792,7 @@ TEST(Natives, ATableFreedAfterTheCompileIsNotNeededByTheCodeAndTheNativeIsStillC
   std::vector<uint64_t> args = {9};
   std::vector<uint64_t> out(grjit_code_out_words(code), 0);
   g_calls = 0;
-  ASSERT_EQ(grjit_code_call(code, w.ctx, args.data(), out.data()), uint32_t{GRJIT_EXIT_RETURNED});
+  ASSERT_EQ(grjit_code_call(code, w.ctx, w.ctx, args.data(), out.data()), uint32_t{GRJIT_EXIT_RETURNED});
   const uint64_t a[3] = {9, 2, 9};
   EXPECT_EQ(out[0], call_c(3, sums()[3], w.ctx, a));
   EXPECT_EQ(g_calls, 2) << "the native ran, and so did the reference";

@@ -97,6 +97,10 @@ static void load_operand(GRJIT_Emit * e, GRJIT_Reg r, const GRJIT_Operand * o) {
   }
 }
 
+void grjit_emit_operand_load(GRJIT_Emit * e, GRJIT_Reg r, const GRJIT_Operand * o) {
+  load_operand(e, r, o);
+}
+
 static void store_result(GRJIT_Emit * e, GRJIT_VReg dst, GRJIT_Reg r) {
   grjit_asm_store64(&e->as, GRJIT_RBP, grjit_emit_slot(dst), r);
 }
@@ -136,7 +140,17 @@ static GRJIT_Cond cmp_cond(GRJIT_Cmp c) {
 
 static void emit_load(GRJIT_Emit * e, const GRJIT_Op * op, bool sign) {
   GRJIT_Asm * a = &e->as;
-  load_operand(e, GRJIT_RCX, &op->a);
+  if (op->index.kind == GRJIT_OPERAND_VREG) {
+    load_operand(e, GRJIT_RAX, &op->index);
+    for (unsigned s = 1; s < op->scale; s <<= 1) {
+      grjit_asm_alu_rr(a, GRJIT_ALU_ADD, GRJIT_RAX, GRJIT_RAX);
+    }
+    load_operand(e, GRJIT_R11, &op->a);
+    grjit_asm_alu_rr(a, GRJIT_ALU_ADD, GRJIT_R11, GRJIT_RAX);
+    grjit_asm_mov_rr(a, GRJIT_RCX, GRJIT_R11);
+  } else {
+    load_operand(e, GRJIT_RCX, &op->a);
+  }
   switch (op->width) {
     case 8:
       (sign ? grjit_asm_load8s : grjit_asm_load8u)(a, GRJIT_RAX, GRJIT_RCX, op->disp);
@@ -156,7 +170,17 @@ static void emit_load(GRJIT_Emit * e, const GRJIT_Op * op, bool sign) {
 
 static void emit_store(GRJIT_Emit * e, const GRJIT_Op * op) {
   GRJIT_Asm * a = &e->as;
-  load_operand(e, GRJIT_RCX, &op->a);
+  if (op->index.kind == GRJIT_OPERAND_VREG) {
+    load_operand(e, GRJIT_RCX, &op->index);
+    for (unsigned s = 1; s < op->scale; s <<= 1) {
+      grjit_asm_alu_rr(a, GRJIT_ALU_ADD, GRJIT_RCX, GRJIT_RCX);
+    }
+    load_operand(e, GRJIT_R11, &op->a);
+    grjit_asm_alu_rr(a, GRJIT_ALU_ADD, GRJIT_R11, GRJIT_RCX);
+    grjit_asm_mov_rr(a, GRJIT_RCX, GRJIT_R11);
+  } else {
+    load_operand(e, GRJIT_RCX, &op->a);
+  }
   load_operand(e, GRJIT_RAX, &op->b);
   switch (op->width) {
     case 8:
@@ -404,7 +428,8 @@ static GRJIT_Label emit_dispatch(
   if (slot) {
     GRJIT_Label slow = grjit_asm_label(a);
     GRJIT_Label back = grjit_asm_label(a);
-    grjit_asm_mov_ri(a, GRJIT_RAX, op->address);
+    if (op->address != 0) grjit_asm_mov_ri(a, GRJIT_RAX, op->address);
+    else load_operand(e, GRJIT_RAX, &op->a);
     grjit_asm_load64(a, GRJIT_RAX, GRJIT_RAX, 0);
     /* One compare tells compiled code (above one) from empty (zero) and from
      * refused (one). */
@@ -425,7 +450,9 @@ static GRJIT_Label emit_dispatch(
     grjit_asm_load64(a, C_ARG(e, 0), GRJIT_RBP, GRJIT_SLOT_CTX);
     grjit_asm_mov_rr(a, C_ARG(e, 1), GRJIT_RAX);
     grjit_asm_mov_ri(a, C_ARG(e, 2), op->callee);
-    grjit_asm_mov_ri(a, C_ARG(e, 3), n);
+    grjit_asm_mov_ri(a, C_ARG(e, 3), GRJIT_CALL_SIGNATURE(n,
+        op->kind == GRJIT_OP_TAIL_CALL_SLOT || op->kind == GRJIT_OP_TAIL_CALL_PTR
+            ? op->callee_result_count : op->result_count));
     grjit_asm_mov_ri(a, GRJIT_RAX, (uint64_t)(uintptr_t)grjit_call_target_ok);
     grjit_asm_call_r(a, GRJIT_RAX);
     grjit_asm_mov32_rr(a, GRJIT_RAX, GRJIT_RAX);
@@ -450,7 +477,7 @@ static void emit_stage_arguments(GRJIT_Emit * e, const GRJIT_Op * op) {
   const size_t regs = GRJIT_SHAPE_REGS(f, e->c.shape);
   for (size_t i = 0; i < op->arg_count; i++) {
     load_operand(e, GRJIT_RAX, &op->args[i]);
-    grjit_asm_store64(&e->as, GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.args_area, i), GRJIT_RAX);
+    grjit_asm_store64(&e->as, GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, i), GRJIT_RAX);
   }
 }
 
@@ -477,10 +504,22 @@ static void emit_guest_call(GRJIT_Emit * e, const GRJIT_Op * op) {
   /* The push: the callee's guest frame, counted as the interpreter counts it. */
   GRJIT_Label push_ret = grjit_asm_label(a);
   grjit_emit_store_walk_cell(e, push_ret);
-  grjit_asm_mov_rr(a, C_ARG(e, 0), GRJIT_RCX);
-  grjit_asm_mov_ri(a, C_ARG(e, 1), op->callee);
-  grjit_asm_lea(a, C_ARG(e, 2), GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.args_area, 0));
-  grjit_asm_mov_ri(a, C_ARG(e, 3), n);
+  grjit_asm_load64(a, C_ARG(e, 0), GRJIT_RBP, GRJIT_SLOT_CTX);
+  if (op->environment.kind == GRJIT_OPERAND_NONE)
+    grjit_asm_load64(a, C_ARG(e, 1), GRJIT_RBP, GRJIT_SLOT_ENV);
+  else
+    load_operand(e, C_ARG(e, 1), &op->environment);
+  grjit_asm_mov_ri(a, C_ARG(e, 2), op->callee);
+  grjit_asm_lea(a, C_ARG(e, 3), GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, 0));
+  if (e->win64) {
+    grjit_asm_mov_ri(a, GRJIT_RAX, n);
+    grjit_asm_store64(a, GRJIT_RSP, 32, GRJIT_RAX);
+    grjit_asm_mov_ri(a, GRJIT_RAX, op->result_count);
+    grjit_asm_store64(a, GRJIT_RSP, 40, GRJIT_RAX);
+  } else {
+    grjit_asm_mov_ri(a, C_ARG(e, 4), n);
+    grjit_asm_mov_ri(a, C_ARG(e, 5), op->result_count);
+  }
   grjit_asm_mov_ri(a, GRJIT_RAX, (uint64_t)(uintptr_t)f->hooks.push);
   grjit_asm_call_r(a, GRJIT_RAX);
   grjit_asm_bind(a, push_ret);
@@ -493,30 +532,75 @@ static void emit_guest_call(GRJIT_Emit * e, const GRJIT_Op * op) {
   /* The call. The stack arguments are pushed just before it and popped by the
    * callee, which keeps the stack 16-aligned (the area is whole 16-byte units). */
   const unsigned ireg = e->abi->internal->reg_args;
-  const uint32_t area = grjit_stack_arg_bytes(n, ireg);
+  const size_t call_args = n + (op->result_count > 1 ? 1u : 0u);
+  const uint32_t area = grjit_stack_arg_bytes(call_args, ireg);
   if (area != 0) {
     grjit_asm_sub_rsp(a, area);
     for (size_t i = ireg; i < n; i++) {
-      grjit_asm_load64(a, GRJIT_RAX, GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.args_area, i));
+      grjit_asm_load64(a, GRJIT_RAX, GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, i));
       grjit_asm_store64(a, GRJIT_RSP, (int32_t)(8 * (i - ireg)), GRJIT_RAX);
+    }
+    if (op->result_count > 1 && n >= ireg) {
+      grjit_asm_lea(a, GRJIT_RAX, GRJIT_RBP,
+          GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, e->c.shape.args_area));
+      grjit_asm_store64(a, GRJIT_RSP, (int32_t)(8 * (n - ireg)), GRJIT_RAX);
     }
   }
   for (size_t i = 0; i < n && i < ireg; i++) {
-    grjit_asm_load64(a, IARG(e, i), GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.args_area, i));
+    grjit_asm_load64(a, IARG(e, i), GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, i));
+  }
+  if (op->result_count > 1 && n < ireg) {
+    grjit_asm_lea(a, IARG(e, n), GRJIT_RBP,
+        GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, e->c.shape.args_area));
   }
   grjit_asm_load64(a, ICTX(e), GRJIT_RBP, GRJIT_SLOT_CTX);
+  /* The internal guest ABI carries a separate callee environment in r11.  The
+   * current call target inherits the caller environment; explicit target
+   * environments are staged by the call operation. */
+  if (op->environment.kind == GRJIT_OPERAND_NONE)
+    grjit_asm_load64(a, GRJIT_R11, GRJIT_RBP, GRJIT_SLOT_ENV);
+  else
+    load_operand(e, GRJIT_R11, &op->environment);
   grjit_asm_load64(a, GRJIT_RAX, GRJIT_RBP, entry_slot);
   grjit_asm_call_r(a, GRJIT_RAX);
   /* The return address is the site: this frame, with the callee running. */
   grjit_emit_add_site_for(&e->c, (uint32_t)grjit_asm_size(a),
       GRCORE_SITE_GC_POINT_CALL, st->identity, live + 1, op->state, op);
+  if (op->landing_target != GRJIT_NO_BLOCK) {
+    grjit_emit_add_exception_site(&e->c, (uint32_t)grjit_asm_size(a), op->landing_target);
+    GRJIT_Label not_exception = grjit_asm_label(a);
+    GRJIT_Label propagate_exception = grjit_asm_label(a);
+    grjit_asm_cmp_ri(a, ISTATUS(e), (int32_t)GRJIT_STATUS_EXCEPTION);
+    grjit_asm_jcc(a, GRJIT_COND_NE, not_exception);
+    grjit_asm_load64(a, C_ARG(e, 0), GRJIT_RBP, GRJIT_SLOT_CTX);
+    grjit_asm_load64(a, C_ARG(e, 1), GRJIT_RBP, GRJIT_SLOT_ENV);
+    grjit_asm_mov_ri(a, C_ARG(e, 2), op->callee);
+    grjit_asm_mov_ri(a, C_ARG(e, 3), op->landing_target);
+    grjit_asm_mov_ri(a, GRJIT_RAX, (uint64_t)(uintptr_t)f->hooks.catch_exception);
+    grjit_asm_call_r(a, GRJIT_RAX);
+    grjit_asm_test_rr(a, GRJIT_RAX, GRJIT_RAX);
+    grjit_asm_jcc(a, GRJIT_COND_NE, propagate_exception);
+    grjit_asm_mov_ri(a, ISTATUS(e), GRJIT_STATUS_RETURNED);
+    grjit_asm_jmp(a, e->blocks[op->landing_target]);
+    grjit_asm_bind(a, propagate_exception);
+    grjit_asm_mov_ri(a, ISTATUS(e), GRJIT_STATUS_EXCEPTION);
+    grjit_asm_jmp(a, e->ret_propagate);
+    grjit_asm_bind(a, not_exception);
+  }
   grjit_asm_test_rr(a, ISTATUS(e), ISTATUS(e));
   grjit_asm_jcc(a, GRJIT_COND_NE, e->ret_propagate);
-  if (op->dst != GRJIT_NO_VREG) {
+  if (op->result_count != 0) {
     if (dst_is_i32_reg(e, op->dst)) {
       grjit_asm_mov32_rr(a, GRJIT_RAX, GRJIT_RAX); /* the callee returned a word; an i32 is its low half */
     }
-    store_result(e, op->dst, GRJIT_RAX);
+    store_result(e, op->results[0], GRJIT_RAX);
+    for (size_t i = 1; i < op->result_count; i++) {
+      grjit_asm_load64(a, GRJIT_RAX, GRJIT_RBP,
+          GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots,
+              e->c.shape.args_area + i - 1));
+      if (dst_is_i32_reg(e, op->results[i])) grjit_asm_mov32_rr(a, GRJIT_RAX, GRJIT_RAX);
+      store_result(e, op->results[i], GRJIT_RAX);
+    }
   }
   /* The call is complete: pop the callee's guest frame. */
   grjit_asm_load64(a, C_ARG(e, 0), GRJIT_RBP, GRJIT_SLOT_CTX);
@@ -561,10 +645,22 @@ static void emit_tail_call(GRJIT_Emit * e, const GRJIT_Op * op) {
 
   GRJIT_Label hook_ret = grjit_asm_label(a);
   grjit_emit_store_walk_cell(e, hook_ret);
-  grjit_asm_mov_rr(a, C_ARG(e, 0), GRJIT_RCX);
-  grjit_asm_mov_ri(a, C_ARG(e, 1), op->callee);
-  grjit_asm_lea(a, C_ARG(e, 2), GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.args_area, 0));
-  grjit_asm_mov_ri(a, C_ARG(e, 3), n);
+  grjit_asm_load64(a, C_ARG(e, 0), GRJIT_RBP, GRJIT_SLOT_CTX);
+  if (op->environment.kind == GRJIT_OPERAND_NONE)
+    grjit_asm_load64(a, C_ARG(e, 1), GRJIT_RBP, GRJIT_SLOT_ENV);
+  else
+    load_operand(e, C_ARG(e, 1), &op->environment);
+  grjit_asm_mov_ri(a, C_ARG(e, 2), op->callee);
+  grjit_asm_lea(a, C_ARG(e, 3), GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, 0));
+  if (e->win64) {
+    grjit_asm_mov_ri(a, GRJIT_RAX, n);
+    grjit_asm_store64(a, GRJIT_RSP, 32, GRJIT_RAX);
+    grjit_asm_mov_ri(a, GRJIT_RAX, op->callee_result_count);
+    grjit_asm_store64(a, GRJIT_RSP, 40, GRJIT_RAX);
+  } else {
+    grjit_asm_mov_ri(a, C_ARG(e, 4), n);
+    grjit_asm_mov_ri(a, C_ARG(e, 5), op->callee_result_count);
+  }
   grjit_asm_mov_ri(a, GRJIT_RAX, (uint64_t)(uintptr_t)f->hooks.tail);
   grjit_asm_call_r(a, GRJIT_RAX);
   grjit_asm_bind(a, hook_ret);
@@ -582,17 +678,22 @@ static void emit_tail_call(GRJIT_Emit * e, const GRJIT_Op * op) {
    * call, which no result shows and the stack pointer does. */
   {
     const unsigned ireg = e->abi->internal->reg_args;
-    const uint32_t area_bytes = grjit_stack_arg_bytes(n, ireg);
+    const uint32_t area_bytes = grjit_stack_arg_bytes(n + (e->c.shape.has_result_buffer ? 1u : 0u), ireg);
     if (area_bytes != 0) {
       grjit_asm_sub_rsp(a, area_bytes);
       for (size_t i = ireg; i < n; i++) {
-        grjit_asm_load64(a, GRJIT_RAX, GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.args_area, i));
+        grjit_asm_load64(a, GRJIT_RAX, GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, i));
         grjit_asm_store64(a, GRJIT_RSP, (int32_t)(8 * (i - ireg)), GRJIT_RAX);
+      }
+      if (e->c.shape.has_result_buffer) {
+        grjit_asm_load64(a, GRJIT_RAX, GRJIT_RBP, GRJIT_SLOT_ARGS);
+        grjit_asm_store64(a, GRJIT_RSP, (int32_t)(8 * (n - ireg)), GRJIT_RAX);
       }
     }
     for (size_t i = 0; i < n && i < ireg; i++) {
-      grjit_asm_load64(a, IARG(e, i), GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.args_area, i));
+      grjit_asm_load64(a, IARG(e, i), GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, i));
     }
+    if (e->c.shape.has_result_buffer && n < ireg) grjit_asm_load64(a, IARG(e, n), GRJIT_RBP, GRJIT_SLOT_ARGS);
     grjit_asm_load64(a, ICTX(e), GRJIT_RBP, GRJIT_SLOT_CTX);
     grjit_asm_load64(a, GRJIT_RAX, GRJIT_RBP, entry_slot);
     grjit_asm_call_r(a, GRJIT_RAX);
@@ -611,11 +712,15 @@ static void emit_tail_call(GRJIT_Emit * e, const GRJIT_Op * op) {
 #endif
   const GRJIT_Reg scratch = ISCRATCH(e);
   const int64_t in_a = e->c.shape.incoming_bytes;
-  const int64_t in_t = grjit_stack_arg_bytes(n, ireg);
+  const int64_t in_t = grjit_stack_arg_bytes(n + (e->c.shape.has_result_buffer ? 1u : 0u), ireg);
   const int32_t ra_new = (int32_t)(8 + in_a - in_t); /* `ra'`, from `rbp` */
   grjit_asm_load64(a, ICTX(e), GRJIT_RBP, GRJIT_SLOT_CTX);
   grjit_asm_load64(a, scratch, GRJIT_RBP, 8);
+  /* Stack arguments can cover the old saved-rbp word when the replacement
+   * callee needs more stack space than this function. Save that link just
+   * below the replacement rsp, where the callee's prologue will write it too. */
   grjit_asm_load64(a, GRJIT_RAX, GRJIT_RBP, 0);
+  grjit_asm_store64(a, GRJIT_RBP, ra_new - 8, GRJIT_RAX);
   size_t copy_to = n;
 #if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 11
   /* Planted defect 11 (tests only): the last stack argument is not copied, so
@@ -625,18 +730,28 @@ static void emit_tail_call(GRJIT_Emit * e, const GRJIT_Op * op) {
   }
 #endif
   for (size_t i = ireg; i < copy_to; i++) {
-    grjit_asm_load64(a, copy, GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.args_area, i));
+    grjit_asm_load64(a, copy, GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, i));
     grjit_asm_store64(a, GRJIT_RBP,
         (int32_t)(ra_new + 8 + 8 * (int64_t)(i - ireg)), copy);
   }
+  if (e->c.shape.has_result_buffer && n >= ireg) {
+    grjit_asm_load64(a, copy, GRJIT_RBP, GRJIT_SLOT_ARGS);
+    grjit_asm_store64(a, GRJIT_RBP,
+        (int32_t)(ra_new + 8 + 8 * (int64_t)(n - ireg)), copy);
+  }
   grjit_asm_store64(a, GRJIT_RBP, ra_new, scratch);
   for (size_t i = 0; i < n && i < ireg; i++) {
-    grjit_asm_load64(a, IARG(e, i), GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.args_area, i));
+    grjit_asm_load64(a, IARG(e, i), GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, i));
   }
-  grjit_asm_load64(a, scratch, GRJIT_RBP, entry_slot);
+  if (e->c.shape.has_result_buffer && n < ireg) grjit_asm_load64(a, IARG(e, n), GRJIT_RBP, GRJIT_SLOT_ARGS);
+  grjit_asm_load64(a, GRJIT_RAX, GRJIT_RBP, entry_slot);
+  if (op->environment.kind == GRJIT_OPERAND_NONE)
+    grjit_asm_load64(a, GRJIT_R11, GRJIT_RBP, GRJIT_SLOT_ENV);
+  else
+    load_operand(e, GRJIT_R11, &op->environment);
   grjit_asm_lea(a, GRJIT_RSP, GRJIT_RBP, ra_new);
-  grjit_asm_mov_rr(a, GRJIT_RBP, GRJIT_RAX);
-  grjit_asm_jmp_r(a, scratch);
+  grjit_asm_load64(a, GRJIT_RBP, GRJIT_RSP, -8);
+  grjit_asm_jmp_r(a, GRJIT_RAX);
 }
 
 /* A call to a registered native (AD-28, AD-17; natives.h for the contract). In
@@ -1725,6 +1840,10 @@ static void emit_float_op(GRJIT_Emit * e, const GRJIT_Op * op) {
 static void emit_op(GRJIT_Emit * e, const GRJIT_Op * op, size_t block) {
   GRJIT_Asm * a = &e->as;
   switch (op->kind) {
+    case GRJIT_OP_INSTANCE:
+      grjit_asm_load64(a, GRJIT_RAX, GRJIT_RBP, GRJIT_SLOT_ENV);
+      store_result(e, op->dst, GRJIT_RAX);
+      break;
     case GRJIT_OP_CONST:
     case GRJIT_OP_MOVE:
     case GRJIT_OP_BITCAST:
@@ -1837,23 +1956,64 @@ static void emit_op(GRJIT_Emit * e, const GRJIT_Op * op, size_t block) {
         grjit_asm_jmp(a, e->blocks[op->target_else]);
       }
       break;
+    case GRJIT_OP_BR_TABLE:
+      load_operand(e, GRJIT_RAX, &op->a);
+      grjit_asm_mov_ri(a, GRJIT_RCX, op->target_count);
+      grjit_asm_alu_rr(a, GRJIT_ALU_CMP, GRJIT_RAX, GRJIT_RCX);
+      grjit_asm_jcc(a, GRJIT_COND_AE, e->blocks[op->default_target]);
+      for (size_t i = 0; i < op->target_count; i++) {
+        grjit_asm_mov_ri(a, GRJIT_RCX, i);
+        grjit_asm_alu_rr(a, GRJIT_ALU_CMP, GRJIT_RAX, GRJIT_RCX);
+        grjit_asm_jcc(a, GRJIT_COND_E, e->blocks[op->targets[i]]);
+      }
+      grjit_asm_jmp(a, e->blocks[op->default_target]);
+      break;
+    case GRJIT_OP_TRAP:
+      grjit_asm_mov_ri(a, GRJIT_RAX, op->trap_kind);
+      if (e->c.callable) {
+        grjit_asm_mov_ri(a, ISTATUS(e), GRJIT_STATUS_TRAPPED);
+        grjit_emit_callable_epilogue(e);
+      } else {
+        grjit_asm_load64(a, GRJIT_RDX, GRJIT_RBP, GRJIT_SLOT_OUT);
+        grjit_asm_store64(a, GRJIT_RDX, 0, GRJIT_RAX);
+        grjit_asm_mov_ri(a, GRJIT_RAX, GRJIT_EXIT_TRAP);
+        grjit_emit_epilogue(e);
+      }
+      break;
+    case GRJIT_OP_RETHROW:
+      grjit_asm_mov_ri(a, GRJIT_RAX, 0);
+      grjit_asm_mov_ri(a, ISTATUS(e), GRJIT_STATUS_EXCEPTION);
+      grjit_emit_callable_epilogue(e);
+      break;
     case GRJIT_OP_RET:
       if (e->c.callable) {
         /* The internal convention: the result in rax (zero for none), the
          * status in rdx, and the callee pops its own stack arguments. */
-        if (op->a.kind != GRJIT_OPERAND_NONE) {
-          load_operand(e, GRJIT_RAX, &op->a);
-        } else {
-          grjit_asm_mov_ri(a, GRJIT_RAX, 0);
+        if (op->result_count > 1) {
+          grjit_asm_load64(a, GRJIT_RDX, GRJIT_RBP, GRJIT_SLOT_ARGS);
+          for (size_t i = 1; i < op->result_count; i++) {
+            load_operand(e, GRJIT_RAX, &op->returns[i]);
+            grjit_asm_store64(a, GRJIT_RDX, (int32_t)(8 * (i - 1)), GRJIT_RAX);
+          }
         }
+        if (op->result_count != 0) load_operand(e, GRJIT_RAX, &op->returns[0]);
+        else grjit_asm_mov_ri(a, GRJIT_RAX, 0);
         grjit_asm_mov_ri(a, ISTATUS(e), GRJIT_STATUS_RETURNED);
         grjit_emit_callable_epilogue(e);
         break;
       }
-      if (op->a.kind != GRJIT_OPERAND_NONE) {
-        load_operand(e, GRJIT_RAX, &op->a);
-        grjit_asm_load64(a, GRJIT_RDX, GRJIT_RBP, GRJIT_SLOT_OUT);
-        grjit_asm_store64(a, GRJIT_RDX, 0, GRJIT_RAX);
+      if (op->result_count != 0) {
+        if (op->result_count == 1) {
+          load_operand(e, GRJIT_RAX, &op->returns[0]);
+          grjit_asm_load64(a, GRJIT_RDX, GRJIT_RBP, GRJIT_SLOT_OUT);
+          grjit_asm_store64(a, GRJIT_RDX, 0, GRJIT_RAX);
+        } else {
+          grjit_asm_load64(a, GRJIT_RDX, GRJIT_RBP, GRJIT_SLOT_OUT);
+          for (size_t i = 0; i < op->result_count; i++) {
+            load_operand(e, GRJIT_RAX, &op->returns[i]);
+            grjit_asm_store64(a, GRJIT_RDX, (int32_t)(8 * i), GRJIT_RAX);
+          }
+        }
       }
       grjit_asm_mov_ri(a, GRJIT_RAX, GRJIT_EXIT_RETURNED);
       grjit_emit_epilogue(e);
@@ -2015,10 +2175,11 @@ static void emit_adapter(GRJIT_Emit * e) {
   GRJIT_Label done = grjit_asm_label(a);
   grjit_asm_push(a, GRJIT_RBP);
   grjit_asm_mov_rr(a, GRJIT_RBP, GRJIT_RSP);
-  grjit_asm_sub_rsp(a, 32);
-  grjit_asm_store64(a, GRJIT_RSP, 24, C_ARG(e, 2)); /* out */
-  grjit_asm_store64(a, GRJIT_RSP, 16, C_ARG(e, 0)); /* context */
-  grjit_asm_store64(a, GRJIT_RSP, 8, C_ARG(e, 1));  /* args */
+  grjit_asm_sub_rsp(a, 48);
+  grjit_asm_store64(a, GRJIT_RSP, 32, C_ARG(e, 3)); /* out */
+  grjit_asm_store64(a, GRJIT_RSP, 8, C_ARG(e, 0));  /* context */
+  grjit_asm_store64(a, GRJIT_RSP, 16, C_ARG(e, 1)); /* environment */
+  grjit_asm_store64(a, GRJIT_RSP, 24, C_ARG(e, 2)); /* args */
 #if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 9
   /* Planted defect 9 (tests only): a callee-saved register is used and never
    * restored. The caller's own value must survive the call. */
@@ -2032,7 +2193,7 @@ static void emit_adapter(GRJIT_Emit * e) {
     grjit_asm_test_rr(a, GRJIT_RAX, GRJIT_RAX);
     grjit_asm_jcc(a, GRJIT_COND_NE, e->refuse);
   }
-  grjit_asm_load64(a, scratch, GRJIT_RSP, 8);
+  grjit_asm_load64(a, scratch, GRJIT_RSP, 24);
   if (in_bytes != 0) {
     grjit_asm_sub_rsp(a, in_bytes);
     for (size_t i = ireg; i < params; i++) {
@@ -2043,14 +2204,21 @@ static void emit_adapter(GRJIT_Emit * e) {
   for (size_t i = 0; i < params && i < ireg; i++) {
     grjit_asm_load64(a, IARG(e, i), scratch, (int32_t)(8 * i));
   }
-  grjit_asm_load64(a, ICTX(e), GRJIT_RSP, (int32_t)(in_bytes + 16));
+  if (e->c.shape.has_result_buffer) {
+    grjit_asm_load64(a, GRJIT_RAX, GRJIT_RSP, 32);
+    grjit_asm_lea(a, GRJIT_RAX, GRJIT_RAX, 8);
+    if (params < ireg) grjit_asm_mov_rr(a, IARG(e, params), GRJIT_RAX);
+    else grjit_asm_store64(a, GRJIT_RSP, (int32_t)(8 * (params - ireg)), GRJIT_RAX);
+  }
+  grjit_asm_load64(a, ICTX(e), GRJIT_RSP, (int32_t)(in_bytes + 8));
+  grjit_asm_load64(a, GRJIT_R11, GRJIT_RSP, (int32_t)(in_bytes + 16));
   grjit_asm_mov_ri64(a, GRJIT_RBP, (uint64_t)GRCORE_COMPILED_CHAIN_END);
   grjit_asm_lea_rip(a, GRJIT_RAX, e->internal);
   grjit_asm_call_r(a, GRJIT_RAX);
   /* rsp is where it was after the frame was made: the callee popped the stack
    * arguments. */
-  grjit_asm_load64(a, GRJIT_RCX, GRJIT_RSP, 24);
-  grjit_asm_load64(a, GRJIT_R8, GRJIT_RSP, 16);
+  grjit_asm_load64(a, GRJIT_RCX, GRJIT_RSP, 32);
+  grjit_asm_load64(a, GRJIT_R8, GRJIT_RSP, 8);
   grjit_asm_alu_rr(a, GRJIT_ALU_XOR, GRJIT_R9, GRJIT_R9);
   grjit_asm_store64(a, GRJIT_R8, (int32_t)e->c.walk_cell_offset, GRJIT_R9);
   grjit_asm_store64(a, GRJIT_R8, (int32_t)e->c.walk_cell_offset + 8, GRJIT_R9);
@@ -2064,22 +2232,32 @@ static void emit_adapter(GRJIT_Emit * e) {
   grjit_asm_bind(a, deopted);
   grjit_asm_store64(a, GRJIT_RCX, 0, GRJIT_RAX);
   grjit_asm_mov_ri(a, GRJIT_RAX, GRJIT_EXIT_DEOPT);
+  GRJIT_Label not_trap = grjit_asm_label(a);
+  grjit_asm_cmp_ri(a, status, (int32_t)GRJIT_STATUS_TRAPPED);
+  grjit_asm_jcc(a, GRJIT_COND_NE, not_trap);
+  grjit_asm_mov_ri(a, GRJIT_RAX, GRJIT_EXIT_TRAP);
+  grjit_asm_bind(a, not_trap);
   /* FAILED: the engine's hook refused the rebuild; out[0] is its answer. */
   GRJIT_Label not_failed = grjit_asm_label(a);
   grjit_asm_cmp_ri(a, status, (int32_t)GRJIT_STATUS_FAILED);
   grjit_asm_jcc(a, GRJIT_COND_NE, not_failed);
   grjit_asm_mov_ri(a, GRJIT_RAX, GRJIT_EXIT_REBUILD_FAILED);
   grjit_asm_bind(a, not_failed);
+  GRJIT_Label not_exception = grjit_asm_label(a);
+  grjit_asm_cmp_ri(a, status, (int32_t)GRJIT_STATUS_EXCEPTION);
+  grjit_asm_jcc(a, GRJIT_COND_NE, not_exception);
+  grjit_asm_mov_ri(a, GRJIT_RAX, GRJIT_EXIT_EXCEPTION);
+  grjit_asm_bind(a, not_exception);
   grjit_asm_bind(a, done);
-  grjit_asm_add_rsp(a, 32);
+  grjit_asm_add_rsp(a, 48);
   grjit_asm_pop(a, GRJIT_RBP);
   grjit_asm_ret(a);
   /* The entry hook refused (eax is its answer). */
   grjit_asm_bind(a, e->refuse);
-  grjit_asm_load64(a, GRJIT_RCX, GRJIT_RSP, 24);
+  grjit_asm_load64(a, GRJIT_RCX, GRJIT_RSP, 32);
   grjit_asm_store64(a, GRJIT_RCX, 0, GRJIT_RAX);
   grjit_asm_mov_ri(a, GRJIT_RAX, GRJIT_EXIT_REFUSED);
-  grjit_asm_add_rsp(a, 32);
+  grjit_asm_add_rsp(a, 48);
   grjit_asm_pop(a, GRJIT_RBP);
   grjit_asm_ret(a);
 }
@@ -2111,8 +2289,9 @@ static void emit_adapter_win64(GRJIT_Emit * e) {
   const GRJIT_Reg scratch = ISCRATCH(e);
   const GRJIT_Reg status = ISTATUS(e);
   const uint32_t w = in_bytes > 32 ? in_bytes : 32;
-  const uint32_t frame = w + 32;
-  const int32_t s_out = (int32_t)w + 24, s_ctx = (int32_t)w + 16, s_args = (int32_t)w + 8;
+  const uint32_t frame = w + 48;
+  const int32_t s_ctx = (int32_t)w + 8, s_env = (int32_t)w + 16;
+  const int32_t s_args = (int32_t)w + 24, s_out = (int32_t)w + 32;
   GRJIT_Label deopted = grjit_asm_label(a);
   GRJIT_Label done = grjit_asm_label(a);
   grjit_asm_push(a, GRJIT_RBP);
@@ -2120,9 +2299,10 @@ static void emit_adapter_win64(GRJIT_Emit * e) {
   grjit_asm_sub_rsp(a, frame);
   e->prologue.adapter_alloc_end = (uint32_t)grjit_asm_size(a);
   e->prologue.adapter_alloc_bytes = frame;
-  grjit_asm_store64(a, GRJIT_RSP, s_out, C_ARG(e, 2));
+  grjit_asm_store64(a, GRJIT_RSP, s_out, C_ARG(e, 3));
   grjit_asm_store64(a, GRJIT_RSP, s_ctx, C_ARG(e, 0));
-  grjit_asm_store64(a, GRJIT_RSP, s_args, C_ARG(e, 1));
+  grjit_asm_store64(a, GRJIT_RSP, s_env, C_ARG(e, 1));
+  grjit_asm_store64(a, GRJIT_RSP, s_args, C_ARG(e, 2));
 #if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 9
   /* Planted defect 9 (tests only): callee-saved registers of Win64 are used and never
    * restored. The caller's own values must survive the call. */
@@ -2145,7 +2325,14 @@ static void emit_adapter_win64(GRJIT_Emit * e) {
   for (size_t i = 0; i < params && i < ireg; i++) {
     grjit_asm_load64(a, IARG(e, i), scratch, (int32_t)(8 * i));
   }
+  if (e->c.shape.has_result_buffer) {
+    grjit_asm_load64(a, GRJIT_RAX, GRJIT_RSP, s_out);
+    grjit_asm_lea(a, GRJIT_RAX, GRJIT_RAX, 8);
+    if (params < ireg) grjit_asm_mov_rr(a, IARG(e, params), GRJIT_RAX);
+    else grjit_asm_store64(a, GRJIT_RSP, (int32_t)(8 * (params - ireg)), GRJIT_RAX);
+  }
   grjit_asm_load64(a, ICTX(e), GRJIT_RSP, s_ctx);
+  grjit_asm_load64(a, GRJIT_R11, GRJIT_RSP, s_env);
   grjit_asm_mov_ri64(a, GRJIT_RBP, (uint64_t)GRCORE_COMPILED_CHAIN_END);
   grjit_asm_lea_rip(a, GRJIT_RAX, e->internal);
   grjit_asm_call_r(a, GRJIT_RAX);
@@ -2163,11 +2350,21 @@ static void emit_adapter_win64(GRJIT_Emit * e) {
   grjit_asm_bind(a, deopted);
   grjit_asm_store64(a, GRJIT_RCX, 0, GRJIT_RAX);
   grjit_asm_mov_ri(a, GRJIT_RAX, GRJIT_EXIT_DEOPT);
+  GRJIT_Label not_trap = grjit_asm_label(a);
+  grjit_asm_cmp_ri(a, status, (int32_t)GRJIT_STATUS_TRAPPED);
+  grjit_asm_jcc(a, GRJIT_COND_NE, not_trap);
+  grjit_asm_mov_ri(a, GRJIT_RAX, GRJIT_EXIT_TRAP);
+  grjit_asm_bind(a, not_trap);
   GRJIT_Label not_failed = grjit_asm_label(a);
   grjit_asm_cmp_ri(a, status, (int32_t)GRJIT_STATUS_FAILED);
   grjit_asm_jcc(a, GRJIT_COND_NE, not_failed);
   grjit_asm_mov_ri(a, GRJIT_RAX, GRJIT_EXIT_REBUILD_FAILED);
   grjit_asm_bind(a, not_failed);
+  GRJIT_Label not_exception = grjit_asm_label(a);
+  grjit_asm_cmp_ri(a, status, (int32_t)GRJIT_STATUS_EXCEPTION);
+  grjit_asm_jcc(a, GRJIT_COND_NE, not_exception);
+  grjit_asm_mov_ri(a, GRJIT_RAX, GRJIT_EXIT_EXCEPTION);
+  grjit_asm_bind(a, not_exception);
   grjit_asm_bind(a, done);
   grjit_asm_add_rsp(a, frame - in_bytes);
   grjit_asm_pop(a, GRJIT_RBP);
@@ -2202,7 +2399,8 @@ static GRJIT_Result emit_callable(const GRJIT_Function * f, GRJIT_Emit * e,
   while (a->status == GRJIT_ASM_OK && (grjit_asm_size(a) + GRJIT_ENTRY_TAG_BYTES) % 16 != 0) {
     grjit_asm_raw(a, &trap, 1);
   }
-  const uint64_t tag[2] = {GRJIT_ENTRY_TAG_WORD(f->param_count), f->token};
+  const uint64_t tag[2] = {GRJIT_ENTRY_TAG_WORD(f->param_count,
+      grjit_function_result_count(f)), f->token};
   grjit_asm_raw(a, tag, sizeof tag);
   grjit_asm_bind(a, e->internal);
   e->internal_offset = (uint32_t)grjit_asm_size(a);
@@ -2248,7 +2446,15 @@ static GRJIT_Result emit_callable(const GRJIT_Function * f, GRJIT_Emit * e,
   grjit_asm_mov_rr(a, GRJIT_R12, GRJIT_R10);
 #endif
   grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_CTX, ICTX(e));
+  grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_ENV, GRJIT_R11);
   const unsigned ireg = e->abi->internal->reg_args;
+  if (f->param_count < ireg) {
+    if (e->c.shape.has_result_buffer) grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_ARGS, IARG(e, f->param_count));
+  } else {
+    grjit_asm_load64(a, GRJIT_RAX, GRJIT_RBP,
+        (int32_t)(16 + 8 * (f->param_count - ireg)));
+    if (e->c.shape.has_result_buffer) grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_ARGS, GRJIT_RAX);
+  }
   for (size_t i = 0; i < f->param_count; i++) {
     if (i < ireg) {
       if (dst_is_i32_reg(e, (GRJIT_VReg)i)) {
@@ -2341,14 +2547,16 @@ GRJIT_Result grjit_emit_function(const GRJIT_Function * f,
   e->prologue.alloc_end = (uint32_t)grjit_asm_size(a);
   e->prologue.alloc_bytes = alloc;
   if (win64) {
-    /* Microsoft x64: context in rcx, args in rdx, out in r8. */
+    /* Microsoft x64: context, environment, args, out. */
     grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_CTX, GRJIT_RCX);
-    grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_OUT, GRJIT_R8);
-    grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_ARGS, GRJIT_RDX);
+    grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_ENV, GRJIT_RDX);
+    grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_ARGS, GRJIT_R8);
+    grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_OUT, GRJIT_R9);
   } else {
     grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_CTX, GRJIT_RDI);
-    grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_OUT, GRJIT_RDX);
-    grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_ARGS, GRJIT_RSI);
+    grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_ENV, GRJIT_RSI);
+    grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_ARGS, GRJIT_RDX);
+    grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_OUT, GRJIT_RCX);
   }
   if (hook != NULL) {
     grjit_asm_mov_ri(a, GRJIT_RAX, (uint64_t)(uintptr_t)hook);
@@ -2403,6 +2611,9 @@ finish:
       return GRJIT_ERR_INTERNAL;
   }
   grjit_emit_sort_sites(&e->c);
+  for (size_t i = 0; i < e->c.exception_site_count; i++)
+    e->c.exception_sites[i].landing_offset = (uint32_t)grjit_asm_label_offset(a,
+        e->blocks[e->c.exception_sites[i].landing_block]);
   return GRJIT_OK;
 }
 

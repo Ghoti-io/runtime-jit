@@ -59,32 +59,71 @@ static void add_use(void * user, GRJIT_VReg v) {
   }
 }
 
-static void successors(const GRJIT_Function * f, const GRJIT_BlockInfo * b,
-    GRJIT_BlockId out[2], size_t * count) {
-  *count = 0;
+static void union_successors(const GRJIT_Function * f, const GRJIT_BlockInfo * b,
+    const uint64_t * live_in, size_t words, uint64_t * out) {
   if (b->count == 0) {
     return;
   }
   const GRJIT_Op * last = &b->ops[b->count - 1];
   if (last->kind == GRJIT_OP_BR && last->target < f->block_count) {
-    out[(*count)++] = last->target;
+    for (size_t w = 0; w < words; w++) out[w] |= live_in[last->target * words + w];
   } else if (last->kind == GRJIT_OP_BR_IF) {
     if (last->target < f->block_count) {
-      out[(*count)++] = last->target;
+      for (size_t w = 0; w < words; w++) out[w] |= live_in[last->target * words + w];
     }
     if (last->target_else < f->block_count) {
-      out[(*count)++] = last->target_else;
+      for (size_t w = 0; w < words; w++) out[w] |= live_in[last->target_else * words + w];
+    }
+  } else if (last->kind == GRJIT_OP_BR_TABLE) {
+    if (last->default_target < f->block_count) {
+      for (size_t w = 0; w < words; w++) out[w] |= live_in[last->default_target * words + w];
+    }
+    for (size_t t = 0; t < last->target_count; t++) {
+      if (last->targets[t] < f->block_count) {
+        for (size_t w = 0; w < words; w++) out[w] |= live_in[last->targets[t] * words + w];
+      }
     }
   }
 }
 
+static void union_landing(const GRJIT_Function * f, const GRJIT_Op * op,
+    const uint64_t * live_in, size_t words, uint64_t * out) {
+  if (op->landing_target != GRJIT_NO_BLOCK && op->landing_target < f->block_count) {
+    for (size_t w = 0; w < words; w++)
+      out[w] |= live_in[op->landing_target * words + w];
+  }
+}
+
+/* A caught guest call can enter its landing block before any call result has
+ * been written. Preserve a prior REF/derived value in a result register when
+ * that landing block reads it. */
+static void preserve_catch_result_uses(const GRJIT_Function * f, const GRJIT_Op * op,
+    const uint64_t * live_in, size_t words, const uint32_t * index, uint64_t * out) {
+  if (op->landing_target == GRJIT_NO_BLOCK || op->landing_target >= f->block_count ||
+      (op->kind != GRJIT_OP_CALL_SLOT && op->kind != GRJIT_OP_CALL_PTR)) {
+    return;
+  }
+  const uint64_t * landing = &live_in[op->landing_target * words];
+  for (size_t i = 0; i < op->result_count; i++) {
+    const GRJIT_VReg result = op->results[i];
+    if (result < f->vreg_count && index[result] != UINT32_MAX &&
+        test_bit(landing, index[result])) {
+      set_bit(out, index[result]);
+    }
+  }
+}
+
+typedef struct DefClear { Ctx * c; uint64_t * live; } DefClear;
+static void clear_def(void * user, GRJIT_VReg def) {
+  DefClear * d = user;
+  if (def < d->c->f->vreg_count && d->c->index[def] != UINT32_MAX)
+    clear_bit(d->live, d->c->index[def]);
+}
+
 /* Applies one operation backward to `live`. */
 static void transfer(Ctx * c, const GRJIT_Op * op, uint64_t * live) {
-  GRJIT_VReg def = grjit_op_def(op);
-  if (def != GRJIT_NO_VREG && def < c->f->vreg_count &&
-      c->index[def] != UINT32_MAX) {
-    clear_bit(live, c->index[def]);
-  }
+  DefClear defs = {c, live};
+  grjit_op_visit_defs(op, clear_def, &defs);
   c->set = live;
   grjit_op_visit_uses(c->f, op, add_use, c);
 }
@@ -183,16 +222,10 @@ GRJIT_Result grjit_liveness_compute(const GRJIT_Function * f,
     changed = false;
     for (size_t bi = f->block_count; bi-- > 0;) {
       const GRJIT_BlockInfo * b = &f->blocks[bi];
-      GRJIT_BlockId succ[2];
-      size_t sn;
-      successors(f, b, succ, &sn);
       memset(cur, 0, words * sizeof *cur);
-      for (size_t s = 0; s < sn; s++) {
-        for (size_t w = 0; w < words; w++) {
-          cur[w] |= live_in[succ[s] * words + w];
-        }
-      }
+      union_successors(f, b, live_in, words, cur);
       for (size_t i = b->count; i-- > 0;) {
+        union_landing(f, &b->ops[i], live_in, words, cur);
         transfer(&c, &b->ops[i], cur);
       }
       if (memcmp(cur, &live_in[bi * words], words * sizeof *cur) != 0) {
@@ -210,15 +243,8 @@ GRJIT_Result grjit_liveness_compute(const GRJIT_Function * f,
     size_t fill = 0;
     for (size_t bi = 0; bi < f->block_count; bi++) {
       const GRJIT_BlockInfo * b = &f->blocks[bi];
-      GRJIT_BlockId succ[2];
-      size_t sn;
-      successors(f, b, succ, &sn);
       memset(cur, 0, words * sizeof *cur);
-      for (size_t s = 0; s < sn; s++) {
-        for (size_t w = 0; w < words; w++) {
-          cur[w] |= live_in[succ[s] * words + w];
-        }
-      }
+      union_successors(f, b, live_in, words, cur);
       /* Sites in a block are met backward; their slots in `sites` are in
        * forward order, so count the block's sites to place them. */
       size_t block_sites = 0;
@@ -230,10 +256,15 @@ GRJIT_Result grjit_liveness_compute(const GRJIT_Function * f,
       size_t slot = at + block_sites;
       for (size_t i = b->count; i-- > 0;) {
         const GRJIT_Op * op = &b->ops[i];
+        union_landing(f, op, live_in, words, cur);
         if (pass == 0 && !out->base_redefined) {
           /* `cur` is what is live after this operation. */
-          GRJIT_VReg def = grjit_op_def(op);
-          if (def != GRJIT_NO_VREG && def < f->vreg_count) {
+          size_t def_count = (op->kind == GRJIT_OP_CALL_SLOT || op->kind == GRJIT_OP_CALL_PTR)
+              ? op->result_count : 1;
+          for (size_t di = 0; di < def_count && !out->base_redefined; di++) {
+            GRJIT_VReg def = (op->kind == GRJIT_OP_CALL_SLOT || op->kind == GRJIT_OP_CALL_PTR)
+                ? op->results[di] : grjit_op_def(op);
+            if (def == GRJIT_NO_VREG || def >= f->vreg_count) continue;
             for (uint32_t d = first_derived[def]; d != UINT32_MAX;
                 d = next_derived[d]) {
               if (index[d] != UINT32_MAX && test_bit(cur, index[d])) {
@@ -327,15 +358,15 @@ GRJIT_Result grjit_liveness_compute(const GRJIT_Function * f,
                * state that names it names the value it held before, which is
                * still in its slot and must stay in the map. */
               memcpy(site_set, cur, words * sizeof *site_set);
-              GRJIT_VReg def = grjit_op_def(op);
-              if (def != GRJIT_NO_VREG && def < f->vreg_count &&
-                  index[def] != UINT32_MAX) {
-                clear_bit(site_set, index[def]);
-              }
+              DefClear defs = {&c, site_set};
+              grjit_op_visit_defs(op, clear_def, &defs);
               for (size_t w = 0; w < words; w++) {
                 site_set[w] |= state_set[w];
               }
             }
+            }
+            if (k < 2) {
+              preserve_catch_result_uses(f, op, live_in, words, index, site_set);
             }
             if (pass == 0) {
               for (size_t w = 0; w < words; w++) {

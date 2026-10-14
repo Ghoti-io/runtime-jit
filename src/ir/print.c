@@ -85,7 +85,8 @@ static const char * op_name(GRJIT_OpKind k) {
       /* The float operations: the type prefix (`f32.`, `i64.`) is put before the name. */
       "add", "sub", "mul", "div", "min", "max", "copysign", "neg", "abs", "sqrt", "ceil",
       "floor", "trunc", "nearest", "convert_i_s", "convert_i_u", "trunc_f_s", "trunc_f_u",
-      "trunc_sat_f_s", "trunc_sat_f_u", "demote_f64", "promote_f32", "reinterpret"};
+      "trunc_sat_f_s", "trunc_sat_f_u", "demote_f64", "promote_f32", "reinterpret",
+      "instance", "br_table", "trap", "rethrow"};
   _Static_assert(sizeof names / sizeof names[0] == (size_t)GRJIT_OP_COUNT,
       "one name for every operation");
   return (unsigned)k < (unsigned)GRJIT_OP_COUNT ? names[k] : "?";
@@ -167,6 +168,11 @@ static void put_state(Out * o, const GRJIT_Function * f, uint32_t index) {
 static void put_mem(Out * o, const GRJIT_Op * op) {
   put(o, "[");
   put_operand(o, &op->a);
+  if (op->index.kind != GRJIT_OPERAND_NONE) {
+    put(o, "+");
+    put_operand(o, &op->index);
+    if (op->scale != 1) put(o, "*%u", (unsigned)op->scale);
+  }
   if (op->disp < 0) {
     put(o, "-%" PRId64, -(int64_t)op->disp);
   } else {
@@ -183,6 +189,9 @@ static void put_float_op_name(Out * o, const GRJIT_Function * f, const GRJIT_Op 
   const char * d = type_name(dst);
   const char * s = type_name(src);
   switch (op->kind) {
+    case GRJIT_OP_INSTANCE:
+      put(o, "instance");
+      break;
     case GRJIT_OP_CONVERT_S:
     case GRJIT_OP_CONVERT_U:
       put(o, "%s.convert_%s_%c", d, s, op->kind == GRJIT_OP_CONVERT_S ? 's' : 'u');
@@ -213,7 +222,10 @@ static void put_float_op_name(Out * o, const GRJIT_Function * f, const GRJIT_Op 
 static void put_op(Out * o, const GRJIT_Function * f, const GRJIT_Op * op) {
   put(o, "  ");
   GRJIT_VReg def = grjit_op_def(op);
-  if (def != GRJIT_NO_VREG) {
+  if ((op->kind == GRJIT_OP_CALL_SLOT || op->kind == GRJIT_OP_CALL_PTR) && op->result_count != 0) {
+    for (size_t i = 0; i < op->result_count; i++) put(o, "%sv%u", i == 0 ? "" : ", ", op->results[i]);
+    put(o, " = ");
+  } else if (def != GRJIT_NO_VREG) {
     put(o, "v%u = ", def);
   }
   switch (op->kind) {
@@ -322,6 +334,10 @@ static void put_op(Out * o, const GRJIT_Function * f, const GRJIT_Op * op) {
         put_operand(o, &op->args[i]);
       }
       put(o, ")");
+      if (op->result_count != 0) {
+        put(o, " -> ");
+        for (size_t i = 0; i < op->result_count; i++) put(o, "%sv%u", i == 0 ? "" : ", ", op->results[i]);
+      }
       if (op->attr == GRJIT_CALL_GC_POINT) {
         put_state(o, f, op->state);
       }
@@ -343,6 +359,7 @@ static void put_op(Out * o, const GRJIT_Function * f, const GRJIT_Op * op) {
       put_state(o, f, op->state);
       put(o, " exit");
       put_state(o, f, op->exit_state);
+      if (op->landing_target != GRJIT_NO_BLOCK) put(o, " catch b%u", op->landing_target);
       break;
     case GRJIT_OP_TAIL_CALL_SLOT:
     case GRJIT_OP_TAIL_CALL_PTR:
@@ -352,7 +369,8 @@ static void put_op(Out * o, const GRJIT_Function * f, const GRJIT_Op * op) {
         put(o, "tail_call.ptr ");
         put_operand(o, &op->a);
       }
-      put(o, " callee=%" PRIu64 "(", op->callee);
+      put(o, " callee=%" PRIu64 " results=%zu(", op->callee,
+          op->callee_result_count);
       for (size_t i = 0; i < op->arg_count; i++) {
         put(o, i == 0 ? "" : ", ");
         put_operand(o, &op->args[i]);
@@ -390,11 +408,29 @@ static void put_op(Out * o, const GRJIT_Function * f, const GRJIT_Op * op) {
       put_operand(o, &op->a);
       put(o, ", b%u, b%u", op->target, op->target_else);
       break;
+    case GRJIT_OP_BR_TABLE:
+      put(o, "br_table ");
+      put_operand(o, &op->a);
+      put(o, " [");
+      for (size_t i = 0; i < op->target_count; i++) {
+        put(o, "%sb%u", i == 0 ? "" : ", ", op->targets[i]);
+      }
+      put(o, "], default b%u", op->default_target);
+      break;
+    case GRJIT_OP_TRAP:
+      put(o, "trap %u", (unsigned)op->trap_kind);
+      break;
+    case GRJIT_OP_RETHROW:
+      put(o, "rethrow");
+      break;
     case GRJIT_OP_RET:
       put(o, "ret");
-      if (op->a.kind != GRJIT_OPERAND_NONE) {
+      if (op->result_count != 0) {
         put(o, " ");
-        put_operand(o, &op->a);
+        for (size_t i = 0; i < op->result_count; i++) {
+          put(o, "%s", i == 0 ? "" : ", ");
+          put_operand(o, &op->returns[i]);
+        }
       }
       break;
     default:

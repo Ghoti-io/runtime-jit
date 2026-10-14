@@ -145,6 +145,8 @@ GRJIT_Result grjit_emit_function(const GRJIT_Function * function,
 /** The frame's end: `leave; ret` for SysV, and for Win64 the form its unwinder
  *  recognises as an epilogue, `lea rsp, [rbp]; pop rbp; ret`. */
 void grjit_emit_epilogue(GRJIT_Emit * e);
+/** Loads an IR operand into an x86 register while emitting a stub. */
+void grjit_emit_operand_load(GRJIT_Emit * e, GRJIT_Reg r, const GRJIT_Operand * o);
 
 /** Frees what ::grjit_emit_function allocated. */
 void grjit_emit_free(GRJIT_Emit * e);

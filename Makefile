@@ -931,6 +931,16 @@ PLANT_DEFECTS := 1:testDifferential 2:testReadback 3:testReadback \
 	101:bench/bench:smoke 102:bench/bench:smoke 103:bench/bench:smoke 104:bench/bench:smoke 105:bench/bench:smoke \
 	106:bench/bench:smoke 107:bench/bench:smoke 108:bench/bench:smoke 109:bench/bench:smoke
 
+# Defects 1, 8 to 19, 39 to 43, 45 to 68, and 88 to 91 mutate x86-64 shifts,
+# the SysV call protocol, integer/float instructions, x86 CPU features, or
+# Win64-only code. They cannot affect native arm64 code; arm64 call plants run
+# in jit-arm64.sh and arm64 arithmetic plants are also exercised natively.
+ifeq ($(shell uname -m),aarch64)
+PLANT_DEFECTS := $(filter-out 1:% 8:% 9:% 10:% 11:% 12:% 13:% 14:% 15:% 16:% 17:% 18:% 19:% \
+	39:% 40:% 41:% 42:% 43:% 45:% 46:% 47:% 48:% 49:% 50:% 51:% 52:% 53:% 54:% 55:% \
+	56:% 57:% 58:% 59:% 60:% 61:% 62:% 63:% 64:% 65:% 66:% 67:% 68:% 88:% 89:% 90:% 91:%,$(PLANT_DEFECTS))
+endif
+
 # The controls the script runs are built by this make, as prerequisites, and
 # not by the script's own sub-make. Under `make -j test` the sibling goals
 # (TEST_EXECUTABLES among them) rebuild and relink the very same files in the
@@ -1104,10 +1114,15 @@ $(ASAN_FLAGS_STAMP): force-flags
 CORE_SRC ?= ../runtime-core
 
 ifeq ($(OS_NAME), Linux)
+ifneq ($(shell uname -m),aarch64)
 check-planted-calls: $(APP_DIR)/$(STATIC_TARGET) ## Prove the call tests fail on each planted call-protocol defect (and that this check can fail)
 	@test -d "$(CORE_SRC)/src" || { echo "check-planted-calls: runtime-core is not at $(CORE_SRC); pass CORE_SRC=" >&2; exit 1; }
 	@python3 tools/check-planted-calls.py --prefix="$(PREFIX)" --core="$(CORE_SRC)" --self-test
 	@python3 tools/check-planted-calls.py --prefix="$(PREFIX)" --core="$(CORE_SRC)"
+else
+check-planted-calls: ## Skipped on arm64: it builds x86-64 SysV scratch trees
+	@printf 'check-planted-calls: skipped on arm64 (the call-protocol plants mutate x86-64 SysV; arm64 call plants are run by tools/xarch/jit-arm64.sh)\n'
+endif
 else
 check-planted-calls: ## Skipped off Linux: it builds scratch trees with make and runs x86-64 tests
 	@printf 'check-planted-calls: skipped on this target (the calls protocol is x86-64 SysV; the Windows and arm64 builds refuse it by name)\n'

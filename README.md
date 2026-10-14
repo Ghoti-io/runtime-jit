@@ -8,6 +8,24 @@ builds a function in the IR, `grjit_compile` turns it into machine code in pages
 taken from a context's counting page provider, and the code is run through one
 C calling convention.
 
+The current Wasm-facing IR additions include typed trap exits (`out[0]` carries
+the trap kind), unsigned `br_table` dispatch with a default target, an `INSTANCE`
+operation for reading the active language environment, and indexed loads/stores using
+`base + index * scale + displacement` with scales 1, 2, 4 or 8. The verifier
+checks trap kinds, branch targets, index types and scales before emission. These
+operations are emitted by the SysV x86-64, Win64 x86-64 and arm64 backends.
+
+Callable IR supports typed multi-result calls and returns: the first result is
+in the internal return register and remaining results use the caller-owned
+buffer. Zero and one-result calls retain the legacy ABI. Catchable slot and
+pointer calls add an explicit landing block for the engine's pending exception;
+`RETHROW` propagates that exception status. The JIT exposes call-return offsets,
+landing block IDs, and landing code offsets through `grjit_code_exception_sites`, separately from native unwind and
+GC/deoptimization metadata. Tag matching and exception values remain engine
+owned; `catch_exception` performs matching and unwinds guest activations before
+returning zero for a match. Operating-system and C++ exceptions do not cross
+generated code.
+
 The baseline is deliberately dull. Every register of the IR lives in its own
 frame slot, each operation is emitted by itself through fixed caller-saved
 scratch registers, and there is no register allocator and no pass, so no GC
@@ -137,8 +155,9 @@ options.pages = grcore_context_page_provider(context);   /* counted, AD-13 */
 GRJIT_Code * code;
 grjit_compile(&options, f, &code);                       /* RW, filled, then R-X */
 
+void * environment = language_instance;
 uint64_t args[1] = {100}, out[1];
-uint32_t exit = grjit_code_call(code, context, args, out); /* GRJIT_EXIT_RETURNED */
+uint32_t exit = grjit_code_call(code, context, environment, args, out); /* GRJIT_EXIT_RETURNED */
 /* out[0] == 4950; grjit_code_meta(code) holds the stack maps and deopt records */
 grjit_code_destroy(code);
 ```
@@ -149,7 +168,10 @@ function's sites.
 
 ## What the exits mean
 
-Compiled code is `uint32_t (*)(void * context, const uint64_t * args, uint64_t * out)`.
+Compiled code is `uint32_t (*)(void * context, void * environment, const uint64_t * args, uint64_t * out)`.
+`context` is the runtime-core context used by polls and runtime services; `environment` is the opaque language
+instance for this invocation. It is saved in each activation and may differ between callers and callees. It is
+never stored in shared compiled code. `INSTANCE` reads the active activation's environment.
 
 | Return | Means | `out` |
 | --- | --- | --- |

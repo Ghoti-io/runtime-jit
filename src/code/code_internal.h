@@ -59,6 +59,8 @@ typedef struct GRJIT_Emitted {
   uint8_t * bytes;
   size_t size;
   GRJIT_MetaStorage meta;
+  GRJIT_ExceptionSite * exception_sites;
+  size_t exception_site_count;
   GRJIT_Prologue prologue; ///< x86-64 only: where the prologue's instructions end.
   uint32_t internal_offset; ///< A callable function's internal entry (x86-64 and arm64).
   uint32_t regs_used;      ///< x86-64 only: bit r set if register r was encoded.
@@ -108,8 +110,11 @@ struct GRJIT_Code {
   size_t code_bytes;
   GRJIT_EntryFn entry;
   GRJIT_MetaStorage meta;
+  GRJIT_ExceptionSite * exception_sites;
+  size_t exception_site_count;
   size_t out_words;
   size_t param_count;
+  size_t result_count;
   uint32_t request_offset;
   uint32_t walk_cell_offset;    ///< The layout a callable function was built for.
   uint32_t native_limit_offset;

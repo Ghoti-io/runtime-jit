@@ -57,8 +57,9 @@ Ran simulate(const Emitted & em, const GRJIT_Function * f, void * ctx,
   cfg.size = em.e.size;
   cfg.stack_bytes = 8u << 20;
   cfg.args[0] = reinterpret_cast<uint64_t>(ctx);
-  cfg.args[1] = reinterpret_cast<uint64_t>(args.data());
-  cfg.args[2] = reinterpret_cast<uint64_t>(r.out.data());
+  cfg.args[1] = reinterpret_cast<uint64_t>(ctx);
+  cfg.args[2] = reinterpret_cast<uint64_t>(args.data());
+  cfg.args[3] = reinterpret_cast<uint64_t>(r.out.data());
   cfg.returns32 = std::move(returns32);
   a64sim::Cpu cpu;
   a64sim::Result res = cpu.run(cfg);
@@ -162,8 +163,8 @@ TEST(Arm64Offsets, RegistersWhoseSlotsAreBeyondTheShortFormsAreAddressedThroughX
     Ran r = simulate(em, f, w.ctx);
     ASSERT_EQ(r.exit, static_cast<uint32_t>(GRJIT_EXIT_RETURNED)) << n;
     ASSERT_EQ(r.out[0], sum) << n;
-    // A slot is -8 * (v + 4) from x29; ldur reaches -256, which is v = 28. With
-    // more registers than that, some access must be the register form.
+    // A slot is -8 * (v + 5) from x29; ldur reaches -256, which is v = 27.
+    // The accumulator is v = n, so n = 28 is the first case needing x17.
     size_t reg_form = 0;
     for (size_t i = 0; i < em.words(); i++) {
       uint32_t x = em.word(i);
@@ -171,7 +172,7 @@ TEST(Arm64Offsets, RegistersWhoseSlotsAreBeyondTheShortFormsAreAddressedThroughX
         reg_form++;
       }
     }
-    if (n >= 29) {
+    if (n >= 28) {
       EXPECT_GT(reg_form, 0u) << n;
     } else {
       EXPECT_EQ(reg_form, 0u) << n;
@@ -723,6 +724,69 @@ TEST(Arm64Availability, TheArm64EmitterRunsOnEveryHostAndEmitsOnlyAnInstructionS
   ASSERT_TRUE(em.ok());
   EXPECT_EQ(em.e.size % 4, 0u);
   EXPECT_EQ(em.word(em.words() - 1) & 0xFFFFFFFFu, 0xD65F03C0u) << "the last word of a function that ends is ret";
+}
+
+TEST(Arm64Memory, InstanceAndIndexedLoadUseContextAndScaledAddress) {
+  uint64_t values[] = {7, 19, 41, 73};
+  B b("arm64-indexed");
+  GRJIT_VReg base = b.param(GRJIT_TYPE_PTR);
+  GRJIT_VReg index = b.param(GRJIT_TYPE_I64);
+  GRJIT_VReg out_ctx = b.param(GRJIT_TYPE_PTR);
+  GRJIT_VReg ctx = b.reg(GRJIT_TYPE_PTR);
+  GRJIT_VReg value = b.reg();
+  b.at(b.block());
+  ASSERT_EQ(grjit_builder_instance(b.b, ctx), GRJIT_OK);
+  ASSERT_EQ(grjit_builder_store(b.b, out_ctx, 0, 64, V(ctx)), GRJIT_OK);
+  ASSERT_EQ(grjit_builder_load_indexed(b.b, value, base, index, 8, 0, 64, false), GRJIT_OK);
+  b.ret(V(value));
+  Fn f(b.finish());
+  Emitted em(f);
+  ASSERT_TRUE(em.ok()) << grjit_result_string(em.result);
+  int context_marker = 1;
+  uint64_t captured_context = 0;
+  const Ran r = simulate(em, f, &context_marker,
+      {reinterpret_cast<uintptr_t>(values), 2,
+          reinterpret_cast<uintptr_t>(&captured_context)});
+  EXPECT_EQ(r.exit, GRJIT_EXIT_RETURNED);
+  EXPECT_EQ(r.out[0], 41u);
+  EXPECT_EQ(captured_context, reinterpret_cast<uintptr_t>(&context_marker));
+}
+
+TEST(Arm64ControlFlow, BranchTableSelectsEachLabelAndTheDefault) {
+  B b("arm64-br-table");
+  GRJIT_VReg index = b.param(GRJIT_TYPE_I64);
+  GRJIT_VReg result = b.reg();
+  const auto entry = b.block();
+  const auto first = b.block();
+  const auto second = b.block();
+  const auto fallback = b.block();
+  const GRJIT_BlockId targets[] = {first, second};
+  b.at(entry);
+  ASSERT_EQ(grjit_builder_br_table(b.b, V(index), targets, 2, fallback), GRJIT_OK);
+  b.at(first); b.cnst(result, 10); b.ret(V(result));
+  b.at(second); b.cnst(result, 20); b.ret(V(result));
+  b.at(fallback); b.cnst(result, 30); b.ret(V(result));
+  Fn f(b.finish());
+  Emitted em(f);
+  ASSERT_TRUE(em.ok()) << grjit_result_string(em.result);
+  for (const auto &[ix, expected] : {std::pair<uint64_t, uint64_t>{0, 10}, {1, 20},
+           {2, 30}, {UINT64_MAX, 30}}) {
+    const Ran r = simulate(em, f, nullptr, {ix});
+    EXPECT_EQ(r.exit, GRJIT_EXIT_RETURNED);
+    EXPECT_EQ(r.out[0], expected);
+  }
+}
+
+TEST(Arm64ControlFlow, TrapReturnsTheKindInTheTrapExit) {
+  B b("arm64-trap");
+  b.at(b.block());
+  ASSERT_EQ(grjit_builder_trap(b.b, GRJIT_TRAP_MEMORY_OUT_OF_BOUNDS), GRJIT_OK);
+  Fn f(b.finish());
+  Emitted em(f);
+  ASSERT_TRUE(em.ok()) << grjit_result_string(em.result);
+  const Ran r = simulate(em, f, nullptr);
+  EXPECT_EQ(r.exit, GRJIT_EXIT_TRAP);
+  EXPECT_EQ(r.out[0], GRJIT_TRAP_MEMORY_OUT_OF_BOUNDS);
 }
 
 GRJIT_TEST_MAIN()

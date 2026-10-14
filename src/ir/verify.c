@@ -69,6 +69,16 @@ static GRJIT_Type type_of(const Verify * v, GRJIT_VReg r) {
   return vreg_ok(v, r) ? v->f->vregs[r].type : GRJIT_TYPE_COUNT;
 }
 
+static GRJIT_Type return_operand_type(const Verify * v, const GRJIT_Operand * o) {
+  switch (o->kind) {
+    case GRJIT_OPERAND_VREG: return type_of(v, o->vreg);
+    case GRJIT_OPERAND_IMM: return GRJIT_TYPE_I64;
+    case GRJIT_OPERAND_F32_IMM: return GRJIT_TYPE_F32;
+    case GRJIT_OPERAND_F64_IMM: return GRJIT_TYPE_F64;
+    default: return GRJIT_TYPE_COUNT;
+  }
+}
+
 static bool width_ok(uint32_t w) {
   return w == 8 || w == 16 || w == 32 || w == 64;
 }
@@ -321,6 +331,15 @@ static GRJIT_Result check_op(
     Verify * v, const GRJIT_Op * op, GRJIT_BlockId block, size_t index) {
   GRJIT_Result r;
   switch (op->kind) {
+    case GRJIT_OP_INSTANCE:
+      if ((r = check_dst(v, op, false, block, index)) != GRJIT_OK) {
+        return r;
+      }
+      if (type_of(v, op->dst) != GRJIT_TYPE_PTR) {
+        return refuse(v, GRJIT_ERR_INVALID,
+            "block b%u op %zu: instance destination must be a pointer", block, index);
+      }
+      return GRJIT_OK;
     case GRJIT_OP_CONST:
       if (op->a.kind != GRJIT_OPERAND_IMM) {
         return refuse(v, GRJIT_ERR_INVALID,
@@ -628,6 +647,16 @@ static GRJIT_Result check_op(
     case GRJIT_OP_LOAD:
     case GRJIT_OP_LOAD_S:
     case GRJIT_OP_STORE: {
+      if (op->index.kind != GRJIT_OPERAND_NONE) {
+        if (op->index.kind != GRJIT_OPERAND_VREG || !vreg_ok(v, op->index.vreg) ||
+            (type_of(v, op->index.vreg) != GRJIT_TYPE_I32 &&
+                type_of(v, op->index.vreg) != GRJIT_TYPE_I64) ||
+            (op->scale != 1 && op->scale != 2 && op->scale != 4 && op->scale != 8)) {
+          return refuse(v, GRJIT_ERR_INVALID,
+              "block b%u op %zu: indexed memory needs an integer index and scale 1, 2, 4 or 8",
+              block, index);
+        }
+      }
       if (op->a.kind != GRJIT_OPERAND_VREG || !vreg_ok(v, op->a.vreg) ||
           (type_of(v, op->a.vreg) != GRJIT_TYPE_PTR &&
               type_of(v, op->a.vreg) != GRJIT_TYPE_REF)) {
@@ -728,6 +757,24 @@ static GRJIT_Result check_op(
     case GRJIT_OP_TAIL_CALL_PTR: {
       const bool slot = op->kind == GRJIT_OP_CALL_SLOT || op->kind == GRJIT_OP_TAIL_CALL_SLOT;
       const bool tail = op->kind == GRJIT_OP_TAIL_CALL_SLOT || op->kind == GRJIT_OP_TAIL_CALL_PTR;
+      if (op->environment.kind != GRJIT_OPERAND_NONE &&
+          op->environment.kind != GRJIT_OPERAND_IMM &&
+          !(op->environment.kind == GRJIT_OPERAND_VREG &&
+              vreg_ok(v, op->environment.vreg) &&
+              type_of(v, op->environment.vreg) == GRJIT_TYPE_PTR)) {
+        return refuse(v, GRJIT_ERR_INVALID,
+            "block b%u op %zu: callee environment must be a ptr register or immediate",
+            block, index);
+      }
+      if (op->landing_target != GRJIT_NO_BLOCK &&
+          (tail || op->landing_target >= v->f->block_count)) {
+        return refuse(v, GRJIT_ERR_INVALID,
+            "block b%u op %zu: catch landing target is invalid", block, index);
+      }
+      if (op->landing_target != GRJIT_NO_BLOCK && v->f->hooks.catch_exception == NULL) {
+        return refuse(v, GRJIT_ERR_INVALID,
+            "block b%u op %zu: a catch edge needs the exception matching hook", block, index);
+      }
       const char * what = tail ? "a tail call" : "a call";
       const GRJIT_CallHooks * h = &v->f->hooks;
       if (!v->f->callable) {
@@ -737,6 +784,11 @@ static GRJIT_Result check_op(
             block, index, what);
       }
       if (tail) {
+        if (op->callee_result_count > GRJIT_BUILDER_MAX_ARGS) {
+          return refuse(v, GRJIT_ERR_LIMIT,
+              "block b%u op %zu: a tail call declares too many results",
+              block, index);
+        }
         if (h->tail == NULL || (slot && h->compile == NULL)) {
           return refuse(v, GRJIT_ERR_INVALID,
               "block b%u op %zu: a tail call needs the tail%s hook of a "
@@ -764,10 +816,15 @@ static GRJIT_Result check_op(
             block, index, what, op->arg_count, max_args);
       }
       if (slot) {
-        if (op->address == 0 || op->a.kind != GRJIT_OPERAND_NONE) {
+        const bool dynamic_slot = op->address == 0 &&
+            (op->a.kind == GRJIT_OPERAND_IMM ||
+                (op->a.kind == GRJIT_OPERAND_VREG && vreg_ok(v, op->a.vreg) &&
+                    type_of(v, op->a.vreg) == GRJIT_TYPE_PTR));
+        if ((!dynamic_slot && op->address == 0) ||
+            (op->address != 0 && op->a.kind != GRJIT_OPERAND_NONE)) {
           return refuse(v, GRJIT_ERR_INVALID,
               "block b%u op %zu: a call through a slot needs the address of "
-              "the slot's entry word and no code pointer",
+              "the slot's entry word or a ptr operand",
               block, index);
         }
       } else if (op->address != 0) {
@@ -796,6 +853,17 @@ static GRJIT_Result check_op(
       if (op->dst != GRJIT_NO_VREG &&
           (r = check_dst(v, op, false, block, index)) != GRJIT_OK) {
         return r;
+      }
+      if (!tail) {
+        if (op->result_count > GRJIT_BUILDER_MAX_ARGS ||
+            (op->result_count != 0 && op->results == NULL))
+          return refuse(v, GRJIT_ERR_INVALID, "block b%u op %zu: invalid call result list", block, index);
+        for (size_t i = 0; i < op->result_count; i++) {
+          if (!vreg_ok(v, op->results[i]))
+            return refuse(v, GRJIT_ERR_INVALID, "block b%u op %zu: result %zu names an invalid register", block, index, i);
+          for (size_t j = 0; j < i; j++) if (op->results[j] == op->results[i])
+            return refuse(v, GRJIT_ERR_INVALID, "block b%u op %zu: duplicate call result register", block, index);
+        }
       }
       if ((r = check_state_at(v, op->state, block, index)) != GRJIT_OK) {
         return r;
@@ -915,11 +983,52 @@ static GRJIT_Result check_op(
             index);
       }
       return GRJIT_OK;
-    case GRJIT_OP_RET:
-      if (op->a.kind == GRJIT_OPERAND_VREG && !vreg_ok(v, op->a.vreg)) {
+    case GRJIT_OP_BR_TABLE:
+      if ((op->a.kind != GRJIT_OPERAND_VREG || !vreg_ok(v, op->a.vreg) ||
+              (type_of(v, op->a.vreg) != GRJIT_TYPE_I32 &&
+                  type_of(v, op->a.vreg) != GRJIT_TYPE_I64)) &&
+          op->a.kind != GRJIT_OPERAND_IMM) {
         return refuse(v, GRJIT_ERR_INVALID,
-            "block b%u op %zu: return of v%u, which does not exist", block,
-            index, op->a.vreg);
+            "block b%u op %zu: br_table index must be an integer", block, index);
+      }
+      if (op->default_target >= v->f->block_count) {
+        return refuse(v, GRJIT_ERR_INVALID,
+            "block b%u op %zu: br_table default target does not exist", block, index);
+      }
+      for (size_t i = 0; i < op->target_count; i++) {
+        if (op->targets == NULL || op->targets[i] >= v->f->block_count) {
+          return refuse(v, GRJIT_ERR_INVALID,
+              "block b%u op %zu: br_table target %zu does not exist", block, index, i);
+        }
+      }
+      return GRJIT_OK;
+    case GRJIT_OP_TRAP:
+      if ((unsigned)op->trap_kind == 0 ||
+          (unsigned)op->trap_kind >= (unsigned)GRJIT_TRAP_KIND_COUNT) {
+        return refuse(v, GRJIT_ERR_INVALID,
+            "block b%u op %zu: trap kind is invalid", block, index);
+      }
+      return GRJIT_OK;
+    case GRJIT_OP_RETHROW:
+      if (!v->f->callable) {
+        return refuse(v, GRJIT_ERR_INVALID,
+            "block b%u op %zu: rethrow requires a callable function", block, index);
+      }
+      return GRJIT_OK;
+    case GRJIT_OP_RET:
+      if (op->result_count > GRJIT_BUILDER_MAX_ARGS ||
+          (op->result_count != 0 && op->returns == NULL))
+        return refuse(v, GRJIT_ERR_INVALID, "block b%u op %zu: invalid return list", block, index);
+      for (size_t i = 0; i < op->result_count; i++) {
+        if (op->returns[i].kind == GRJIT_OPERAND_VREG && !vreg_ok(v, op->returns[i].vreg))
+          return refuse(v, GRJIT_ERR_INVALID, "block b%u op %zu: return %zu names an invalid register", block, index, i);
+        if (op->returns[i].kind == GRJIT_OPERAND_F32_IMM && !f32imm_ok(op->returns[i].imm))
+          return refuse(v, GRJIT_ERR_INVALID,
+              "block b%u op %zu: return %zu is an f32 immediate that does not fit 32 bits",
+              block, index, i);
+        if (op->returns[i].kind != GRJIT_OPERAND_VREG && op->returns[i].kind != GRJIT_OPERAND_IMM &&
+            op->returns[i].kind != GRJIT_OPERAND_F32_IMM && op->returns[i].kind != GRJIT_OPERAND_F64_IMM)
+          return refuse(v, GRJIT_ERR_INVALID, "block b%u op %zu: return %zu is not a value", block, index, i);
       }
       return GRJIT_OK;
     case GRJIT_OP_COUNT:
@@ -991,6 +1100,54 @@ static GRJIT_Result check_structure(Verify * v) {
       }
     }
   }
+  size_t return_count = SIZE_MAX;
+  const GRJIT_Op * first_return = NULL;
+  for (size_t b = 0; b < f->block_count; b++) {
+    const GRJIT_BlockInfo * blk = &f->blocks[b];
+    const GRJIT_Op * last = &blk->ops[blk->count - 1];
+    bool return_reachable = true;
+    for (size_t i = 0; i + 1 < blk->count; i++) {
+      const GRJIT_Op * op = &blk->ops[i];
+      if (op->kind == GRJIT_OP_GUARD && op->a.kind == GRJIT_OPERAND_IMM &&
+          op->a.imm == 0) {
+        return_reachable = false;
+        break;
+      }
+    }
+    if ((last->kind != GRJIT_OP_RET && last->kind != GRJIT_OP_TAIL_CALL_SLOT &&
+            last->kind != GRJIT_OP_TAIL_CALL_PTR) ||
+        !return_reachable) continue;
+    if (return_count == SIZE_MAX) {
+      return_count = last->kind == GRJIT_OP_RET
+          ? last->result_count : last->callee_result_count;
+    } else if ((last->kind == GRJIT_OP_RET
+                    ? last->result_count : last->callee_result_count) != return_count) {
+      return refuse(v, GRJIT_ERR_INVALID,
+          "block b%zu: return or tail call has %zu results but other returns or tail calls have %zu",
+          b, last->kind == GRJIT_OP_RET
+              ? last->result_count : last->callee_result_count, return_count);
+    }
+    if (last->kind == GRJIT_OP_RET) {
+      if (first_return == NULL) {
+        first_return = last;
+      } else {
+        for (size_t i = 0; i < return_count; i++) {
+          if (return_operand_type(v, &last->returns[i]) !=
+              return_operand_type(v, &first_return->returns[i])) {
+            return refuse(v, GRJIT_ERR_INVALID,
+                "block b%zu: return result %zu has a different type than other returns",
+                b, i);
+          }
+        }
+      }
+    }
+  }
+  if (f->callable && return_count != SIZE_MAX &&
+      return_count != f->declared_result_count) {
+    return refuse(v, GRJIT_ERR_INVALID,
+        "callable declares %zu results but reachable return or tail call has %zu",
+        f->declared_result_count, return_count);
+  }
   return GRJIT_OK;
 }
 
@@ -1008,16 +1165,36 @@ static void check_use(void * user, GRJIT_VReg r) {
   }
 }
 
-static void successor_list(const GRJIT_Function * f, const GRJIT_BlockInfo * b,
-    GRJIT_BlockId out[2], size_t * count) {
-  *count = 0;
-  const GRJIT_Op * last = &b->ops[b->count - 1];
-  (void)f;
+static void mark_def(void * user, GRJIT_VReg r) {
+  uint64_t * assigned = user;
+  assigned[r / 64] |= UINT64_C(1) << (r % 64);
+}
+
+static void intersect_successor(const GRJIT_Function * f, GRJIT_BlockId target,
+    const uint64_t * cur, size_t words, uint64_t * in, bool * changed) {
+  if (target >= f->block_count) return;
+  uint64_t * t = in + target * words;
+  for (size_t w = 0; w < words; w++) {
+    uint64_t n = t[w] & cur[w];
+    if (n != t[w]) { t[w] = n; *changed = true; }
+  }
+}
+
+static void propagate_successors(const GRJIT_Function * f,
+    const GRJIT_BlockInfo * blk, const uint64_t * cur, size_t words,
+    uint64_t * in, bool * changed) {
+  if (blk->count == 0) return;
+  const GRJIT_Op * last = &blk->ops[blk->count - 1];
   if (last->kind == GRJIT_OP_BR) {
-    out[(*count)++] = last->target;
+    intersect_successor(f, last->target, cur, words, in, changed);
   } else if (last->kind == GRJIT_OP_BR_IF) {
-    out[(*count)++] = last->target;
-    out[(*count)++] = last->target_else;
+    intersect_successor(f, last->target, cur, words, in, changed);
+    intersect_successor(f, last->target_else, cur, words, in, changed);
+  } else if (last->kind == GRJIT_OP_BR_TABLE) {
+    intersect_successor(f, last->default_target, cur, words, in, changed);
+    for (size_t t = 0; t < last->target_count; t++) {
+      intersect_successor(f, last->targets[t], cur, words, in, changed);
+    }
   }
 }
 
@@ -1050,24 +1227,17 @@ static GRJIT_Result check_assigned(Verify * v) {
       const GRJIT_BlockInfo * blk = &f->blocks[b];
       memcpy(cur, in + b * words, words * sizeof *cur);
       for (size_t i = 0; i < blk->count; i++) {
-        GRJIT_VReg d = grjit_op_def(&blk->ops[i]);
-        if (d != GRJIT_NO_VREG) {
-          cur[d / 64] |= UINT64_C(1) << (d % 64);
+        const GRJIT_Op * op = &blk->ops[i];
+        /* A caught call can transfer control before defining its results.
+         * Propagate the pre-call assignment set to the landing block so uses
+         * there are checked against every exceptional predecessor. */
+        if ((op->kind == GRJIT_OP_CALL_SLOT || op->kind == GRJIT_OP_CALL_PTR) &&
+            op->landing_target != GRJIT_NO_BLOCK) {
+          intersect_successor(f, op->landing_target, cur, words, in, &changed);
         }
+        grjit_op_visit_defs(op, mark_def, cur);
       }
-      GRJIT_BlockId succ[2];
-      size_t sn;
-      successor_list(f, blk, succ, &sn);
-      for (size_t s = 0; s < sn; s++) {
-        uint64_t * t = in + succ[s] * words;
-        for (size_t w = 0; w < words; w++) {
-          uint64_t n = t[w] & cur[w];
-          if (n != t[w]) {
-            t[w] = n;
-            changed = true;
-          }
-        }
-      }
+      propagate_successors(f, blk, cur, words, in, &changed);
     }
   }
   GRJIT_Result result = GRJIT_OK;
@@ -1084,10 +1254,7 @@ static GRJIT_Result check_assigned(Verify * v) {
             u.bad, b, i);
         break;
       }
-      GRJIT_VReg d = grjit_op_def(&blk->ops[i]);
-      if (d != GRJIT_NO_VREG) {
-        cur[d / 64] |= UINT64_C(1) << (d % 64);
-      }
+      grjit_op_visit_defs(&blk->ops[i], mark_def, cur);
     }
   }
   a->free_fn(a->ctx, in);
