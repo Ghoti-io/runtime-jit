@@ -247,6 +247,55 @@ TEST(Compile, NestedSlotCallUsesCalleeEnvironmentAndRestoresCallerEnvironment) {
   EXPECT_EQ(second.out[2], reinterpret_cast<uintptr_t>(&caller_environment_a2));
 }
 
+/* A frame of a page or more is probed on Win64 before it is made, with the probe's cursor in
+ * a volatile register: the environment arrives in `r11`, and a probe that used `r11` as its
+ * cursor stored the cursor in the environment's slot. The callee here has a frame of from
+ * a few hundred bytes to several pages and returns what `INSTANCE` reads, both as the entry
+ * of a run and as the callee of a call with an explicit environment. */
+TEST(Compile, ACalleeWhoseFrameIsSeveralPagesReadsTheEnvironmentItWasGivenAtEveryFrameSize) {
+  GRJIT_REQUIRE_BACKEND();
+  const GRJIT_CallHooks hooks = environment_hooks();
+  const GRCORE_PollIdentity id{1, 1};
+  const GRJIT_FrameSlot state[] = {grjit_frame_slot_dead()};
+  for (int regs : {2, 60, 500, 520, 1100, 3000}) {
+    SCOPED_TRACE(regs);
+    JitWorld w;
+    B cb("big-frame-callee", 1);
+    ASSERT_EQ(grjit_builder_set_callable(cb.b, &hooks, 1), GRJIT_OK);
+    const GRJIT_VReg instance = cb.reg(GRJIT_TYPE_PTR);
+    GRJIT_VReg last = instance;
+    for (int i = 2; i < regs; i++) last = cb.reg(GRJIT_TYPE_I64);
+    cb.at(cb.block());
+    ASSERT_EQ(grjit_builder_instance(cb.b, instance), GRJIT_OK);
+    if (regs > 2) cb.cnst(last, 5);
+    ASSERT_EQ(grjit_builder_ret(cb.b, V(instance)), GRJIT_OK);
+    Fn callee_function(cb.finish());
+    Compiled callee(callee_function, w.pages());
+    ASSERT_TRUE(callee) << grjit_result_string(callee.result);
+    int environment = 1, other = 2;
+    const auto direct = callee.run(w.ctx, &environment, {});
+    ASSERT_EQ(direct.exit, GRJIT_EXIT_RETURNED);
+    EXPECT_EQ(direct.out[0], reinterpret_cast<uintptr_t>(&environment));
+
+    uint64_t callee_entry = grjit_code_internal_entry(callee.code);
+    B caller_builder("big-frame-caller", 1);
+    ASSERT_EQ(grjit_builder_set_callable(caller_builder.b, &hooks, 1), GRJIT_OK);
+    const GRJIT_VReg target_environment = caller_builder.param(GRJIT_TYPE_PTR);
+    const GRJIT_VReg returned = caller_builder.reg(GRJIT_TYPE_PTR);
+    caller_builder.at(caller_builder.block());
+    ASSERT_EQ(grjit_builder_call_slot_results_env(caller_builder.b, &returned, 1,
+        reinterpret_cast<uintptr_t>(&callee_entry), 77, V(target_environment), nullptr, 0, id,
+        state, 1, id, state, 1), GRJIT_OK);
+    ASSERT_EQ(grjit_builder_ret(caller_builder.b, V(returned)), GRJIT_OK);
+    Fn caller_function(caller_builder.finish());
+    Compiled caller(caller_function, w.pages());
+    ASSERT_TRUE(caller) << grjit_result_string(caller.result);
+    const auto chained = caller.run(w.ctx, &environment, {reinterpret_cast<uintptr_t>(&other)});
+    ASSERT_EQ(chained.exit, GRJIT_EXIT_RETURNED);
+    EXPECT_EQ(chained.out[0], reinterpret_cast<uintptr_t>(&other));
+  }
+}
+
 TEST(Compile, TailSlotCallTransfersItsExplicitCalleeEnvironment) {
   GRJIT_REQUIRE_BACKEND();
   JitWorld w;

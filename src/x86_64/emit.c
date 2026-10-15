@@ -2455,8 +2455,12 @@ static GRJIT_Result emit_callable(const GRJIT_Function * f, GRJIT_Emit * e,
   grjit_asm_jcc(a, GRJIT_COND_B, e->overflow);
   if (e->win64 && (uint64_t)alloc + 8 > GRJIT_WIN64_PAGE) {
     /* A frame of a page or more is probed a page at a time, as a plain function's
-     * is; r10 is the context and the argument registers are live. */
+     * is; r10 is the context and the argument registers are live, and r11 carries the
+     * environment into the body, so it is kept in xmm0 (volatile, and no argument of the
+     * internal convention is in an xmm register) while the probe uses r11 as its cursor. */
+    grjit_asm_movd_xr(a, GRJIT_XMM0, GRJIT_R11, true);
     emit_stack_probe(e, alloc, GRJIT_RAX, GRJIT_R11);
+    grjit_asm_movd_rx(a, GRJIT_R11, GRJIT_XMM0, true);
   }
   grjit_asm_sub_rsp(a, alloc);
   e->prologue.alloc_end = (uint32_t)grjit_asm_size(a);

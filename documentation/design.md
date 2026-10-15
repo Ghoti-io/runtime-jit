@@ -1411,7 +1411,10 @@ two `UNWIND_INFO`s in the mapping after the code, sorted by begin address and re
 function's (push `rbp`, set frame register `rbp`, allocate `N`); a function with no calls and not callable
 still has the one entry for all its code. The prologue of a body, as of a plain function, has the byte check
 (`lea rax, [rsp - N]; cmp rax, [r10 + limit]; jb overflow`), then the page probe for a frame of a page or more
-(through `rax` and `r11`, since `r10` is the context and the four argument registers are live), then the
+(through `rax` and `r11`, since `r10` is the context and the four argument registers are live; `r11` carries the
+environment into the body, so it waits in `xmm0` across the probe and is given back to `r11` before the allocation:
+the first version left the probe's cursor in the environment's slot for every frame of a page or more,
+`Compile.ACalleeWhoseFrameIsSeveralPages...` and the bytes check in `Win64Calls.AFrameOfAPageOrMore...`), then the
 allocation. The overflow stub makes 32 bytes of room for the hook's shadow space below `rsp` (the frame
 register keeps the frame right for an unwinder wherever `rsp` is).
 

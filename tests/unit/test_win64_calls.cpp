@@ -665,6 +665,10 @@ TEST(Win64Calls, AFrameOfAPageOrMoreIsProbedAPageAtATimeDownToTheNewRspAndASmall
   const Bytes step_page = {0x4D, 0x8D, 0x9B, 0x00, 0xF0, 0xFF, 0xFF};
   const Bytes touch_cursor = {0x41, 0x84, 0x03};
   const Bytes touch_low = {0x84, 0x00};
+  /* r11 carries the environment into the body and the probe uses it as its cursor, so the environment
+   * waits in xmm0: `movq xmm0, r11` before the probe and `movq r11, xmm0` after it. */
+  const Bytes save_env = {0x66, 0x49, 0x0F, 0x6E, 0xC3};
+  const Bytes restore_env = {0x66, 0x49, 0x0F, 0x7E, 0xC3};
   for (int regs : {40, 400, 505, 506, 600, 1500}) {
     SCOPED_TRACE(regs);
     B b("frame", 1);
@@ -689,10 +693,13 @@ TEST(Win64Calls, AFrameOfAPageOrMoreIsProbedAPageAtATimeDownToTheNewRspAndASmall
     EXPECT_EQ(em.count(lea_cursor, from, to), probed ? 1u : 0u);
     EXPECT_EQ(em.count(touch_cursor, from, to), probed ? 1u : 0u);
     EXPECT_EQ(em.count(touch_low, from, to), probed ? 1u : 0u) << "the last touch is at the new rsp";
+    EXPECT_EQ(em.count(save_env, from, to), probed ? 1u : 0u) << "the environment is kept across the probe";
+    EXPECT_EQ(em.count(restore_env, from, to), probed ? 1u : 0u) << "and given back to r11 after it";
     if (probed) {
-      // In order, and before the allocation: cursor, step, touch, loop, final touch, then sub rsp.
+      // In order, and before the allocation: the environment saved, cursor, step, touch, loop, final touch,
+      // the environment restored, then sub rsp.
       size_t at_ = from;
-      for (const Bytes * part : {&lea_cursor, &step_page, &touch_cursor, &touch_low}) {
+      for (const Bytes * part : {&save_env, &lea_cursor, &step_page, &touch_cursor, &touch_low, &restore_env}) {
         bool ok = false;
         for (; at_ + part->size() <= to; at_++) {
           if (std::memcmp(em.e.bytes + at_, part->data(), part->size()) == 0) {
