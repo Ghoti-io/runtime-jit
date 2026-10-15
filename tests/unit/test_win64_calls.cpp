@@ -539,6 +539,8 @@ TEST(Win64Calls, CatchCallHasSeparateLandingMetadataAndRethrowPath) {
   ASSERT_EQ(e.exception_site_count, 1u);
   EXPECT_EQ(e.exception_sites[0].landing_block, landing);
   EXPECT_LT(e.exception_sites[0].call_offset, e.size);
+  EXPECT_NE(e.exception_sites[0].landing_offset, 0u) << "the landing block's code is not at the start of the function";
+  EXPECT_GT(e.exception_sites[0].landing_offset, e.exception_sites[0].call_offset) << "the landing follows the body it is caught from";
   EXPECT_LT(e.exception_sites[0].landing_offset, e.size);
   grjit_emitted_free(&e);
 }
