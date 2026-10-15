@@ -284,6 +284,91 @@ TEST(Compile, TailSlotCallTransfersItsExplicitCalleeEnvironment) {
   EXPECT_EQ(result.out[0], reinterpret_cast<uintptr_t>(&callee_environment_b));
 }
 
+/* A tail call to a callee that needs more stack arguments than the caller has replaces
+ * the caller's frame with a copy that runs over the frame's fixed slots, among them the
+ * environment and the result-buffer pointer. Both must be read before the copy: the
+ * callee is `INSTANCE`-reading, so a clobbered environment shows as the wrong pointer, and
+ * returns several results, so a clobbered buffer pointer shows as a wrong or missing word
+ * (or a fault). The caller has no locals but its parameters, so the frame is as small as a
+ * frame can be and the copy reaches the fixed slots at the fewest extra arguments. */
+TEST(Compile, ATailCallToACalleeNeedingMoreStackArgumentsKeepsTheEnvironmentAndTheResultBuffer) {
+  GRJIT_REQUIRE_BACKEND();
+  const GRJIT_CallHooks hooks = environment_hooks();
+  const GRCORE_PollIdentity id{1, 1};
+  const GRJIT_FrameSlot state[] = {grjit_frame_slot_dead()};
+  long cases = 0;
+  for (int explicit_environment = 0; explicit_environment < 2; explicit_environment++) {
+    for (size_t results = 1; results <= 3; results++) {
+      for (size_t callee_args = 0; callee_args <= 16; callee_args++) {
+        for (size_t caller_params = 0; caller_params <= 16; caller_params += (caller_params < 3 ? 1 : 5)) {
+          SCOPED_TRACE(testing::Message() << (explicit_environment ? "explicit" : "inherited")
+              << " environment, results=" << results << " callee args=" << callee_args
+              << " caller params=" << caller_params);
+          JitWorld w;
+          B cb("tail-more-callee", 1);
+          ASSERT_EQ(grjit_builder_set_callable(cb.b, &hooks, results), GRJIT_OK);
+          std::vector<GRJIT_VReg> cparams;
+          for (size_t i = 0; i < callee_args; i++) cparams.push_back(cb.param(GRJIT_TYPE_I64));
+          const GRJIT_VReg instance = cb.reg(GRJIT_TYPE_PTR);
+          cb.at(cb.block());
+          ASSERT_EQ(grjit_builder_instance(cb.b, instance), GRJIT_OK);
+          std::vector<GRJIT_Operand> ret = {V(instance)};
+          for (size_t k = 1; k < results; k++) {
+            ret.push_back(k - 1 < callee_args ? V(cparams[k - 1])
+                                              : I(static_cast<int64_t>(0x5000 + k)));
+          }
+          ASSERT_EQ(grjit_builder_ret_multi(cb.b, ret.data(), ret.size()), GRJIT_OK);
+          Fn callee_function(cb.finish());
+          Compiled callee(callee_function, w.pages());
+          ASSERT_TRUE(callee) << grjit_result_string(callee.result);
+          uint64_t callee_entry = grjit_code_internal_entry(callee.code);
+
+          B tb("tail-more-caller", 1);
+          ASSERT_EQ(grjit_builder_set_callable(tb.b, &hooks, results), GRJIT_OK);
+          std::vector<GRJIT_VReg> params;
+          for (size_t i = 0; i < caller_params; i++) params.push_back(tb.param(GRJIT_TYPE_I64));
+          GRJIT_VReg other = GRJIT_NO_VREG;
+          if (explicit_environment) other = tb.param(GRJIT_TYPE_PTR);
+          tb.at(tb.block());
+          std::vector<GRJIT_Operand> args;
+          for (size_t i = 0; i < callee_args; i++) {
+            args.push_back(i < caller_params && i % 2 == 0 ? V(params[i])
+                                                           : I(static_cast<int64_t>(7000 + 3 * i)));
+          }
+          if (explicit_environment) {
+            ASSERT_EQ(grjit_builder_tail_call_slot_env(tb.b, reinterpret_cast<uintptr_t>(&callee_entry),
+                77, results, V(other), args.data(), args.size(), id, state, 1), GRJIT_OK);
+          } else {
+            ASSERT_EQ(grjit_builder_tail_call_slot(tb.b, reinterpret_cast<uintptr_t>(&callee_entry),
+                77, results, args.data(), args.size(), id, state, 1), GRJIT_OK);
+          }
+          Fn tail_function(tb.finish());
+          Compiled tail(tail_function, w.pages());
+          ASSERT_TRUE(tail) << grjit_result_string(tail.result);
+
+          int inherited = 1, supplied = 2;
+          std::vector<uint64_t> given;
+          for (size_t i = 0; i < caller_params; i++) given.push_back(900 + i);
+          if (explicit_environment) given.push_back(reinterpret_cast<uintptr_t>(&supplied));
+          const auto r = tail.run(w.ctx, &inherited, given);
+          ASSERT_EQ(r.exit, GRJIT_EXIT_RETURNED);
+          ASSERT_GE(r.out.size(), results);
+          EXPECT_EQ(r.out[0], explicit_environment ? reinterpret_cast<uintptr_t>(&supplied)
+                                                   : reinterpret_cast<uintptr_t>(&inherited));
+          for (size_t k = 1; k < results; k++) {
+            const uint64_t want = k - 1 < callee_args
+                ? (k - 1 < caller_params && (k - 1) % 2 == 0 ? given[k - 1] : 7000 + 3 * (k - 1))
+                : 0x5000 + k;
+            EXPECT_EQ(r.out[k], want) << "result " << k;
+          }
+          cases++;
+        }
+      }
+    }
+  }
+  EXPECT_GT(cases, 0);
+}
+
 TEST(Compile, IndexedLoadUsesScaledAddressOnTheActiveBackend) {
   GRJIT_REQUIRE_BACKEND();
   JitWorld w;

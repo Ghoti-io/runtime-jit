@@ -386,7 +386,8 @@ TEST(Pin, TheArm64CodeOfCallableFunctionsWithAnEntryHookIsByteForByteWhatWasReco
 
 TEST(Pin, TheArm64CodeOfCallableFunctionsWithTailCallsIsByteForByteWhatWasRecorded) {
   PIN_NEEDS_THE_RECORDED_ADDRESS_FORM(GRJIT_ARCH_ARM64);
-  /* Measured after the arm64 emitter of tail calls landed. */
+  /* Measured after the arm64 emitter of tail calls landed; re-measured when the tail call began to read the
+   * result buffer's pointer and the entry before its stack-argument copy (same size, instructions moved). */
   unsigned pointer_calls = 0, functions = 0;
   bool emitted = false;
   Pin pin = tail_pin(GRJIT_ARCH_ARM64, &pointer_calls, &functions, &emitted);
@@ -396,7 +397,7 @@ TEST(Pin, TheArm64CodeOfCallableFunctionsWithTailCallsIsByteForByteWhatWasRecord
   std::printf("pin arm64 tail calls: %u functions, %llu bytes, hash %016llx\n", functions,
       static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
   EXPECT_EQ(pin.bytes % 4, 0u);
-  EXPECT_EQ(pin.hash, 0x8ce0bf6ec5126884ull) << pin.bytes << " bytes";
+  EXPECT_EQ(pin.hash, 0x425eb0ffb029f264ull) << pin.bytes << " bytes";
   EXPECT_EQ(pin.bytes, 119352u);
 }
 

@@ -640,6 +640,11 @@ static void emit_tail_call(GRJIT_A64Emit * e, const GRJIT_Op * op) {
     load_operand(e, GRJIT_A64_X8, &op->environment);
   grjit_a64_load(a, GRJIT_A64_MEM_X64, GRJIT_A64_X30, GRJIT_A64_FP, 8);
   grjit_a64_load(a, GRJIT_A64_MEM_X64, GRJIT_A64_X15, GRJIT_A64_FP, 0);
+  /* The result buffer's pointer and the entry are read before the copy, which can run over
+   * the frame's fixed slots and vreg slots when the callee takes more stack arguments than
+   * this function does; the context and the environment above already were. */
+  if (e->c.shape.has_result_buffer) load_slot(e, GRJIT_A64_X11, GRJIT_SLOT_ARGS);
+  load_slot(e, GRJIT_A64_X16, entry_slot);
   size_t copy_to = n;
 #if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 25
   /* Planted defect 25 (tests only): the last stack argument is not copied, so the callee
@@ -653,15 +658,13 @@ static void emit_tail_call(GRJIT_A64Emit * e, const GRJIT_Op * op) {
     store_slot(e, GRJIT_A64_X10, (int32_t)(sp_new + 8 * (int64_t)(i - ireg)));
   }
   if (e->c.shape.has_result_buffer && n >= ireg) {
-    load_slot(e, GRJIT_A64_X10, GRJIT_SLOT_ARGS);
-    store_slot(e, GRJIT_A64_X10,
+    store_slot(e, GRJIT_A64_X11,
         (int32_t)(sp_new + 8 * (int64_t)(n - ireg)));
   }
   for (size_t i = 0; i < n && i < ireg; i++) {
     load_slot(e, arg_regs_internal[i], GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, i));
   }
-  if (e->c.shape.has_result_buffer && n < ireg) load_slot(e, arg_regs_internal[n], GRJIT_SLOT_ARGS);
-  load_slot(e, GRJIT_A64_X16, entry_slot);
+  if (e->c.shape.has_result_buffer && n < ireg) grjit_a64_mov_rr(a, arg_regs_internal[n], GRJIT_A64_X11);
   lea(e, GRJIT_A64_SP, GRJIT_A64_FP, sp_new);
   grjit_a64_mov_rr(a, GRJIT_A64_FP, GRJIT_A64_X15);
   grjit_a64_br(a, GRJIT_A64_X16);

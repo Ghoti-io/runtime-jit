@@ -714,13 +714,37 @@ static void emit_tail_call(GRJIT_Emit * e, const GRJIT_Op * op) {
   const int64_t in_a = e->c.shape.incoming_bytes;
   const int64_t in_t = grjit_stack_arg_bytes(n + (e->c.shape.has_result_buffer ? 1u : 0u), ireg);
   const int32_t ra_new = (int32_t)(8 + in_a - in_t); /* `ra'`, from `rbp` */
+  const bool buffer = e->c.shape.has_result_buffer;
+  /* Everything this frame still holds that the copy can overwrite is read first, into a
+   * register that nothing below writes before its use: the copy runs over the frame's slots
+   * when the callee takes more stack arguments than this function does, and those include the
+   * environment's and the result buffer's (the fixed slots) and the vregs the explicit
+   * environment may name. The argument registers are free until the arguments are loaded
+   * from the area, which is below the copy, so they carry the temporaries; the one that will
+   * hold the result buffer's pointer (`IARG(n)`, when it is passed in a register) is not
+   * among them. */
+  GRJIT_Reg temps[8] = {GRJIT_RAX};
+  size_t temp_count = 0;
+  for (size_t j = 0; j < ireg; j++) {
+    if (IARG(e, j) == copy || (buffer && n < ireg && j == n)) continue;
+    temps[temp_count++] = IARG(e, j);
+  }
+  const GRJIT_Reg env_tmp = temps[0];
+  const GRJIT_Reg buf_tmp = n >= ireg ? temps[1] : IARG(e, n);
+  const GRJIT_Reg link_tmp = n >= ireg ? copy : temps[1];
   grjit_asm_load64(a, ICTX(e), GRJIT_RBP, GRJIT_SLOT_CTX);
   grjit_asm_load64(a, scratch, GRJIT_RBP, 8);
+  if (op->environment.kind == GRJIT_OPERAND_NONE)
+    grjit_asm_load64(a, env_tmp, GRJIT_RBP, GRJIT_SLOT_ENV);
+  else
+    load_operand(e, env_tmp, &op->environment);
+  if (buffer) grjit_asm_load64(a, buf_tmp, GRJIT_RBP, GRJIT_SLOT_ARGS);
+  grjit_asm_load64(a, GRJIT_RAX, GRJIT_RBP, entry_slot);
   /* Stack arguments can cover the old saved-rbp word when the replacement
    * callee needs more stack space than this function. Save that link just
    * below the replacement rsp, where the callee's prologue will write it too. */
-  grjit_asm_load64(a, GRJIT_RAX, GRJIT_RBP, 0);
-  grjit_asm_store64(a, GRJIT_RBP, ra_new - 8, GRJIT_RAX);
+  grjit_asm_load64(a, link_tmp, GRJIT_RBP, 0);
+  grjit_asm_store64(a, GRJIT_RBP, ra_new - 8, link_tmp);
   size_t copy_to = n;
 #if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 11
   /* Planted defect 11 (tests only): the last stack argument is not copied, so
@@ -734,21 +758,15 @@ static void emit_tail_call(GRJIT_Emit * e, const GRJIT_Op * op) {
     grjit_asm_store64(a, GRJIT_RBP,
         (int32_t)(ra_new + 8 + 8 * (int64_t)(i - ireg)), copy);
   }
-  if (e->c.shape.has_result_buffer && n >= ireg) {
-    grjit_asm_load64(a, copy, GRJIT_RBP, GRJIT_SLOT_ARGS);
+  if (buffer && n >= ireg) {
     grjit_asm_store64(a, GRJIT_RBP,
-        (int32_t)(ra_new + 8 + 8 * (int64_t)(n - ireg)), copy);
+        (int32_t)(ra_new + 8 + 8 * (int64_t)(n - ireg)), buf_tmp);
   }
   grjit_asm_store64(a, GRJIT_RBP, ra_new, scratch);
+  grjit_asm_mov_rr(a, GRJIT_R11, env_tmp);
   for (size_t i = 0; i < n && i < ireg; i++) {
     grjit_asm_load64(a, IARG(e, i), GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, i));
   }
-  if (e->c.shape.has_result_buffer && n < ireg) grjit_asm_load64(a, IARG(e, n), GRJIT_RBP, GRJIT_SLOT_ARGS);
-  grjit_asm_load64(a, GRJIT_RAX, GRJIT_RBP, entry_slot);
-  if (op->environment.kind == GRJIT_OPERAND_NONE)
-    grjit_asm_load64(a, GRJIT_R11, GRJIT_RBP, GRJIT_SLOT_ENV);
-  else
-    load_operand(e, GRJIT_R11, &op->environment);
   grjit_asm_lea(a, GRJIT_RSP, GRJIT_RBP, ra_new);
   grjit_asm_load64(a, GRJIT_RBP, GRJIT_RSP, -8);
   grjit_asm_jmp_r(a, GRJIT_RAX);

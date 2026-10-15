@@ -845,6 +845,26 @@ the frame sizes and shows that one slot less would overlap
 (`Tail.TheFramesPaddingIsExactlyWhatTheStagingAreaNeeds...`). It is representation
 independent: a float argument is a spilled word loaded into an xmm register last.
 
+**What the copy runs over is read first (2026-10-15).** The area ends at or below
+`ra'` but the destination does not stop there: when the callee takes more stack
+arguments than the function does it covers the register slots and the fixed slots
+above the area, among them the environment's (`SLOT_ENV`, -32) and the result
+buffer's pointer (`SLOT_ARGS`, -24), and a vreg an explicit callee environment names.
+The first version read the environment and the pointer after the copy: a caller with
+no parameters tail-calling an `INSTANCE`-reading callee of eight or ten arguments got the
+entry tag's magic back as its instance, and with a second result a wild pointer to write
+through. All of what the jump needs from the frame is now read before the first write,
+into the argument registers (free until the arguments are loaded from the area, which
+is below the destination) on x86-64 and into `x11`/`x16` on arm64: the context, the
+return address, the saved base, the environment (the slot, or the explicit operand),
+the buffer's pointer and the entry. `Compile.ATailCallToACalleeNeedingMoreStackArguments...`
+holds it for every callee arity from 0 to 16 and for one to three results, with an
+inherited and an explicit environment, on every backend; the shape's `incoming_bytes`,
+which the padding is measured against, is known before the first tail call is looked
+at (it was read before it was set, so a function with stack arguments and a result
+buffer was padded for a staging area it did not need:
+`Tail.TheFramesPaddingIsExactForAFunctionWithAResultBuffer...`).
+
 **The walk is unchanged, and so is runtime-core.** After the jump the callee's
 frame has the caller's saved base and return address in the two words at its base,
 so the walk meets it as any frame: it ends at the same chain-end marker or caller,
