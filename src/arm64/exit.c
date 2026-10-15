@@ -117,7 +117,14 @@ void grjit_a64_emit_call_slow_stub(GRJIT_A64Emit * e, const GRJIT_Pending * p) {
   grjit_a64_cbnz(a, GRJIT_A64_X0, p->exit);
   /* The hook says it installed: read the slot again, and if it is still empty or refused
    * the hook lied and the call exits. */
-  grjit_a64_mov_ri(a, GRJIT_A64_X16, p->op->address);
+  if (p->op->address != 0) {
+    grjit_a64_mov_ri(a, GRJIT_A64_X16, p->op->address);
+  } else if (p->op->a.kind == GRJIT_OPERAND_VREG) {
+    /* A slot named by a register (the engine finds it through its environment): read from the frame. */
+    grjit_a64_load(a, GRJIT_A64_MEM_X64, GRJIT_A64_X16, GRJIT_A64_FP, grjit_emit_slot(p->op->a.vreg));
+  } else {
+    grjit_a64_mov_ri(a, GRJIT_A64_X16, (uint64_t)p->op->a.imm);
+  }
   grjit_a64_load(a, GRJIT_A64_MEM_X64, GRJIT_A64_X16, GRJIT_A64_X16, 0);
   grjit_a64_cmp_imm(a, GRJIT_A64_X16, GRCORE_ENTRY_REFUSED);
   grjit_a64_bcond(a, GRJIT_A64_LS, p->exit);

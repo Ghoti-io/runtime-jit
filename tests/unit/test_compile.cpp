@@ -13,6 +13,7 @@
 #include "../../src/code/code_internal.h"
 #include "../../src/backend/backend_internal.h"
 #include "../ir_eval.h"
+#include "../cross_meta.h"
 
 #include <cstdint>
 #include <cstring>
@@ -36,6 +37,15 @@ void environment_pop(void *) {}
 uint32_t environment_compile(void *, uint64_t) { return 1; }
 uint32_t environment_deopt(void *, uint64_t) { return 0; }
 uint32_t environment_tail(void *, void *, uint64_t, const uint64_t *, uint64_t, uint64_t) { return 0; }
+
+uint64_t * g_install_slot = nullptr;
+uint64_t g_install_entry = 0;
+int g_compile_asked = 0;
+uint32_t installing_compile(void *, uint64_t) {
+  g_compile_asked++;
+  *g_install_slot = g_install_entry;
+  return 0;
+}
 
 GRJIT_CallHooks environment_hooks() {
   GRJIT_CallHooks hooks{};
@@ -294,6 +304,85 @@ TEST(Compile, ACalleeWhoseFrameIsSeveralPagesReadsTheEnvironmentItWasGivenAtEver
     ASSERT_EQ(chained.exit, GRJIT_EXIT_RETURNED);
     EXPECT_EQ(chained.out[0], reinterpret_cast<uintptr_t>(&other));
   }
+}
+
+/* A slot named by a register and found empty asks the compile hook, then reads the slot again to
+ * see that the hook installed something. That second read comes from the register (the engine found
+ * the slot through its environment) and not from a constant: the arm64 stub read it from the constant
+ * address field, zero for a slot operand, and faulted at the first call of every callee that was not
+ * yet compiled. */
+TEST(Compile, ACallThroughASlotNamedByARegisterAsksTheCompileHookOfAnEmptySlotAndEntersWhatItInstalled) {
+  GRJIT_REQUIRE_BACKEND();
+  JitWorld w;
+  GRJIT_CallHooks hooks = environment_hooks();
+  hooks.compile = installing_compile;
+  B cb("slot-operand-callee", 1);
+  ASSERT_EQ(grjit_builder_set_callable(cb.b, &hooks, 1), GRJIT_OK);
+  const GRJIT_VReg x = cb.param(GRJIT_TYPE_I64);
+  cb.at(cb.block());
+  GRJIT_VReg y = cb.reg();
+  cb.bin(GRJIT_OP_ADD, y, V(x), I(1000));
+  ASSERT_EQ(grjit_builder_ret(cb.b, V(y)), GRJIT_OK);
+  Fn callee_function(cb.finish());
+  Compiled callee(callee_function, w.pages());
+  ASSERT_TRUE(callee) << grjit_result_string(callee.result);
+
+  uint64_t slot_word = 0;
+  g_install_slot = &slot_word;
+  g_install_entry = grjit_code_internal_entry(callee.code);
+  g_compile_asked = 0;
+  B tb("slot-operand-caller", 1);
+  ASSERT_EQ(grjit_builder_set_callable(tb.b, &hooks, 1), GRJIT_OK);
+  const GRJIT_VReg slot = tb.param(GRJIT_TYPE_PTR);
+  const GRJIT_VReg arg = tb.param(GRJIT_TYPE_I64);
+  const GRJIT_VReg r = tb.reg();
+  tb.at(tb.block());
+  const GRCORE_PollIdentity id{1, 1};
+  const GRJIT_FrameSlot state[] = {grjit_frame_slot_dead()};
+  const GRJIT_Operand args[] = {V(arg)};
+  ASSERT_EQ(grjit_builder_call_slot_operand_results_env(tb.b, &r, 1, V(slot), 77, grjit_operand_none(),
+      args, 1, id, state, 1, id, state, 1), GRJIT_OK);
+  ASSERT_EQ(grjit_builder_ret(tb.b, V(r)), GRJIT_OK);
+  Fn caller_function(tb.finish());
+  Compiled caller(caller_function, w.pages());
+  ASSERT_TRUE(caller) << grjit_result_string(caller.result);
+  const auto first = caller.run(w.ctx, w.ctx, {reinterpret_cast<uintptr_t>(&slot_word), 5});
+  ASSERT_EQ(first.exit, GRJIT_EXIT_RETURNED);
+  EXPECT_EQ(first.out[0], 1005u);
+  EXPECT_EQ(g_compile_asked, 1) << "the empty slot was offered to the hook once";
+  const auto second = caller.run(w.ctx, w.ctx, {reinterpret_cast<uintptr_t>(&slot_word), 6});
+  EXPECT_EQ(second.out[0], 1006u);
+  EXPECT_EQ(g_compile_asked, 1) << "and the installed slot is entered without asking again";
+}
+
+/* The same, read from the arm64 words on every host: the stub that re-reads the slot must not load
+ * from a constant zero (`movz x16, #0` then `ldr x16, [x16]`), which is what a slot operand's address
+ * field is. */
+TEST(Compile, TheArm64StubThatReadsAnInstalledSlotAgainDoesNotLoadFromAddressZeroForASlotNamedByARegister) {
+  const GRJIT_CallHooks hooks = environment_hooks();
+  B tb("slot-operand-stub", 1);
+  ASSERT_EQ(grjit_builder_set_callable(tb.b, &hooks, 1), GRJIT_OK);
+  const GRJIT_VReg slot = tb.param(GRJIT_TYPE_PTR);
+  const GRJIT_VReg r = tb.reg();
+  tb.at(tb.block());
+  const GRCORE_PollIdentity id{1, 1};
+  const GRJIT_FrameSlot state[] = {grjit_frame_slot_dead()};
+  ASSERT_EQ(grjit_builder_call_slot_operand_results_env(tb.b, &r, 1, V(slot), 77, grjit_operand_none(),
+      nullptr, 0, id, state, 1, id, state, 1), GRJIT_OK);
+  ASSERT_EQ(grjit_builder_ret(tb.b, V(r)), GRJIT_OK);
+  Fn f(tb.finish());
+  xm::Emit em(GRJIT_ARCH_ARM64, f.f);
+  ASSERT_TRUE(em.ok()) << grjit_result_string(em.result);
+  const uint32_t movz_x16_zero = 0xD2800010u, ldr_x16_x16 = 0xF9400210u;
+  size_t loads_from_zero = 0, loads_through_x16 = 0;
+  for (size_t i = 0; i + 1 < em.words(); i++) {
+    if (em.word(i + 1) == ldr_x16_x16) {
+      loads_through_x16++;
+      if (em.word(i) == movz_x16_zero) loads_from_zero++;
+    }
+  }
+  EXPECT_GE(loads_through_x16, 2u) << "the dispatch and the stub both read the slot's word";
+  EXPECT_EQ(loads_from_zero, 0u);
 }
 
 TEST(Compile, TailSlotCallTransfersItsExplicitCalleeEnvironment) {
