@@ -10,6 +10,7 @@
  */
 
 #include "test_helpers.h"
+#include "../cross_meta.h"
 
 namespace {
 
@@ -226,6 +227,78 @@ TEST(CallIr, CatchLandingCannotReadCallResults) {
   GRJIT_Result verified;
   why = verify_reason(f, &verified);
   EXPECT_EQ(verified, GRJIT_ERR_INVALID) << "catch landing used a call result; " << why;
+}
+
+uint64_t gc_helper(uint64_t) { return 0; }
+
+/* A catch call whose result register is one its landing block reads: the exception edge
+ * leaves before the call's results are written, so the landing reads the value the register
+ * held before the call, and that value is live from the function's entry until the call.
+ * Liveness applied the landing's live-in before the call's definition cleared it, so the
+ * value was live before nothing: an earlier collection point left it out of its stack map
+ * and a collection there moved or freed the object the landing then returned. */
+TEST(CallIr, ARegisterTheCatchLandingReadsIsLiveAcrossAnEarlierCollectionPointEvenWhenTheCatchCallDefinesIt) {
+  for (GRJIT_Arch arch : {GRJIT_ARCH_X86_64, GRJIT_ARCH_X86_64_WIN64, GRJIT_ARCH_ARM64}) {
+    // The helper call and the catch call in one block, and the helper call in the block before the one
+    // that has the catch call (the register is then live into that block, which only the block-level
+    // sweep can say).
+    for (bool split : {false, true}) {
+      SCOPED_TRACE(xm::arch_name(arch));
+      SCOPED_TRACE(split ? "helper call and catch call in two blocks" : "one block");
+      B b("catch-live-across", 0);
+      GRJIT_CallHooks h = all_hooks();
+      b.callable(h);
+      const GRJIT_VReg r = b.param(GRJIT_TYPE_REF);
+      const GRJIT_VReg helper_result = b.reg(GRJIT_TYPE_I64);
+      const auto body = b.block();
+      const auto catching = split ? b.block() : body;
+      const auto landing = b.block();
+      b.at(body);
+      b.call_gc(helper_result, reinterpret_cast<const void *>(gc_helper), {I(1)}, {3, 1}, {});
+      if (split) {
+        ASSERT_EQ(grjit_builder_br(b.b, catching), GRJIT_OK);
+        b.at(catching);
+      }
+      const GRCORE_PollIdentity id{3, 2};
+      ASSERT_EQ(grjit_builder_call_slot_catch_results(b.b, &r, 1,
+          reinterpret_cast<uintptr_t>(&g_entry_word), 99, nullptr, 0, id, nullptr, 0, id, nullptr, 0,
+          landing), GRJIT_OK);
+      ASSERT_EQ(grjit_builder_ret(b.b, V(r)), GRJIT_OK);
+      b.at(landing);
+      ASSERT_EQ(grjit_builder_ret(b.b, V(r)), GRJIT_OK);
+      Fn f(b.finish());
+      GRJIT_Result verified;
+      const std::string why = verify_reason(f, &verified);
+      ASSERT_EQ(verified, GRJIT_OK) << why;
+      xm::Emit em(arch, f.f);
+      ASSERT_TRUE(em.ok()) << grjit_result_string(em.result);
+      const GRCORE_CodeMeta * meta = em.meta();
+      size_t helper_sites = 0;
+      int64_t slot_of_r = 0;
+      for (size_t i = 0; i < meta->site_count; i++) {
+        const GRCORE_CodeSite & s = meta->sites[i];
+        if (s.kind == GRCORE_SITE_GC_POINT_CALL && helper_sites == 0) {
+          helper_sites++;
+          ASSERT_EQ(s.live_count, 1u) << "r is live across the helper call: the landing reads it";
+          EXPECT_EQ(s.live[0].slot_kind, GRCORE_SLOT_VALUE);
+          slot_of_r = s.live[0].value;
+        }
+      }
+      EXPECT_EQ(helper_sites, 1u);
+      // The catch call's own sites carry r too (the push and the call itself), in the same slot.
+      bool in_catch_sites = false;
+      for (size_t i = 0; i < meta->site_count; i++) {
+        const GRCORE_CodeSite & s = meta->sites[i];
+        if (s.kind == GRCORE_SITE_GC_POINT_FRAME_PUSH || (s.kind == GRCORE_SITE_GC_POINT_CALL && i > 0)) {
+          in_catch_sites = true;
+          bool has = false;
+          for (size_t k = 0; k < s.live_count; k++) has = has || s.live[k].value == slot_of_r;
+          EXPECT_TRUE(has) << "site " << i << " of kind " << s.kind;
+        }
+      }
+      EXPECT_TRUE(in_catch_sites);
+    }
+  }
 }
 
 TEST(CallIr, AFunctionThatIsNotCallableHasNoHooksAndMayNotCallCompiledCode) {

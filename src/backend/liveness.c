@@ -227,6 +227,9 @@ GRJIT_Result grjit_liveness_compute(const GRJIT_Function * f,
       for (size_t i = b->count; i-- > 0;) {
         union_landing(f, &b->ops[i], live_in, words, cur);
         transfer(&c, &b->ops[i], cur);
+        /* The exception edge leaves before the call's results are written, so what the
+         * landing reads is live before the call even where the call defines it. */
+        union_landing(f, &b->ops[i], live_in, words, cur);
       }
       if (memcmp(cur, &live_in[bi * words], words * sizeof *cur) != 0) {
         memcpy(&live_in[bi * words], cur, words * sizeof *cur);
@@ -395,6 +398,7 @@ GRJIT_Result grjit_liveness_compute(const GRJIT_Function * f,
           }
         }
         transfer(&c, op, cur);
+        union_landing(f, op, live_in, words, cur);
       }
       at += block_sites;
     }
