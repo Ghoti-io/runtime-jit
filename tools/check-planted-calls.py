@@ -706,7 +706,7 @@ _HOOKS_A64 = [
     ("the push hook's answer is tested in 64 bits", 'src/arm64/emit.c', _A64_MASK,
      _A64_MASK + "  grjit_a64_cbnz(a, GRJIT_A64_X0, exit);\n\n  /* The call. The stack arguments are made", ['testCalls']),
     ("a callable function's entry hook's answer is tested in 64 bits", 'src/arm64/emit.c', _A64_MASK4,
-     _A64_MASK4 + "    grjit_a64_cbnz(a, GRJIT_A64_X0, e->refuse);\n  }\n  grjit_a64_load(a, GRJIT_A64_MEM_X64, GRJIT_A64_X15, GRJIT_A64_SP, 16);", ['testCalls']),
+     _A64_MASK4 + "    grjit_a64_cbnz(a, GRJIT_A64_X0, e->refuse);\n  }\n  grjit_a64_load(a, GRJIT_A64_MEM_X64, GRJIT_A64_X15, GRJIT_A64_SP, 24);", ['testCalls']),
     ("a plain function's entry hook's answer is tested in 64 bits", 'src/arm64/emit.c', _A64_MASK6,
      _A64_MASK6 + "      grjit_a64_cbnz(a, GRJIT_A64_X0, e->refuse);\n    }\n    if (f->param_count != 0) {", ['testPoll']),
 ]
