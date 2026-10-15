@@ -843,7 +843,7 @@ M_WIN64 = [
     ('the body\'s RUNTIME_FUNCTION begins sixteen bytes after the internal entry', 'jit', 'src/code/memory.c',
      '    put32(body_rf, prologue->body_begin);', '    put32(body_rf, prologue->body_begin + 16);', ['testWin64_calls']),
     ('a body\'s unwind information names no frame register', 'jit', 'src/code/memory.c',
-     '  out[3] = (uint8_t)(setfp_end != 0 ? RBP : 0);', '  out[3] = 0;', ['testWin64_calls']),
+     '  out[3] = (uint8_t)(frame_register ? RBP : 0);', '  out[3] = 0;', ['testWin64_calls']),
 ]
 _CALLABLE_SIGNATURE = (
     'callable result metadata ignores its declared signature', 'jit',
