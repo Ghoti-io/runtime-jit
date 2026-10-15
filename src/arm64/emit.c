@@ -619,10 +619,11 @@ static void emit_tail_call(GRJIT_A64Emit * e, const GRJIT_Op * op) {
     }
     if (e->c.shape.has_result_buffer && n < ireg) load_slot(e, arg_regs_internal[n], GRJIT_SLOT_ARGS);
     load_slot(e, GRJIT_A64_X9, GRJIT_SLOT_CTX);
-  if (op->environment.kind == GRJIT_OPERAND_NONE)
-    load_slot(e, GRJIT_A64_X8, GRJIT_SLOT_ENV);
-  else
-    load_operand(e, GRJIT_A64_X8, &op->environment);
+    if (op->environment.kind == GRJIT_OPERAND_NONE) {
+      load_slot(e, GRJIT_A64_X8, GRJIT_SLOT_ENV);
+    } else {
+      load_operand(e, GRJIT_A64_X8, &op->environment);
+    }
     load_slot(e, GRJIT_A64_X16, entry_slot);
     grjit_a64_blr(a, GRJIT_A64_X16);
     grjit_a64_emit_callable_epilogue(e);
