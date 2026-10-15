@@ -1,9 +1,8 @@
 #!/bin/sh
 #
-# Fetch the WebAssembly spec suite's scalar numeric test files (the integer files i32 and i64 and
-# the eight float and conversion files), which the harness in tests/unit/test_wast.cpp runs the
-# IR against. Each digest was also checked against the git blob id the GitHub contents API gives
-# for the pinned commit (2026-10-10).
+# Fetch every .wast file under test/ at the pinned WebAssembly spec-suite commit, plus test/LICENSE.
+# The scalar runtime-jit harness continues to consume its original ten numeric files; lang-wasm
+# uses the same pinned checkout for syntax and classification gates.
 #
 # The suite is not committed here: it is somebody else's corpus, reproducible from a commit and a
 # URL, and a copy in this repository would be a snapshot that quietly stops being the thing every
@@ -21,8 +20,8 @@
 # Apache-2.0, papers/ under CC BY 4.0). Only files from test/ are fetched, with test/LICENSE
 # beside them, and nothing of them is copied into a repository of ours.
 #
-# `make test` needs the files, and the harness fails (it never skips) on a host that runs the
-# compiled code without them. `suite/install.sh --test` runs this first, with the network.
+# Runtime-jit's scalar tests and lang-wasm's parse gate fail when pinned files are absent or changed.
+# `suite/install.sh --test` runs this first, with the network.
 #
 # Usage:  tools/wasm/fetch.sh
 #
@@ -35,19 +34,9 @@ commit=$(cat "$root/tools/wasm/WASM_SPEC_COMMIT")
 dest="$root/third_party/wasm-spec/$commit"
 base="https://raw.githubusercontent.com/WebAssembly/spec/$commit"
 
-files="
-test/core/i32.wast
-test/core/i64.wast
-test/core/f32.wast
-test/core/f64.wast
-test/core/f32_cmp.wast
-test/core/f64_cmp.wast
-test/core/f32_bitwise.wast
-test/core/f64_bitwise.wast
-test/core/conversions.wast
-test/core/float_misc.wast
-test/LICENSE
-"
+files=$(cat "$root/tools/wasm/WAST_FILES")
+files="$files
+test/LICENSE"
 
 sha256() {
   if command -v sha256sum >/dev/null 2>&1; then
