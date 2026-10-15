@@ -853,6 +853,60 @@ _CALLABLE_SIGNATURE = (
 M.append(_CALLABLE_SIGNATURE)
 M_ARM64.append(_CALLABLE_SIGNATURE)
 M_WIN64.append(_CALLABLE_SIGNATURE)
+
+# The defects of the post-acceptance review of the Wasm IR work (2026-10-15), each shown by the one test that was written
+# for it: a tail call whose callee takes more stack arguments than its caller copies them over the frame's fixed and
+# register slots, so what it still needs of the frame (the environment, the result buffer's pointer, the explicit
+# environment's register) must be read first; the entry adapter reads `out` from its own frame, above the stack it has
+# just made; the shape's padding is measured against the function's own incoming bytes; and a catch landing's reads are
+# live before the call that defines them.
+_TAIL_ENV_AFTER = (
+    '  grjit_asm_mov_rr(a, GRJIT_R11, env_tmp);\n',
+    '  if (op->environment.kind == GRJIT_OPERAND_NONE)\n    grjit_asm_load64(a, GRJIT_R11, GRJIT_RBP, GRJIT_SLOT_ENV);\n'
+    '  else\n    load_operand(e, GRJIT_R11, &op->environment);\n')
+_TAIL_EXPLICIT_AFTER = (
+    '  grjit_asm_mov_rr(a, GRJIT_R11, env_tmp);\n',
+    '  if (op->environment.kind != GRJIT_OPERAND_NONE)\n    load_operand(e, GRJIT_R11, &op->environment);\n  else\n    grjit_asm_mov_rr(a, GRJIT_R11, env_tmp);\n')
+_TAIL_BUFFER_AFTER = (
+    '  if (buffer && n >= ireg) {\n    grjit_asm_store64(a, GRJIT_RBP,\n        (int32_t)(ra_new + 8 + 8 * (int64_t)(n - ireg)), buf_tmp);\n  }',
+    '  if (buffer && n >= ireg) {\n    grjit_asm_load64(a, buf_tmp, GRJIT_RBP, GRJIT_SLOT_ARGS);\n    grjit_asm_store64(a, GRJIT_RBP,\n        (int32_t)(ra_new + 8 + 8 * (int64_t)(n - ireg)), buf_tmp);\n  }')
+_REVIEW_X86 = [
+    ('a tail call reads its callee\'s inherited environment from the frame after the stack-argument copy', 'jit', 'src/x86_64/emit.c',
+     _TAIL_ENV_AFTER[0], _TAIL_ENV_AFTER[1], ['testCompile']),
+    ('a tail call reads its callee\'s explicit environment register from the frame after the stack-argument copy', 'jit', 'src/x86_64/emit.c',
+     _TAIL_EXPLICIT_AFTER[0], _TAIL_EXPLICIT_AFTER[1], ['testCompile']),
+    ('a tail call reads the result buffer\'s pointer from the frame after the stack-argument copy', 'jit', 'src/x86_64/emit.c',
+     _TAIL_BUFFER_AFTER[0], _TAIL_BUFFER_AFTER[1], ['testCompile']),
+    ('the shape\'s padding is measured against incoming bytes that are not yet known', 'jit', 'src/backend/emit_common.c',
+     '        int64_t want = (in_t - (int64_t)out->incoming_bytes) / 8 - ((int64_t)f->vreg_count + 4);',
+     '        int64_t want = (in_t - (int64_t)0) / 8 - ((int64_t)f->vreg_count + 4);', ['testTail']),
+    ('a catch landing\'s reads are not live before the call that defines them (the final sweep)', 'jit', 'src/backend/liveness.c',
+     '        transfer(&c, op, cur);\n        union_landing(f, op, live_in, words, cur);\n      }\n      at += block_sites;',
+     '        transfer(&c, op, cur);\n      }\n      at += block_sites;', ['testCall_ir']),
+    ('a catch landing\'s reads are not live before the call that defines them (the block fixpoint)', 'jit', 'src/backend/liveness.c',
+     '        transfer(&c, &b->ops[i], cur);\n        /* The exception edge leaves before the call\'s results are written, so what the\n'
+     '         * landing reads is live before the call even where the call defines it. */\n'
+     '        union_landing(f, &b->ops[i], live_in, words, cur);\n',
+     '        transfer(&c, &b->ops[i], cur);\n', ['testCall_ir']),
+]
+M.extend(_REVIEW_X86)
+M.append(('the SysV entry adapter reads `out` from where it was before it made the stack-argument area', 'jit', 'src/x86_64/emit.c',
+          '    grjit_asm_load64(a, GRJIT_RAX, GRJIT_RSP, (int32_t)(in_bytes + 32));',
+          '    grjit_asm_load64(a, GRJIT_RAX, GRJIT_RSP, 32);', ['testCompile']))
+M_WIN64.extend(_REVIEW_X86)
+M_WIN64.append(('the Win64 stack probe uses r11, which carries the environment, as its cursor and does not keep the environment across it', 'jit',
+                'src/x86_64/emit.c',
+                '    grjit_asm_movd_xr(a, GRJIT_XMM0, GRJIT_R11, true);\n    emit_stack_probe(e, alloc, GRJIT_RAX, GRJIT_R11);\n    grjit_asm_movd_rx(a, GRJIT_R11, GRJIT_XMM0, true);\n',
+                '    emit_stack_probe(e, alloc, GRJIT_RAX, GRJIT_R11);\n', ['testWin64_calls', 'testCompile']))
+M_ARM64.extend([
+    ('an arm64 tail call reads the result buffer\'s pointer from the frame after the stack-argument copy', 'jit', 'src/arm64/emit.c',
+     '  if (e->c.shape.has_result_buffer && n >= ireg) {\n    store_slot(e, GRJIT_A64_X11,\n        (int32_t)(sp_new + 8 * (int64_t)(n - ireg)));\n  }',
+     '  if (e->c.shape.has_result_buffer && n >= ireg) {\n    load_slot(e, GRJIT_A64_X11, GRJIT_SLOT_ARGS);\n    store_slot(e, GRJIT_A64_X11,\n        (int32_t)(sp_new + 8 * (int64_t)(n - ireg)));\n  }',
+     ['testCompile']),
+    ('the arm64 entry adapter reads `out` from where it was before it made the stack-argument area', 'jit', 'src/arm64/emit.c',
+     '    grjit_a64_load(a, GRJIT_A64_MEM_X64, GRJIT_A64_X10, GRJIT_A64_SP, (int32_t)in_bytes);',
+     '    grjit_a64_load(a, GRJIT_A64_MEM_X64, GRJIT_A64_X10, GRJIT_A64_SP, 0);', ['testCompile']),
+])
 # The x86 emitter's new-IR paths are shared with Win64. Run each same defect against the
 # Win64 build as well, so the Windows ABI's compile path proves it rejects each regression.
 for _entry in M:
@@ -860,7 +914,8 @@ for _entry in M:
         M_WIN64.append((_entry[0] + ' (Win64)',) + tuple(_entry[1:]))
 # The register-count edit is also a host mutation: what reads the convention out of the emitted code
 # runs on every host, so the native run shows it too.
-_HOST_READABLE = ('register-argument count', 'status is read', 'hidden pointer', 'beside its hidden pointer', 'not probed', 'no shadow space')
+_HOST_READABLE = ('register-argument count', 'status is read', 'hidden pointer', 'beside its hidden pointer', 'not probed', 'no shadow space',
+                  'does not keep the environment across it')
 for _e in M_WIN64:
     if any(_k in _e[0] for _k in _HOST_READABLE):
         M.append((_e[0] + ' (read from the emitted code on this host)',) + tuple(_e[1:]))
