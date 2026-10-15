@@ -898,6 +898,10 @@ M_WIN64.append(('the Win64 stack probe uses r11, which carries the environment, 
                 'src/x86_64/emit.c',
                 '    grjit_asm_movd_xr(a, GRJIT_XMM0, GRJIT_R11, true);\n    emit_stack_probe(e, alloc, GRJIT_RAX, GRJIT_R11);\n    grjit_asm_movd_rx(a, GRJIT_R11, GRJIT_XMM0, true);\n',
                 '    emit_stack_probe(e, alloc, GRJIT_RAX, GRJIT_R11);\n', ['testWin64_calls', 'testCompile']))
+M_WIN64.append(('the Win64 stack probe uses r11 as its cursor and the environment is not kept (seen by the run test alone, under wine)', 'jit',
+                'src/x86_64/emit.c',
+                '    grjit_asm_movd_xr(a, GRJIT_XMM0, GRJIT_R11, true);\n    emit_stack_probe(e, alloc, GRJIT_RAX, GRJIT_R11);\n    grjit_asm_movd_rx(a, GRJIT_R11, GRJIT_XMM0, true);\n',
+                '    emit_stack_probe(e, alloc, GRJIT_RAX, GRJIT_R11);\n', ['testCompile']))
 M_ARM64.extend([
     ('an arm64 tail call reads the result buffer\'s pointer from the frame after the stack-argument copy', 'jit', 'src/arm64/emit.c',
      '  if (e->c.shape.has_result_buffer && n >= ireg) {\n    store_slot(e, GRJIT_A64_X11,\n        (int32_t)(sp_new + 8 * (int64_t)(n - ireg)));\n  }',
