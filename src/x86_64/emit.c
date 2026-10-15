@@ -715,6 +715,26 @@ static void emit_tail_call(GRJIT_Emit * e, const GRJIT_Op * op) {
   const int64_t in_t = grjit_stack_arg_bytes(n + (e->c.shape.has_result_buffer ? 1u : 0u), ireg);
   const int32_t ra_new = (int32_t)(8 + in_a - in_t); /* `ra'`, from `rbp` */
   const bool buffer = e->c.shape.has_result_buffer;
+  if (in_a == 0 && in_t == 0) {
+    /* No stack argument comes in or goes out, so `ra'` is `ra` and the link and the return
+     * address are already where the callee's prologue looks for them, and the arguments are
+     * all in registers: nothing is written to this frame before the jump, so nothing needs
+     * reading ahead of a copy, and each value is loaded into the register it is passed in. */
+    grjit_asm_load64(a, ICTX(e), GRJIT_RBP, GRJIT_SLOT_CTX);
+    if (op->environment.kind == GRJIT_OPERAND_NONE)
+      grjit_asm_load64(a, GRJIT_R11, GRJIT_RBP, GRJIT_SLOT_ENV);
+    else
+      load_operand(e, GRJIT_R11, &op->environment);
+    if (buffer) grjit_asm_load64(a, IARG(e, n), GRJIT_RBP, GRJIT_SLOT_ARGS);
+    grjit_asm_load64(a, GRJIT_RAX, GRJIT_RBP, entry_slot);
+    for (size_t i = 0; i < n; i++) {
+      grjit_asm_load64(a, IARG(e, i), GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, i));
+    }
+    grjit_asm_lea(a, GRJIT_RSP, GRJIT_RBP, ra_new);
+    grjit_asm_load64(a, GRJIT_RBP, GRJIT_RSP, -8);
+    grjit_asm_jmp_r(a, GRJIT_RAX);
+    return;
+  }
   /* Everything this frame still holds that the copy can overwrite is read first, into a
    * register that nothing below writes before its use: the copy runs over the frame's slots
    * when the callee takes more stack arguments than this function does, and those include the
