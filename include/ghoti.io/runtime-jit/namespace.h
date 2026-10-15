@@ -313,7 +313,6 @@
 #define grjit_builder_vreg GHOTIIO_RUNTIME_JIT(grjit_builder_vreg)
 #define grjit_code_address GHOTIIO_RUNTIME_JIT(grjit_code_address)
 #define grjit_code_call GHOTIIO_RUNTIME_JIT(grjit_code_call)
-#define grjit_code_call_legacy GHOTIIO_RUNTIME_JIT(grjit_code_call_legacy)
 #define grjit_code_callable GHOTIIO_RUNTIME_JIT(grjit_code_callable)
 #define grjit_code_destroy GHOTIIO_RUNTIME_JIT(grjit_code_destroy)
 #define grjit_code_entry GHOTIIO_RUNTIME_JIT(grjit_code_entry)

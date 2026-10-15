@@ -129,7 +129,7 @@ TEST(Compile, CallableEntryPassesItsResultBufferToTheInternalReturn) {
   EXPECT_EQ(out[1], 0x7766554433221100ull);
 }
 
-TEST(Compile, OneResultCallableKeepsTheLegacyInternalArgumentArea) {
+TEST(Compile, OneResultCallableKeepsTheSingleRegisterReturnAndNoResultBuffer) {
   B b("single-result-callable");
   GRJIT_CallHooks hooks{};
   hooks.deopt = [](void *, uint64_t) -> uint32_t { return 0; };

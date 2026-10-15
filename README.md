@@ -17,9 +17,9 @@ operations are emitted by the SysV x86-64, Win64 x86-64 and arm64 backends.
 
 Callable IR supports typed multi-result calls and returns: the first result is
 in the internal return register and remaining results use the caller-owned
-buffer. Zero and one-result calls retain the legacy ABI. Catchable slot and
-pointer calls add an explicit landing block for the engine's pending exception;
-`RETHROW` propagates that exception status. The JIT exposes call-return offsets,
+buffer. Zero and one-result calls use the single return register alone.
+Catchable slot and pointer calls add an explicit landing block for the
+engine's pending exception; `RETHROW` propagates that exception status. The JIT exposes call-return offsets,
 landing block IDs, and landing code offsets through `grjit_code_exception_sites`, separately from native unwind and
 GC/deoptimization metadata. Tag matching and exception values remain engine
 owned; `catch_exception` performs matching and unwinds guest activations before

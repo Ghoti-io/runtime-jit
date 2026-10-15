@@ -260,18 +260,9 @@ GRJIT_API size_t grjit_code_result_count(const GRJIT_Code * code);
  * @param args The parameters, `grjit_code_param_count` words.
  * @param out At least ::grjit_code_out_words words.
  * @return A ::GRJIT_Exit.
- *
- * The environment argument was added to this in-development API. Existing
- * source and binary clients must be rebuilt; callers that need the former
- * context-as-environment behavior can use ::grjit_code_call_legacy.
  */
 GRJIT_API uint32_t grjit_code_call(const GRJIT_Code * code, void * context,
     void * environment, const uint64_t * args, uint64_t * out);
-
-/** Compatibility form for callers that used the original context-only entry.
- * It passes context as both the runtime context and language environment. */
-GRJIT_API uint32_t grjit_code_call_legacy(const GRJIT_Code * code,
-    void * context, const uint64_t * args, uint64_t * out);
 
 
 #ifdef __cplusplus

@@ -216,11 +216,6 @@ uint32_t grjit_code_call(const GRJIT_Code * code, void * context,
   return code->entry(context, environment, args, out);
 }
 
-uint32_t grjit_code_call_legacy(const GRJIT_Code * code, void * context,
-    const uint64_t * args, uint64_t * out) {
-  return grjit_code_call(code, context, context, args, out);
-}
-
 #if GRJIT_HAVE_BACKEND
 static GRJIT_Result verify_for_compile(
     const GRJIT_Function * f, const GRJIT_Limits * limits) {
