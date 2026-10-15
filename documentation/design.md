@@ -608,8 +608,11 @@ count and its callers' argument count must agree (an engine's types do that).
 a caller, and it is first in the code, so `grjit_code_entry` is still the start of
 the mapping. It saves `rbp`, keeps `out` and the context in its own frame, runs
 the entry hook (so a refusal is still `GRJIT_EXIT_REFUSED` and still the hook's),
-loads the arguments from `args`, sets `rbp` to the chain-end marker, calls the
-internal entry, clears the walk-start cell, and turns the status into an exit.
+loads the arguments from `args` (and, for a function with several results, passes
+`out + 1` as the argument after the last parameter, a register or a stack word, read from
+the adapter's own frame, which is `in_A` above the stack area it has just made:
+`Compile.TheEntryOfACallableFunctionWritesEveryResultAtEveryParameterCount`), sets `rbp`
+to the chain-end marker, calls the internal entry, clears the walk-start cell, and turns the status into an exit.
 For callable code `GRJIT_EXIT_DEOPT` means every compiled frame, this function's
 included, has been rebuilt into its guest frame, `out[0]` is the cause, and `out`
 holds no frame state. The internal entry follows, on a 16-byte boundary with a

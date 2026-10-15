@@ -2223,7 +2223,8 @@ static void emit_adapter(GRJIT_Emit * e) {
     grjit_asm_load64(a, IARG(e, i), scratch, (int32_t)(8 * i));
   }
   if (e->c.shape.has_result_buffer) {
-    grjit_asm_load64(a, GRJIT_RAX, GRJIT_RSP, 32);
+    /* `out` is in the adapter's frame, which is `in_bytes` above the stack just made. */
+    grjit_asm_load64(a, GRJIT_RAX, GRJIT_RSP, (int32_t)(in_bytes + 32));
     grjit_asm_lea(a, GRJIT_RAX, GRJIT_RAX, 8);
     if (params < ireg) grjit_asm_mov_rr(a, IARG(e, params), GRJIT_RAX);
     else grjit_asm_store64(a, GRJIT_RSP, (int32_t)(8 * (params - ireg)), GRJIT_RAX);

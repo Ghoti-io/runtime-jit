@@ -1591,7 +1591,8 @@ static void emit_adapter(GRJIT_A64Emit * e) {
     grjit_a64_load(a, GRJIT_A64_MEM_X64, arg_regs_internal[i], GRJIT_A64_X15, (int32_t)(8 * i));
   }
   if (e->c.shape.has_result_buffer) {
-    grjit_a64_load(a, GRJIT_A64_MEM_X64, GRJIT_A64_X10, GRJIT_A64_SP, 0);
+    /* `out` is in the adapter's frame, which is `in_bytes` above the stack just made. */
+    grjit_a64_load(a, GRJIT_A64_MEM_X64, GRJIT_A64_X10, GRJIT_A64_SP, (int32_t)in_bytes);
     grjit_a64_add_imm(a, GRJIT_A64_X10, GRJIT_A64_X10, 8, false);
     if (params < ireg) grjit_a64_mov_rr(a, arg_regs_internal[params], GRJIT_A64_X10);
     else grjit_a64_store(a, GRJIT_A64_MEM_X64, GRJIT_A64_X10, GRJIT_A64_SP,

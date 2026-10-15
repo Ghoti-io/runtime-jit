@@ -284,6 +284,44 @@ TEST(Compile, TailSlotCallTransfersItsExplicitCalleeEnvironment) {
   EXPECT_EQ(result.out[0], reinterpret_cast<uintptr_t>(&callee_environment_b));
 }
 
+/* The entry adapter passes the caller-owned result buffer (`out + 1`) as the argument after
+ * the last parameter: in a register below the register-argument count and on the stack at or
+ * above it. It reads `out` from its own frame, which is above the stack area it has just
+ * made, so a parameter count that needs stack arguments is where an offset forgotten there
+ * shows: the buffer pointer is garbage and the results are not written (or are written
+ * through a wild pointer). */
+TEST(Compile, TheEntryOfACallableFunctionWritesEveryResultAtEveryParameterCount) {
+  GRJIT_REQUIRE_BACKEND();
+  const GRJIT_CallHooks hooks = environment_hooks();
+  for (size_t results = 1; results <= 4; results++) {
+    for (size_t params = 0; params <= 16; params++) {
+      SCOPED_TRACE(testing::Message() << "results=" << results << " params=" << params);
+      JitWorld w;
+      B b("many-params-many-results", 1);
+      ASSERT_EQ(grjit_builder_set_callable(b.b, &hooks, results), GRJIT_OK);
+      std::vector<GRJIT_VReg> ps;
+      for (size_t i = 0; i < params; i++) ps.push_back(b.param(GRJIT_TYPE_I64));
+      b.at(b.block());
+      std::vector<GRJIT_Operand> ret;
+      for (size_t k = 0; k < results; k++) {
+        ret.push_back(k < params ? V(ps[params - 1 - k]) : I(static_cast<int64_t>(0x6000 + k)));
+      }
+      ASSERT_EQ(grjit_builder_ret_multi(b.b, ret.data(), ret.size()), GRJIT_OK);
+      Fn f(b.finish());
+      Compiled c(f, w.pages());
+      ASSERT_TRUE(c) << grjit_result_string(c.result);
+      std::vector<uint64_t> given;
+      for (size_t i = 0; i < params; i++) given.push_back(500 + i);
+      const auto r = c.run(w.ctx, given);
+      ASSERT_EQ(r.exit, GRJIT_EXIT_RETURNED);
+      ASSERT_GE(r.out.size(), results);
+      for (size_t k = 0; k < results; k++) {
+        EXPECT_EQ(r.out[k], k < params ? given[params - 1 - k] : 0x6000 + k) << "result " << k;
+      }
+    }
+  }
+}
+
 /* A tail call to a callee that needs more stack arguments than the caller has replaces
  * the caller's frame with a copy that runs over the frame's fixed slots, among them the
  * environment and the result-buffer pointer. Both must be read before the copy: the
