@@ -1813,7 +1813,7 @@ uint32_t h_noop(void *, uint64_t) { return 0; }
 /* The metadata's frame size of a callable function of `params` parameters and no
  * other register whose only operation is a tail call with `t_args` immediate
  * arguments, or, for `t_args < 0`, a return, emitted for `arch`. */
-uint32_t frame_bytes_of(GRJIT_Arch arch, int params, int t_args) {
+uint32_t frame_bytes_of(GRJIT_Arch arch, int params, int t_args, size_t results = 1) {
   B b("shape", 1);
   GRJIT_CallHooks h{};
   h.push = h_noop_push;
@@ -1821,7 +1821,7 @@ uint32_t frame_bytes_of(GRJIT_Arch arch, int params, int t_args) {
   h.compile = h_noop;
   h.deopt = h_noop;
   h.tail = h_noop_push;
-  b.callable(h);
+  b.callable(h, results);
   for (int i = 0; i < params; i++) {
     b.param(GRJIT_TYPE_I64);
   }
@@ -1829,7 +1829,7 @@ uint32_t frame_bytes_of(GRJIT_Arch arch, int params, int t_args) {
   static uint64_t word;
   if (t_args >= 0) {
     std::vector<GRJIT_Operand> args(static_cast<size_t>(t_args), I(1));
-    b.tail_call_slot(&word, 1, args, GRCORE_PollIdentity{0, 0}, {grjit_frame_slot_dead()});
+    b.tail_call_slot(&word, 1, args, GRCORE_PollIdentity{0, 0}, {grjit_frame_slot_dead()}, results);
   } else {
     b.ret();
   }
@@ -1878,6 +1878,33 @@ TEST(Tail, TheFramesPaddingIsExactlyWhatTheStagingAreaNeedsAndNoFunctionWithoutA
       // registers, and nothing else.
       EXPECT_EQ(frame_bytes_of(arch, params, -1), static_cast<uint32_t>((params + 4) * 8 + 15) / 16 * 16);
     }
+  }
+}
+
+TEST(Tail, TheFramesPaddingIsExactForAFunctionWithAResultBufferAndIncomingStackArguments) {
+  // The result buffer is one more incoming word and one more word of the replacement's
+  // stack area, and the pad is measured against the function's own incoming bytes, which
+  // have to be known when the first tail call is looked at: with them read before they were
+  // set, a function with stack arguments was padded for a staging area it did not need.
+  for (GRJIT_Arch arch : {GRJIT_ARCH_X86_64, GRJIT_ARCH_ARM64}) {
+    const int regs = arch == GRJIT_ARCH_ARM64 ? 8 : 6;
+    SCOPED_TRACE(arch);
+    long padded = 0;
+    for (size_t results : {size_t{2}, size_t{3}}) {
+      for (int params = 0; params <= 16; params++) {
+        for (int t = 0; t <= 16; t++) {
+          SCOPED_TRACE(testing::Message() << "results=" << results << " params=" << params << " t=" << t);
+          auto in_bytes = [regs](int n) { return n > regs ? (n - regs) * 8 + ((n - regs) % 2) * 8 : 0; };
+          const int in_a = in_bytes(params + 1);
+          const int in_t = in_bytes(t + 1);
+          const int want_pad = std::max(0, (in_t - in_a) / 8 - (params + 4));
+          const int slots = params + 4 + t + 1 + want_pad;
+          EXPECT_EQ(frame_bytes_of(arch, params, t, results), static_cast<uint32_t>(slots * 8 + 15) / 16 * 16);
+          if (want_pad > 0) padded++;
+        }
+      }
+    }
+    EXPECT_GT(padded, 0) << "the sweep reaches a padded frame";
   }
 }
 

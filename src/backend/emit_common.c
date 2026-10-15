@@ -65,8 +65,10 @@ void grjit_callable_shape(
     return;
   }
   /* Whole 16-byte units, so the stack stays 16-aligned across the call. */
-  size_t incoming_count = f->param_count;
   out->has_result_buffer = grjit_function_result_count(f) > 1;
+  /* The padding below is measured against these, so they are known before the walk. */
+  out->incoming_bytes = grjit_stack_arg_bytes(
+      f->param_count + (out->has_result_buffer ? 1u : 0u), reg_args);
   for (size_t b = 0; b < f->block_count; b++) {
     for (size_t i = 0; i < f->blocks[b].count; i++) {
       const GRJIT_Op * op = &f->blocks[b].ops[i];
@@ -100,8 +102,6 @@ void grjit_callable_shape(
       }
     }
   }
-  if (out->has_result_buffer) incoming_count++;
-  out->incoming_bytes = grjit_stack_arg_bytes(incoming_count, reg_args);
   out->area_slots = out->args_area + out->result_area;
   out->extra_slots = out->pad + out->area_slots + (out->has_calls ? 1u : 0u);
 }

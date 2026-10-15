@@ -267,9 +267,9 @@ struct B {
    * block. */
   void tail_call_slot(const void * slot_entry, uint64_t callee,
       std::vector<GRJIT_Operand> args, GRCORE_PollIdentity id,
-      std::vector<GRJIT_FrameSlot> state) {
+      std::vector<GRJIT_FrameSlot> state, size_t result_count = 1) {
     EXPECT_EQ(grjit_builder_tail_call_slot(b, reinterpret_cast<uintptr_t>(slot_entry),
-                  callee, 1, args.data(), args.size(), id, state.data(), state.size()),
+                  callee, result_count, args.data(), args.size(), id, state.data(), state.size()),
         GRJIT_OK);
   }
   void tail_call_ptr(GRJIT_Operand target, uint64_t callee, std::vector<GRJIT_Operand> args,
