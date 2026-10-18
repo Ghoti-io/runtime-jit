@@ -21,6 +21,7 @@
 #include "../../src/backend/backend_internal.h"
 #include "../../src/code/code_internal.h"
 
+#include <cstring>
 #include <random>
 
 using namespace fx;
@@ -42,7 +43,7 @@ void expect_tail_refused_here() {
   b.callable(h);
   b.at(b.block());
   static uint64_t word;
-  b.tail_call_slot(&word, 1, {V(x)}, GRCORE_PollIdentity{0, 0}, {});
+  b.tail_call_slot(&word, 1, {V(x)}, GRCORE_PollIdentity{0, 0, 0}, {});
   Fn f(b.finish());
   JitWorld w;
   Compiled c(f, w.pages());
@@ -1810,6 +1811,56 @@ uint32_t h_noop_push(void *, void *, uint64_t, const uint64_t *, uint64_t, uint6
 void h_noop_pop(void *) {}
 uint32_t h_noop(void *, uint64_t) { return 0; }
 
+bool has_x86_store_r11_at_rbp(const GRJIT_Emitted & e, int32_t displacement) {
+  const auto * bytes = static_cast<const uint8_t *>(e.bytes);
+  for (size_t i = e.internal_offset; i + 4 <= e.size; ++i) {
+    const uint8_t rex = bytes[i];
+    const uint8_t modrm = bytes[i + 2];
+    if ((rex & 0xf8) != 0x48 || (rex & 4) == 0 || (rex & 1) != 0 ||
+        bytes[i + 1] != 0x89 || ((modrm & 0xc7) != 0x45 && (modrm & 0xc7) != 0x85)) {
+      continue;
+    }
+    int32_t actual = 0;
+    if ((modrm & 0xc0) == 0x40) {
+      actual = static_cast<int8_t>(bytes[i + 3]);
+    } else {
+      if (i + 7 > e.size) continue;
+      std::memcpy(&actual, bytes + i + 3, sizeof(actual));
+    }
+    if (actual == displacement) return true;
+  }
+  return false;
+}
+
+bool has_x86_saved_link_copy(const GRJIT_Emitted & e, int32_t displacement) {
+  const auto * bytes = static_cast<const uint8_t *>(e.bytes);
+  for (size_t load = e.internal_offset; load + 4 <= e.size; ++load) {
+    const uint8_t rex = bytes[load];
+    if ((rex & 0xf8) != 0x48 || (rex & 1) != 0 || bytes[load + 1] != 0x8b ||
+        (bytes[load + 2] & 0xc7) != 0x45 || bytes[load + 3] != 0) {
+      continue;
+    }
+    const unsigned reg = ((bytes[load + 2] >> 3) & 7) | ((rex & 4) ? 8 : 0);
+    for (size_t store = load + 4; store + 4 <= e.size && store <= load + 24; ++store) {
+      const uint8_t store_rex = bytes[store];
+      if ((store_rex & 0xf8) != 0x48 || (store_rex & 1) != 0 || bytes[store + 1] != 0x89) continue;
+      const uint8_t modrm = bytes[store + 2];
+      if ((modrm & 0xc7) != 0x45 && (modrm & 0xc7) != 0x85) continue;
+      const unsigned source = ((modrm >> 3) & 7) | ((store_rex & 4) ? 8 : 0);
+      if (source != reg) continue;
+      int32_t actual = 0;
+      if ((modrm & 0xc0) == 0x40) {
+        actual = static_cast<int8_t>(bytes[store + 3]);
+      } else {
+        if (store + 7 > e.size) continue;
+        std::memcpy(&actual, bytes + store + 3, sizeof(actual));
+      }
+      if (actual == displacement) return true;
+    }
+  }
+  return false;
+}
+
 /* The metadata's frame size of a callable function of `params` parameters and no
  * other register whose only operation is a tail call with `t_args` immediate
  * arguments, or, for `t_args < 0`, a return, emitted for `arch`. */
@@ -1829,7 +1880,7 @@ uint32_t frame_bytes_of(GRJIT_Arch arch, int params, int t_args, size_t results 
   static uint64_t word;
   if (t_args >= 0) {
     std::vector<GRJIT_Operand> args(static_cast<size_t>(t_args), I(1));
-    b.tail_call_slot(&word, 1, args, GRCORE_PollIdentity{0, 0}, {grjit_frame_slot_dead()}, results);
+    b.tail_call_slot(&word, 1, args, GRCORE_PollIdentity{0, 0, 0}, {grjit_frame_slot_dead()}, results);
   } else {
     b.ret();
   }
@@ -1842,6 +1893,55 @@ uint32_t frame_bytes_of(GRJIT_Arch arch, int params, int t_args, size_t results 
 }
 
 } // namespace
+
+TEST(Tail, StackArgumentTailCallStoresReturnAddressAtTheReplacementStackPointer) {
+  GRJIT_CallHooks hooks{};
+  hooks.push = h_noop_push;
+  hooks.pop = h_noop_pop;
+  hooks.compile = h_noop;
+  hooks.deopt = h_noop;
+  hooks.tail = h_noop_push;
+  B b("return-address-tail", 1);
+  b.callable(hooks);
+  b.at(b.block());
+  static uint64_t slot;
+  std::vector<GRJIT_Operand> args(12, I(1));
+  b.tail_call_slot(&slot, 12, args, GRCORE_PollIdentity{1, 2, 0},
+      {grjit_frame_slot_dead()});
+  Fn f(b.finish());
+  GRJIT_Emitted emitted{};
+  ASSERT_EQ(grjit_emit_for(GRJIT_ARCH_X86_64, f, grjit_allocator_default(),
+      nullptr, nullptr, 0x40, &emitted), GRJIT_OK);
+  // Twelve outgoing arguments need six stack words, moving the callee's return
+  // address (held in r11) to rbp - 40.
+  EXPECT_TRUE(has_x86_store_r11_at_rbp(emitted, -40));
+  EXPECT_FALSE(has_x86_store_r11_at_rbp(emitted, 8));
+  grjit_emitted_free(&emitted);
+}
+
+TEST(Tail, StackArgumentTailCallCopiesTheSavedFrameLinkIntoTheReplacementFrame) {
+  GRJIT_CallHooks hooks{};
+  hooks.push = h_noop_push;
+  hooks.pop = h_noop_pop;
+  hooks.compile = h_noop;
+  hooks.deopt = h_noop;
+  hooks.tail = h_noop_push;
+  B b("saved-link-tail", 1);
+  b.callable(hooks);
+  b.at(b.block());
+  static uint64_t slot;
+  std::vector<GRJIT_Operand> args(12, I(1));
+  b.tail_call_slot(&slot, 12, args, GRCORE_PollIdentity{1, 2, 0},
+      {grjit_frame_slot_dead()});
+  Fn f(b.finish());
+  GRJIT_Emitted emitted{};
+  ASSERT_EQ(grjit_emit_for(GRJIT_ARCH_X86_64, f, grjit_allocator_default(),
+      nullptr, nullptr, 0x40, &emitted), GRJIT_OK);
+  // The saved parent frame link is loaded from [rbp] and stored one word below
+  // the replacement return address at rbp - 48.
+  EXPECT_TRUE(has_x86_saved_link_copy(emitted, -48));
+  grjit_emitted_free(&emitted);
+}
 
 TEST(Tail, TheFramesPaddingIsExactlyWhatTheStagingAreaNeedsAndNoFunctionWithoutATailCallHasAny) {
   // A function with `params` parameters has 4 fixed slots (including its
@@ -2203,7 +2303,7 @@ TEST(Tail, TheHooksSiteNamesTheArgumentsAndTheExitsSiteOnlyWhatItsStateNames) {
   GRJIT_VReg arg = b.param(GRJIT_TYPE_REF);  // an argument only
   b.at(b.block());
   static uint64_t word;
-  b.tail_call_slot(&word, 1, {V(x), V(arg)}, GRCORE_PollIdentity{0, 0},
+  b.tail_call_slot(&word, 1, {V(x), V(arg)}, GRCORE_PollIdentity{0, 0, 0},
       {grjit_frame_slot_vreg(x), grjit_frame_slot_vreg(keep)});
   Fn f(b.finish());
   JitWorld w;

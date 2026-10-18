@@ -350,7 +350,12 @@ static void put_op(Out * o, const GRJIT_Function * f, const GRJIT_Op * op) {
         put(o, "call.ptr ");
         put_operand(o, &op->a);
       }
-      put(o, " callee=%" PRIu64 "(", op->callee);
+      put(o, " callee=");
+      if (op->callee_operand.kind == GRJIT_OPERAND_NONE)
+        put(o, "%" PRIu64, op->callee);
+      else
+        put_operand(o, &op->callee_operand);
+      put(o, "(");
       for (size_t i = 0; i < op->arg_count; i++) {
         put(o, i == 0 ? "" : ", ");
         put_operand(o, &op->args[i]);
@@ -369,8 +374,12 @@ static void put_op(Out * o, const GRJIT_Function * f, const GRJIT_Op * op) {
         put(o, "tail_call.ptr ");
         put_operand(o, &op->a);
       }
-      put(o, " callee=%" PRIu64 " results=%zu(", op->callee,
-          op->callee_result_count);
+      put(o, " callee=");
+      if (op->callee_operand.kind == GRJIT_OPERAND_NONE)
+        put(o, "%" PRIu64, op->callee);
+      else
+        put_operand(o, &op->callee_operand);
+      put(o, " results=%zu(", op->callee_result_count);
       for (size_t i = 0; i < op->arg_count; i++) {
         put(o, i == 0 ? "" : ", ");
         put_operand(o, &op->args[i]);

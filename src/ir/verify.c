@@ -757,6 +757,14 @@ static GRJIT_Result check_op(
     case GRJIT_OP_TAIL_CALL_PTR: {
       const bool slot = op->kind == GRJIT_OP_CALL_SLOT || op->kind == GRJIT_OP_TAIL_CALL_SLOT;
       const bool tail = op->kind == GRJIT_OP_TAIL_CALL_SLOT || op->kind == GRJIT_OP_TAIL_CALL_PTR;
+      if (op->callee_operand.kind != GRJIT_OPERAND_NONE &&
+          (op->callee_operand.kind != GRJIT_OPERAND_VREG ||
+           !vreg_ok(v, op->callee_operand.vreg) ||
+           type_of(v, op->callee_operand.vreg) != GRJIT_TYPE_I64)) {
+        return refuse(v, GRJIT_ERR_INVALID,
+            "block b%u op %zu: dynamic callee token must be an i64 register",
+            block, index);
+      }
       if (op->environment.kind != GRJIT_OPERAND_NONE &&
           op->environment.kind != GRJIT_OPERAND_IMM &&
           !(op->environment.kind == GRJIT_OPERAND_VREG &&
@@ -1817,6 +1825,11 @@ GRJIT_Result grjit_function_verify(const GRJIT_Function * function,
   grjit_limits_resolve(limits, &v.limits);
   v.reason = reason;
   v.reason_size = reason_size;
+  if (function->token > UINT32_MAX && !function->guest_function_explicit &&
+      function->state_count != 0) {
+    return refuse(&v, GRJIT_ERR_INVALID,
+        "module-qualified token requires an explicit guest function for frame states");
+  }
   if (function->block_count > v.limits.max_blocks) {
     return refuse(&v, GRJIT_ERR_LIMIT, "%zu blocks, the limit is %zu",
         function->block_count, v.limits.max_blocks);

@@ -101,6 +101,13 @@ void grjit_emit_operand_load(GRJIT_Emit * e, GRJIT_Reg r, const GRJIT_Operand * 
   load_operand(e, r, o);
 }
 
+static void load_callee(GRJIT_Emit *e, GRJIT_Reg r, const GRJIT_Op *op) {
+  if (op->callee_operand.kind == GRJIT_OPERAND_NONE)
+    grjit_asm_mov_ri(&e->as, r, op->callee);
+  else
+    load_operand(e, r, &op->callee_operand);
+}
+
 static void store_result(GRJIT_Emit * e, GRJIT_VReg dst, GRJIT_Reg r) {
   grjit_asm_store64(&e->as, GRJIT_RBP, grjit_emit_slot(dst), r);
 }
@@ -436,6 +443,24 @@ static GRJIT_Label emit_dispatch(
     grjit_asm_cmp_ri(a, GRJIT_RAX, (int32_t)GRCORE_ENTRY_REFUSED);
     grjit_asm_jcc(a, GRJIT_COND_BE, slow);
     grjit_asm_bind(a, back);
+    if (op->callee_operand.kind != GRJIT_OPERAND_NONE) {
+      /* A dynamic slot address is supplied by the engine. Check that its
+       * registered entry bears the same token and call signature before
+       * either the frame-push hook or native entry can run. */
+      grjit_asm_store64(a, GRJIT_RBP, entry_slot, GRJIT_RAX);
+      grjit_asm_load64(a, C_ARG(e, 0), GRJIT_RBP, GRJIT_SLOT_CTX);
+      grjit_asm_mov_rr(a, C_ARG(e, 1), GRJIT_RAX);
+      load_callee(e, C_ARG(e, 2), op);
+      grjit_asm_mov_ri(a, C_ARG(e, 3), GRJIT_CALL_SIGNATURE(n,
+          op->kind == GRJIT_OP_TAIL_CALL_SLOT
+              ? op->callee_result_count : op->result_count));
+      grjit_asm_mov_ri(a, GRJIT_RAX,
+          (uint64_t)(uintptr_t)grjit_call_target_ok);
+      grjit_asm_call_r(a, GRJIT_RAX);
+      grjit_asm_test_rr(a, GRJIT_RAX, GRJIT_RAX);
+      grjit_asm_jcc(a, GRJIT_COND_E, exit);
+      grjit_asm_load64(a, GRJIT_RAX, GRJIT_RBP, entry_slot);
+    }
     p.kind = GRJIT_PENDING_CALL_SLOW;
     p.entry = slow;
     p.back = back;
@@ -449,7 +474,7 @@ static GRJIT_Label emit_dispatch(
      * an address that is not is never entered. */
     grjit_asm_load64(a, C_ARG(e, 0), GRJIT_RBP, GRJIT_SLOT_CTX);
     grjit_asm_mov_rr(a, C_ARG(e, 1), GRJIT_RAX);
-    grjit_asm_mov_ri(a, C_ARG(e, 2), op->callee);
+    load_callee(e, C_ARG(e, 2), op);
     grjit_asm_mov_ri(a, C_ARG(e, 3), GRJIT_CALL_SIGNATURE(n,
         op->kind == GRJIT_OP_TAIL_CALL_SLOT || op->kind == GRJIT_OP_TAIL_CALL_PTR
             ? op->callee_result_count : op->result_count));
@@ -509,7 +534,7 @@ static void emit_guest_call(GRJIT_Emit * e, const GRJIT_Op * op) {
     grjit_asm_load64(a, C_ARG(e, 1), GRJIT_RBP, GRJIT_SLOT_ENV);
   else
     load_operand(e, C_ARG(e, 1), &op->environment);
-  grjit_asm_mov_ri(a, C_ARG(e, 2), op->callee);
+  load_callee(e, C_ARG(e, 2), op);
   grjit_asm_lea(a, C_ARG(e, 3), GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, 0));
   if (e->win64) {
     grjit_asm_mov_ri(a, GRJIT_RAX, n);
@@ -574,7 +599,7 @@ static void emit_guest_call(GRJIT_Emit * e, const GRJIT_Op * op) {
     grjit_asm_jcc(a, GRJIT_COND_NE, not_exception);
     grjit_asm_load64(a, C_ARG(e, 0), GRJIT_RBP, GRJIT_SLOT_CTX);
     grjit_asm_load64(a, C_ARG(e, 1), GRJIT_RBP, GRJIT_SLOT_ENV);
-    grjit_asm_mov_ri(a, C_ARG(e, 2), op->callee);
+    load_callee(e, C_ARG(e, 2), op);
     grjit_asm_mov_ri(a, C_ARG(e, 3), op->landing_target);
     grjit_asm_mov_ri(a, GRJIT_RAX, (uint64_t)(uintptr_t)f->hooks.catch_exception);
     grjit_asm_call_r(a, GRJIT_RAX);
@@ -650,7 +675,7 @@ static void emit_tail_call(GRJIT_Emit * e, const GRJIT_Op * op) {
     grjit_asm_load64(a, C_ARG(e, 1), GRJIT_RBP, GRJIT_SLOT_ENV);
   else
     load_operand(e, C_ARG(e, 1), &op->environment);
-  grjit_asm_mov_ri(a, C_ARG(e, 2), op->callee);
+  load_callee(e, C_ARG(e, 2), op);
   grjit_asm_lea(a, C_ARG(e, 3), GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, 0));
   if (e->win64) {
     grjit_asm_mov_ri(a, GRJIT_RAX, n);
@@ -2251,7 +2276,11 @@ static void emit_adapter(GRJIT_Emit * e) {
   }
   grjit_asm_load64(a, ICTX(e), GRJIT_RSP, (int32_t)(in_bytes + 8));
   grjit_asm_load64(a, GRJIT_R11, GRJIT_RSP, (int32_t)(in_bytes + 16));
-  grjit_asm_mov_ri64(a, GRJIT_RBP, (uint64_t)GRCORE_COMPILED_CHAIN_END);
+  /* Keep the wide chain marker out of the rbp immediate form. The entry's
+   * saved base is consumed by runtime-core's precise walk, so it must retain
+   * every bit on both callable entry paths. */
+  grjit_asm_mov_ri64(a, GRJIT_RAX, (uint64_t)GRCORE_COMPILED_CHAIN_END);
+  grjit_asm_mov_rr(a, GRJIT_RBP, GRJIT_RAX);
   grjit_asm_lea_rip(a, GRJIT_RAX, e->internal);
   grjit_asm_call_r(a, GRJIT_RAX);
   /* rsp is where it was after the frame was made: the callee popped the stack
@@ -2372,7 +2401,8 @@ static void emit_adapter_win64(GRJIT_Emit * e) {
   }
   grjit_asm_load64(a, ICTX(e), GRJIT_RSP, s_ctx);
   grjit_asm_load64(a, GRJIT_R11, GRJIT_RSP, s_env);
-  grjit_asm_mov_ri64(a, GRJIT_RBP, (uint64_t)GRCORE_COMPILED_CHAIN_END);
+  grjit_asm_mov_ri64(a, GRJIT_RAX, (uint64_t)GRCORE_COMPILED_CHAIN_END);
+  grjit_asm_mov_rr(a, GRJIT_RBP, GRJIT_RAX);
   grjit_asm_lea_rip(a, GRJIT_RAX, e->internal);
   grjit_asm_call_r(a, GRJIT_RAX);
   /* The callee popped the stack arguments: rsp is `in_A` above the bottom. */

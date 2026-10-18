@@ -69,7 +69,7 @@ GRJIT_Function * loop_with_poll() {
   b.cmp(GRJIT_CMP_LT, t, V(i), V(n));
   b.br_if(V(t), body, done);
   b.at(body);
-  b.poll({7, 3}, {grjit_frame_slot_vreg(i)});
+  b.poll({7, 3, 0}, {grjit_frame_slot_vreg(i)});
   b.bin(GRJIT_OP_ADD, sum, V(sum), V(i));
   b.bin(GRJIT_OP_ADD, i, V(i), I(1));
   b.br(head);
@@ -140,7 +140,7 @@ TEST(Poll, ANonZeroAnswerEndsTheFunctionAsRefusedAndNothingAfterItRuns) {
   B b("refuse", 0);
   b.poll_helper(poll_helper);
   b.at(b.block());
-  b.poll({1, 1});
+  b.poll({1, 1, 0});
   b.call(GRJIT_NO_VREG, reinterpret_cast<const void *>(body_helper));
   b.ret(I(5));
   Fn f(b.finish());
@@ -165,7 +165,7 @@ TEST(Poll, ARefusalValueKeepsAllThirtyTwoBitsOfTheHelpersAnswer) {
   B b("refuse", 0);
   b.poll_helper(poll_helper);
   b.at(b.block());
-  b.poll({1, 1});
+  b.poll({1, 1, 0});
   b.ret(I(5));
   Fn f(b.finish());
   Compiled c(f, w.pages());
@@ -273,7 +273,7 @@ TEST(Poll, AHelperAnswerIsItsLowThirtyTwoBitsWhateverTheRegisterHoldsAboveInAPla
     b.cmp(GRJIT_CMP_LT, t, V(i), V(n));
     b.br_if(V(t), body, done);
     b.at(body);
-    b.poll({7, 3}, {grjit_frame_slot_vreg(i)});
+    b.poll({7, 3, 0}, {grjit_frame_slot_vreg(i)});
     b.bin(GRJIT_OP_ADD, sum, V(sum), V(i));
     b.bin(GRJIT_OP_ADD, i, V(i), I(1));
     b.br(head);
@@ -294,7 +294,7 @@ TEST(Poll, AHelperAnswerIsItsLowThirtyTwoBitsWhateverTheRegisterHoldsAboveInAPla
     B b("refuse", 0);
     b.poll_helper(grjit_test_garbage_poll);
     b.at(b.block());
-    b.poll({1, 1});
+    b.poll({1, 1, 0});
     b.ret(I(5));
     Fn f(b.finish());
     Compiled c(f, w.pages());

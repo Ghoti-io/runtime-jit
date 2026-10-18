@@ -79,6 +79,19 @@ static void load_operand(GRJIT_A64Emit * e, GRJIT_A64Reg r, const GRJIT_Operand 
   }
 }
 
+void grjit_a64_emit_operand_load(GRJIT_A64Emit *e, GRJIT_A64Reg r,
+    const GRJIT_Operand *o) {
+  load_operand(e, r, o);
+}
+
+static void load_callee(GRJIT_A64Emit *e, GRJIT_A64Reg r,
+    const GRJIT_Op *op) {
+  if (op->callee_operand.kind == GRJIT_OPERAND_NONE)
+    grjit_a64_mov_ri(&e->as, r, op->callee);
+  else
+    load_operand(e, r, &op->callee_operand);
+}
+
 static void store_result(GRJIT_A64Emit * e, GRJIT_VReg dst, GRJIT_A64Reg r) {
   store_slot(e, r, grjit_emit_slot(dst));
 }
@@ -383,6 +396,20 @@ static GRJIT_Label emit_dispatch(
     grjit_a64_cmp_imm(a, GRJIT_A64_X16, GRCORE_ENTRY_REFUSED);
     grjit_a64_bcond(a, GRJIT_A64_LS, slow);
     grjit_a64_bind(a, back);
+    if (op->callee_operand.kind != GRJIT_OPERAND_NONE) {
+      store_slot(e, GRJIT_A64_X16, entry_slot);
+      load_slot(e, GRJIT_A64_X0, GRJIT_SLOT_CTX);
+      grjit_a64_mov_rr(a, GRJIT_A64_X1, GRJIT_A64_X16);
+      load_callee(e, GRJIT_A64_X2, op);
+      grjit_a64_mov_ri(a, GRJIT_A64_X3, GRJIT_CALL_SIGNATURE(n,
+          op->kind == GRJIT_OP_TAIL_CALL_SLOT
+              ? op->callee_result_count : op->result_count));
+      grjit_a64_mov_ri(a, GRJIT_A64_X16,
+          (uint64_t)(uintptr_t)grjit_call_target_ok);
+      grjit_a64_blr(a, GRJIT_A64_X16);
+      grjit_a64_cbz(a, GRJIT_A64_X0, exit);
+      load_slot(e, GRJIT_A64_X16, entry_slot);
+    }
     p.kind = GRJIT_PENDING_CALL_SLOW;
     p.entry = slow;
     p.back = back;
@@ -396,7 +423,7 @@ static GRJIT_Label emit_dispatch(
      * that is not is never entered. */
     load_slot(e, GRJIT_A64_X0, GRJIT_SLOT_CTX);
     grjit_a64_mov_rr(a, GRJIT_A64_X1, GRJIT_A64_X16);
-    grjit_a64_mov_ri(a, GRJIT_A64_X2, op->callee);
+    load_callee(e, GRJIT_A64_X2, op);
     grjit_a64_mov_ri(a, GRJIT_A64_X3, GRJIT_CALL_SIGNATURE(n,
         op->kind == GRJIT_OP_TAIL_CALL_SLOT || op->kind == GRJIT_OP_TAIL_CALL_PTR
             ? op->callee_result_count : op->result_count));
@@ -438,7 +465,7 @@ static void emit_frame_hook(GRJIT_A64Emit * e, const GRJIT_Op * op, GRJIT_Label 
     load_slot(e, GRJIT_A64_X1, GRJIT_SLOT_ENV);
   else
     load_operand(e, GRJIT_A64_X1, &op->environment);
-  grjit_a64_mov_ri(a, GRJIT_A64_X2, op->callee);
+  load_callee(e, GRJIT_A64_X2, op);
   lea(e, GRJIT_A64_X3, GRJIT_A64_FP, GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, 0));
   grjit_a64_mov_ri(a, GRJIT_A64_X4, op->arg_count);
   grjit_a64_mov_ri(a, GRJIT_A64_X5,
@@ -519,7 +546,7 @@ static void emit_guest_call(GRJIT_A64Emit * e, const GRJIT_Op * op) {
     grjit_a64_bcond(a, GRJIT_A64_NE, not_exception);
     load_slot(e, GRJIT_A64_X0, GRJIT_SLOT_CTX);
     load_slot(e, GRJIT_A64_X1, GRJIT_SLOT_ENV);
-    grjit_a64_mov_ri(a, GRJIT_A64_X2, op->callee);
+    load_callee(e, GRJIT_A64_X2, op);
     grjit_a64_mov_ri(a, GRJIT_A64_X3, op->landing_target);
     grjit_a64_mov_ri(a, GRJIT_A64_X16, (uint64_t)(uintptr_t)f->hooks.catch_exception);
     grjit_a64_blr(a, GRJIT_A64_X16);

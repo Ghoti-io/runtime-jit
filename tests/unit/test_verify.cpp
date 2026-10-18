@@ -108,7 +108,7 @@ TEST(Verify, ConstantFailingGuardMakesFollowingReturnUnreachable) {
   b.at(entry);
   ASSERT_EQ(grjit_builder_br_if(b.b, V(condition), guarded, value_return), GRJIT_OK);
   b.at(guarded);
-  ASSERT_EQ(grjit_builder_guard(b.b, I(0), GRCORE_PollIdentity{1, 1}, nullptr, 0), GRJIT_OK);
+  ASSERT_EQ(grjit_builder_guard(b.b, I(0), GRCORE_PollIdentity{1, 1, 0}, nullptr, 0), GRJIT_OK);
   ASSERT_EQ(grjit_builder_ret(b.b, grjit_operand_none()), GRJIT_OK);
   b.at(value_return);
   ASSERT_EQ(grjit_builder_ret(b.b, V(value)), GRJIT_OK);
@@ -166,7 +166,7 @@ TEST(Verify, TailCallDoesNotDisableTypeChecksBetweenReturnBlocks) {
   b.at(tail);
   const GRJIT_Operand args[] = {V(wide)};
   ASSERT_EQ(grjit_builder_tail_call_slot(b.b, 0x1000, 99, 1, args, 1,
-      GRCORE_PollIdentity{1, 1}, nullptr, 0), GRJIT_OK);
+      GRCORE_PollIdentity{1, 1, 0}, nullptr, 0), GRJIT_OK);
   Fn f(b.finish());
   std::string why;
   EXPECT_EQ(verify(f, &why), GRJIT_ERR_INVALID);
@@ -449,7 +449,7 @@ TEST(Verify, AFrameStateOfTheWrongLengthIsInvalid) {
     GRJIT_VReg v = b.param(GRJIT_TYPE_I64);
     b.poll_helper(poll_helper);
     b.at(b.block());
-    b.poll({1, 2}, {grjit_frame_slot_vreg(v)}); // the function has 2 slots
+    b.poll({1, 2, 0}, {grjit_frame_slot_vreg(v)}); // the function has 2 slots
     b.ret();
   }, 2);
   EXPECT_EQ(r.first, GRJIT_ERR_INVALID);
@@ -460,7 +460,7 @@ TEST(Verify, AFrameStateNamingARegisterTheFunctionLacksIsInvalid) {
   auto r = check([](B & b) {
     b.poll_helper(poll_helper);
     b.at(b.block());
-    b.guard(I(1), {1, 2}, {grjit_frame_slot_vreg(40)});
+    b.guard(I(1), {1, 2, 0}, {grjit_frame_slot_vreg(40)});
     b.ret();
   }, 1);
   EXPECT_EQ(r.first, GRJIT_ERR_INVALID);
@@ -471,7 +471,7 @@ TEST(Verify, AFrameStateNamingAnUnassignedRegisterIsAnUnassignedUse) {
   auto r = check([](B & b) {
     GRJIT_VReg v = b.reg();
     b.at(b.block());
-    b.guard(I(1), {1, 2}, {grjit_frame_slot_vreg(v)});
+    b.guard(I(1), {1, 2, 0}, {grjit_frame_slot_vreg(v)});
     b.ret();
   }, 1);
   EXPECT_EQ(r.first, GRJIT_ERR_INVALID);
@@ -481,7 +481,7 @@ TEST(Verify, AFrameStateNamingAnUnassignedRegisterIsAnUnassignedUse) {
 TEST(Verify, APollNeedsAHelperAndAGcPointCallNeedsAKind) {
   auto no_helper = check([](B & b) {
     b.at(b.block());
-    b.poll({1, 2});
+    b.poll({1, 2, 0});
     b.ret();
   });
   EXPECT_EQ(no_helper.first, GRJIT_ERR_INVALID);
@@ -631,10 +631,10 @@ TEST(Verify, ALimitAboveWhatTheBackendPassesInRegistersIsClampedToSix) {
   b.at(b.block());
   std::vector<GRJIT_Operand> args(7, I(1));
   EXPECT_EQ(grjit_builder_call(b.b, GRJIT_NO_VREG, 0x1000, GRJIT_CALL_NO_GC,
-                GRCORE_SITE_GC_POINT_CALL, args.data(), 7, {0, 0}, nullptr, 0),
+                GRCORE_SITE_GC_POINT_CALL, args.data(), 7, {0, 0, 0}, nullptr, 0),
       GRJIT_ERR_LIMIT);
   EXPECT_EQ(grjit_builder_call(b.b, GRJIT_NO_VREG, 0x1000, GRJIT_CALL_NO_GC,
-                GRCORE_SITE_GC_POINT_CALL, args.data(), 6, {0, 0}, nullptr, 0),
+                GRCORE_SITE_GC_POINT_CALL, args.data(), 6, {0, 0, 0}, nullptr, 0),
       GRJIT_OK);
 }
 

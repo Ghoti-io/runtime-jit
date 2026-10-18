@@ -19,8 +19,12 @@
 
 #include "../../src/code/code_internal.h"
 
+#include <climits>
 #include <csignal>
+#include <cstdint>
+#include <cstring>
 #include <random>
+#include <vector>
 #ifndef _WIN32
 #include <sys/wait.h>
 #include <unistd.h>
@@ -31,6 +35,30 @@ using namespace fx;
 namespace {
 
 int64_t fib_ref(int64_t n) { return n < 2 ? n : fib_ref(n - 1) + fib_ref(n - 2); }
+
+size_t find_bytes(const uint8_t *bytes, size_t length,
+    const std::vector<uint8_t> &pattern) {
+  if (pattern.empty() || pattern.size() > length) return length;
+  for (size_t i = 0; i <= length - pattern.size(); ++i)
+    if (std::memcmp(bytes + i, pattern.data(), pattern.size()) == 0) return i;
+  return length;
+}
+
+std::vector<uint8_t> x86_store_rcx_disp(int32_t disp, uint8_t source) {
+  std::vector<uint8_t> bytes{0x48, 0x89};
+  if (disp == 0) {
+    bytes.push_back(static_cast<uint8_t>((source << 3) | 1u));
+  } else if (disp >= INT8_MIN && disp <= INT8_MAX) {
+    bytes.push_back(static_cast<uint8_t>(0x40u | (source << 3) | 1u));
+    bytes.push_back(static_cast<uint8_t>(disp));
+  } else {
+    bytes.push_back(static_cast<uint8_t>(0x80u | (source << 3) | 1u));
+    const uint32_t u = static_cast<uint32_t>(disp);
+    for (unsigned i = 0; i < 4; ++i)
+      bytes.push_back(static_cast<uint8_t>(u >> (8u * i)));
+  }
+  return bytes;
+}
 
 bool catch_accept = false;
 uint32_t catch_calls = 0;
@@ -73,6 +101,134 @@ int add_fib(Engine & e) {
 
 } // namespace
 
+/* Calls are emitted for x86-64 SysV and arm64 (Win64 is story 7b's). Where
+ * they are not, a test proves the refusal rather than silently skipping. */
+#if FX_HAVE_CALLS_ASM
+#define CALLS_ONLY_WHERE_EMITTED() (void)0
+#else
+namespace {
+void expect_calls_refused_here() {
+  B b("ident", 0);
+  GRJIT_VReg x = b.param(GRJIT_TYPE_I64);
+  GRJIT_CallHooks h{};
+  h.deopt = [](void *, uint64_t) -> uint32_t { return 0; };
+  b.callable(h);
+  b.at(b.block());
+  b.ret(V(x));
+  Fn f(b.finish());
+  JitWorld w;
+  Compiled c(f, w.pages());
+  EXPECT_EQ(c.result, GRJIT_ERR_UNSUPPORTED)
+      << "a callable function is refused with a clear error";
+  EXPECT_FALSE(c);
+}
+} // namespace
+#define CALLS_ONLY_WHERE_EMITTED() \
+  do { \
+    expect_calls_refused_here(); \
+    return; \
+  } while (0)
+#endif
+
+TEST(Calls, PointerCallStoresWalkCellBeforeFramePush) {
+  GRJIT_CallHooks hooks{};
+  hooks.push = test_push;
+  hooks.pop = test_pop;
+  hooks.compile = test_compile;
+  hooks.deopt = test_deopt;
+  B b("pointer-walk-cell", 1);
+  b.callable(hooks);
+  const GRJIT_VReg target = b.param(GRJIT_TYPE_PTR);
+  const GRJIT_VReg result = b.reg(GRJIT_TYPE_I64);
+  b.at(b.block());
+  const GRCORE_PollIdentity id{1, 2, 0};
+  const std::vector<GRJIT_FrameSlot> state{grjit_frame_slot_vreg(target)};
+  b.call_ptr(result, V(target), 0x7789, {}, id, state, id, state);
+  b.ret(V(result));
+  Fn f(b.finish());
+  char why[256]{};
+  ASSERT_EQ(grjit_function_verify(f, nullptr, why, sizeof(why)), GRJIT_OK) << why;
+  GRJIT_Emitted emitted{};
+  ASSERT_EQ(grjit_emit_for(GRJIT_ARCH_X86_64, f, grjit_allocator_default(),
+      nullptr, nullptr, 0x40, &emitted), GRJIT_OK);
+  size_t push_offset = emitted.size;
+  for (size_t i = 0; i < emitted.meta.meta.site_count; ++i) {
+    if (emitted.meta.meta.sites[i].kind == GRCORE_SITE_GC_POINT_FRAME_PUSH) {
+      push_offset = emitted.meta.meta.sites[i].code_offset;
+      break;
+    }
+  }
+  ASSERT_NE(push_offset, emitted.size) << "the pointer call must emit its push hook";
+  const auto *bytes = emitted.bytes;
+  const size_t prefix = emitted.internal_offset;
+  ASSERT_LT(prefix, push_offset);
+  const std::vector<uint8_t> lea_rax_rip{0x48, 0x8d, 0x05};
+  const std::vector<uint8_t> load_context{0x48, 0x8b, 0x4d, 0xf8};
+  const auto store_frame = x86_store_rcx_disp(
+      static_cast<int32_t>(grcore_jit_layout()->walk_cell_offset), 5);
+  const auto store_return = x86_store_rcx_disp(
+      static_cast<int32_t>(grcore_jit_layout()->walk_cell_offset + 8u), 0);
+  /* The site is immediately after `call rax`. The hook address load may use
+   * several encodings, depending on its address. The walk-cell LEA must
+   * resolve to this exact return PC: the preceding
+   * dispatch also stores a walk cell, but resolves to a different PC. */
+  ASSERT_GE(push_offset, prefix + 2u);
+  const size_t hook_call = push_offset - 2u;
+  EXPECT_EQ(bytes[push_offset - 2u], 0xffu);
+  EXPECT_EQ(bytes[push_offset - 1u], 0xd0u);
+  const size_t walk_bytes = 7u + load_context.size() +
+      store_frame.size() + store_return.size();
+  bool found_push_walk_cell = false;
+  for (size_t at = prefix; at + walk_bytes <= hook_call; ++at) {
+    if (std::memcmp(bytes + at, lea_rax_rip.data(), lea_rax_rip.size()) != 0)
+      continue;
+    uint32_t displacement = 0;
+    for (unsigned i = 0; i < 4; ++i)
+      displacement |= static_cast<uint32_t>(bytes[at + 3u + i]) << (8u * i);
+    const int64_t target = static_cast<int64_t>(at + 7u) +
+        static_cast<int32_t>(displacement);
+    if (target != static_cast<int64_t>(push_offset)) continue;
+    size_t next = at + 7u;
+    if (std::memcmp(bytes + next, load_context.data(), load_context.size()) != 0)
+      continue;
+    next += load_context.size();
+    if (std::memcmp(bytes + next, store_frame.data(), store_frame.size()) != 0)
+      continue;
+    next += store_frame.size();
+    if (std::memcmp(bytes + next, store_return.data(), store_return.size()) != 0)
+      continue;
+    found_push_walk_cell = true;
+    break;
+  }
+  EXPECT_TRUE(found_push_walk_cell)
+      << "the pointer-call push must record its own frame and exact return PC";
+  grjit_emitted_free(&emitted);
+}
+
+TEST(Calls, CallableAdapterMovesFullWidthChainMarkerIntoFramePointer) {
+  CALLS_ONLY_WHERE_EMITTED();
+  GRJIT_CallHooks hooks{};
+  hooks.push=test_push;hooks.pop=test_pop;hooks.compile=test_compile;
+  hooks.deopt=test_deopt;
+  B b("full-width-chain-marker");
+  b.callable(hooks);
+  const GRJIT_VReg result=b.reg();
+  b.at(b.block());
+  b.cnst(result,55);
+  b.ret(V(result));
+  Fn f(b.finish());
+  GRJIT_Emitted emitted{};
+  ASSERT_EQ(grjit_emit_for(GRJIT_ARCH_X86_64,f,grjit_allocator_default(),
+      nullptr,nullptr,0x40,&emitted),GRJIT_OK);
+  const std::vector<uint8_t> marker_sequence{
+      0x48,0xB8,0x01,0x4E,0x45,0x54,0x49,0x4A,0x52,0x47,
+      0x48,0x89,0xC5};
+  EXPECT_NE(find_bytes(emitted.bytes,emitted.internal_offset,marker_sequence),
+      emitted.internal_offset)
+      << "the entry adapter must move the complete chain marker into rbp";
+  grjit_emitted_free(&emitted);
+}
+
 TEST(Calls, CatchCallEmitsExceptionSiteAndLandingOffset) {
   B b("catch-edge");
   GRJIT_CallHooks h{};
@@ -85,7 +241,7 @@ TEST(Calls, CatchCallEmitsExceptionSiteAndLandingOffset) {
   const auto body = b.block();
   const auto landing = b.block();
   b.at(body);
-  const GRCORE_PollIdentity id{1, 2};
+  const GRCORE_PollIdentity id{1, 2, 0};
   ASSERT_EQ(grjit_builder_call_slot_catch_results(b.b, nullptr, 0, 0x123400,
                 0x7789, nullptr, 0, id, nullptr, 0, id, nullptr, 0, landing), GRJIT_OK);
   ASSERT_EQ(grjit_builder_ret(b.b, grjit_operand_none()), GRJIT_OK);
@@ -116,7 +272,7 @@ TEST(Calls, CatchCallMapKeepsPriorReferenceUsedByItsLanding) {
   const auto body = b.block();
   const auto landing = b.block();
   b.at(body);
-  const GRCORE_PollIdentity id{9, 1};
+  const GRCORE_PollIdentity id{9, 1, 0};
   ASSERT_EQ(grjit_builder_call_slot_catch_results(b.b, &result, 1, 0x1000, 7,
       nullptr, 0, id, nullptr, 0, id, nullptr, 0, landing), GRJIT_OK);
   ASSERT_EQ(grjit_builder_ret(b.b, V(result)), GRJIT_OK);
@@ -149,8 +305,10 @@ TEST(Calls, CatchCallRoutesMatchingExceptionToLandingAndPropagatesUnmatched) {
   hooks.catch_exception = test_catch_exception;
 
   B callee_builder("throwing-callee");
-  callee_builder.callable(hooks);
+  callee_builder.callable(hooks, 0);
   ASSERT_EQ(grjit_builder_set_token(callee_builder.b, static_cast<uint64_t>(callee)), GRJIT_OK);
+  ASSERT_EQ(grjit_builder_set_guest_function(callee_builder.b,
+      static_cast<uint32_t>(callee)), GRJIT_OK);
   callee_builder.at(callee_builder.block());
   ASSERT_EQ(grjit_builder_rethrow(callee_builder.b), GRJIT_OK);
   Fn callee_fn(callee_builder.finish());
@@ -175,7 +333,9 @@ TEST(Calls, CatchCallRoutesMatchingExceptionToLandingAndPropagatesUnmatched) {
   const auto landing = caller_builder.block();
   const auto value = caller_builder.reg();
   caller_builder.at(body);
-  const GRCORE_PollIdentity id{3, 7};
+  const GRCORE_PollIdentity id{3, 7, 0};
+  ASSERT_EQ(grjit_builder_set_guest_function(caller_builder.b,
+      static_cast<uint32_t>(id.function)), GRJIT_OK);
   ASSERT_EQ(grjit_builder_call_slot_catch_results_env(caller_builder.b, nullptr, 0,
       reinterpret_cast<uintptr_t>(e.slots[static_cast<size_t>(callee)]),
       static_cast<uint64_t>(callee), V(callee_environment), nullptr, 0, id, nullptr, 0, id, nullptr, 0,
@@ -208,38 +368,50 @@ TEST(Calls, CatchCallRoutesMatchingExceptionToLandingAndPropagatesUnmatched) {
       {reinterpret_cast<uintptr_t>(&distinct_callee_environment)});
   EXPECT_EQ(propagated.exit, GRJIT_EXIT_EXCEPTION);
   EXPECT_EQ(catch_calls, 2u);
+
+  B dynamic_builder("dynamic-catching-caller");
+  dynamic_builder.callable(hooks);
+  const GRJIT_VReg dynamic_environment = dynamic_builder.param(GRJIT_TYPE_PTR);
+  const GRJIT_VReg dynamic_token = dynamic_builder.param(GRJIT_TYPE_I64);
+  const auto dynamic_body = dynamic_builder.block();
+  const auto dynamic_landing = dynamic_builder.block();
+  const auto dynamic_value = dynamic_builder.reg();
+  dynamic_builder.at(dynamic_body);
+  ASSERT_EQ(grjit_builder_call_slot_dynamic_catch_results_env(
+      dynamic_builder.b, nullptr, 0,
+      I(reinterpret_cast<uintptr_t>(e.slots[static_cast<size_t>(callee)])),
+      V(dynamic_token), V(dynamic_environment), nullptr, 0, id,
+      nullptr, 0, id, nullptr, 0, dynamic_landing), GRJIT_OK);
+  ASSERT_EQ(grjit_builder_const(dynamic_builder.b, dynamic_value, 10), GRJIT_OK);
+  ASSERT_EQ(grjit_builder_ret(dynamic_builder.b, V(dynamic_value)), GRJIT_OK);
+  dynamic_builder.at(dynamic_landing);
+  ASSERT_EQ(grjit_builder_const(dynamic_builder.b, dynamic_value, 88), GRJIT_OK);
+  ASSERT_EQ(grjit_builder_ret(dynamic_builder.b, V(dynamic_value)), GRJIT_OK);
+  Fn dynamic_fn(dynamic_builder.finish());
+  Compiled dynamic_code(dynamic_fn.f, e.pages());
+  ASSERT_TRUE(dynamic_code) << grjit_result_string(dynamic_code.result);
+  EXPECT_EQ(grjit_call_target_ok(e.ctx,
+      e.slots[static_cast<size_t>(callee)]->entry,
+      static_cast<uint64_t>(callee), GRJIT_CALL_SIGNATURE(0, 0)), 1u);
+  catch_accept = true;
+  auto dynamic_caught = dynamic_code.run(e.ctx, &caller_environment,
+      {reinterpret_cast<uintptr_t>(&distinct_callee_environment),
+          static_cast<uint64_t>(callee)});
+  EXPECT_EQ(catch_calls, 3u);
+  EXPECT_EQ(catch_callee_seen, static_cast<uint64_t>(callee));
+  EXPECT_EQ(catch_landing_seen, dynamic_landing);
+  ASSERT_EQ(dynamic_caught.exit, GRJIT_EXIT_RETURNED);
+  EXPECT_EQ(dynamic_caught.out[0], 88u);
+  EXPECT_EQ(catch_callee_seen, static_cast<uint64_t>(callee));
+  EXPECT_EQ(catch_landing_seen, dynamic_landing);
+  catch_accept = false;
+  auto dynamic_propagated = dynamic_code.run(e.ctx, &caller_environment,
+      {reinterpret_cast<uintptr_t>(&distinct_callee_environment),
+          static_cast<uint64_t>(callee)});
+  EXPECT_EQ(dynamic_propagated.exit, GRJIT_EXIT_EXCEPTION);
   EXPECT_EQ(grcore_entry_slot_clear(e.ctx, e.slots[static_cast<size_t>(callee)]), GRCORE_OK);
   EXPECT_EQ(grcore_code_unregister(e.ctx, start), GRCORE_OK);
 }
-
-/* Calls are emitted for x86-64 SysV and arm64 (Win64 is story 7b's). Where they are not, a
- * test does not skip, which would count as a test that proved nothing: it shows the refusal
- * instead, which is what that target promises. */
-#if FX_HAVE_CALLS_ASM
-#define CALLS_ONLY_WHERE_EMITTED() (void)0
-#else
-namespace {
-void expect_calls_refused_here() {
-  B b("ident", 0);
-  GRJIT_VReg x = b.param(GRJIT_TYPE_I64);
-  GRJIT_CallHooks h{};
-  h.deopt = [](void *, uint64_t) -> uint32_t { return 0; };
-  b.callable(h);
-  b.at(b.block());
-  b.ret(V(x));
-  Fn f(b.finish());
-  JitWorld w;
-  Compiled c(f, w.pages());
-  EXPECT_EQ(c.result, GRJIT_ERR_UNSUPPORTED) << "a callable function is refused with a clear error";
-  EXPECT_FALSE(c);
-}
-} // namespace
-#define CALLS_ONLY_WHERE_EMITTED() \
-  do { \
-    expect_calls_refused_here(); \
-    return; \
-  } while (0)
-#endif
 
 TEST(Calls, ATrapPropagatesThroughTheCallableInternalConvention) {
   CALLS_ONLY_WHERE_EMITTED();
@@ -1064,7 +1236,7 @@ TEST(Calls, ACallMakesThreeSitesAndEachMapNamesWhatTheKindOfSiteNeedsOnEveryTarg
     GRJIT_VReg flag = b.reg(GRJIT_TYPE_I64);
     b.at(b.block());
     static uint64_t word;
-    const GRCORE_PollIdentity id{4, 21}, exit_id{4, 22};
+    const GRCORE_PollIdentity id{4, 21, 0}, exit_id{4, 22, 0};
     if (through_pointer) {
       b.call_ptr(res, V(ptr), 1, {V(x), V(arg)}, id, {grjit_frame_slot_vreg(x), grjit_frame_slot_vreg(keep)},
           exit_id, {grjit_frame_slot_vreg(x), grjit_frame_slot_vreg(exit_keep)});
@@ -1682,10 +1854,10 @@ TEST(Calls, TheEntryAdapterClearsTheWalkStartCellWhetherTheCallReturnsOrDeoptimi
     b.callable(h);
     GRJIT_VReg x = b.param(GRJIT_TYPE_I64);
     b.at(b.block());
-    b.call_gc(GRJIT_NO_VREG, reinterpret_cast<const void *>(gc_noop_helper), {}, GRCORE_PollIdentity{1, 0},
+    b.call_gc(GRJIT_NO_VREG, reinterpret_cast<const void *>(gc_noop_helper), {}, GRCORE_PollIdentity{1, 0, 0},
         {grjit_frame_slot_vreg(x)});
     if (how == 1) {
-      b.guard(I(0), GRCORE_PollIdentity{1, 1}, {grjit_frame_slot_vreg(x)});
+      b.guard(I(0), GRCORE_PollIdentity{1, 1, 0}, {grjit_frame_slot_vreg(x)});
     }
     b.ret(V(x));
     Fn f(b.finish());
@@ -2379,6 +2551,16 @@ TEST(Calls, ADerivedPointerPassedAsAnArgumentFollowsItsBaseWhenThePushCollects) 
       p.ret(s);
       e.set(m, p.done());
     }
+    ASSERT_TRUE(e.compile_fn(m));
+    bool found_derived = false;
+    for (size_t i = 0; i < e.code_of(m).meta.site_count; ++i) {
+      const GRCORE_CodeSite & site = e.code_of(m).meta.sites[i];
+      if (site.kind == GRCORE_SITE_GC_POINT_FRAME_PUSH) {
+        found_derived = site.derived_count != 0;
+        break;
+      }
+    }
+    ASSERT_TRUE(found_derived) << "the caller's push site must map its derived argument";
     Outcome o = e.run_compiled(m, {});
     ASSERT_TRUE(o.finished);
     EXPECT_EQ(o.value, 8484u);

@@ -33,7 +33,7 @@ GRJIT_CallHooks all_hooks() {
   return h;
 }
 
-const GRCORE_PollIdentity kId{7, 3};
+const GRCORE_PollIdentity kId{7, 3, 0};
 uint64_t g_entry_word = 0;
 
 /* A callable function of one I64 parameter, a REF and a PTR register, with its

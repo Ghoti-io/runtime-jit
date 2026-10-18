@@ -19,6 +19,8 @@ void h_pop(void *) {}
 uint32_t h_compile(void *, uint64_t) { return 0; }
 uint32_t h_deopt(void *, uint64_t) { return 0; }
 uint32_t h_catch(void *, void *, uint64_t, uint32_t) { return 0; }
+uint32_t h_tail(void *, void *, uint64_t, const uint64_t *, uint64_t,
+    uint64_t) { return 0; }
 
 GRJIT_CallHooks all_hooks() {
   GRJIT_CallHooks h{};
@@ -27,11 +29,12 @@ GRJIT_CallHooks all_hooks() {
   h.compile = h_compile;
   h.deopt = h_deopt;
   h.catch_exception = h_catch;
+  h.tail = h_tail;
   return h;
 }
 
-const GRCORE_PollIdentity kId{7, 3};
-const GRCORE_PollIdentity kExit{7, 2};
+const GRCORE_PollIdentity kId{7, 3, 0};
+const GRCORE_PollIdentity kExit{7, 2, 0};
 uint64_t g_entry_word = 0;
 
 /* A callable function with one call through a slot; `tweak` may break it. */
@@ -64,6 +67,53 @@ void well_formed(B & b, GRJIT_CallHooks & h, GRJIT_VReg x, GRJIT_VReg r) {
 TEST(CallIr, ACallableFunctionWithACallThroughASlotIsWellFormed) {
   auto r = check_call(well_formed);
   EXPECT_EQ(r.first, GRJIT_OK) << r.second;
+}
+
+TEST(CallIr, DynamicSlotTokenIsTypedAndLiveAcrossCallAndTail) {
+  for (bool tail : {false, true}) {
+    B b(tail ? "dynamic-tail" : "dynamic-call", 1);
+    GRJIT_VReg slot = b.param(GRJIT_TYPE_PTR);
+    GRJIT_VReg token = b.param(GRJIT_TYPE_I64);
+    GRJIT_CallHooks hooks = all_hooks();
+    b.callable(hooks);
+    b.at(b.block());
+    const GRJIT_FrameSlot state[] = {grjit_frame_slot_vreg(token)};
+    if (tail) {
+      ASSERT_EQ(grjit_builder_tail_call_slot_dynamic_env(b.b, V(slot),
+          V(token), 1, V(slot), nullptr, 0, kId, state, 1), GRJIT_OK);
+    } else {
+      GRJIT_VReg result = b.reg(GRJIT_TYPE_I64);
+      ASSERT_EQ(grjit_builder_call_slot_dynamic_results_env(b.b, &result, 1,
+          V(slot), V(token), V(slot), nullptr, 0, kId, state, 1, kExit,
+          state, 1), GRJIT_OK);
+      b.ret(V(result));
+    }
+    Fn function(b.finish());
+    GRJIT_Result verified{};
+    std::string why = verify_reason(function, &verified);
+    EXPECT_EQ(verified, GRJIT_OK) << why;
+    const GRJIT_Op *ops = grjit_function_block_ops(function, 0, nullptr);
+    ASSERT_NE(ops, nullptr);
+    EXPECT_EQ(ops[0].callee_operand.kind, GRJIT_OPERAND_VREG);
+    EXPECT_EQ(ops[0].callee_operand.vreg, token);
+  }
+  B wrong("wrong-dynamic-token", 1);
+  GRJIT_VReg slot = wrong.param(GRJIT_TYPE_PTR);
+  GRJIT_VReg narrow = wrong.param(GRJIT_TYPE_I32);
+  GRJIT_VReg result = wrong.reg(GRJIT_TYPE_I64);
+  GRJIT_CallHooks hooks = all_hooks();
+  wrong.callable(hooks);
+  wrong.at(wrong.block());
+  const GRJIT_FrameSlot state[] = {grjit_frame_slot_dead()};
+  ASSERT_EQ(grjit_builder_call_slot_dynamic_results_env(wrong.b, &result, 1,
+      V(slot), V(narrow), V(slot), nullptr, 0, kId, state, 1, kExit,
+      state, 1), GRJIT_OK);
+  wrong.ret(V(result));
+  Fn invalid(wrong.finish());
+  GRJIT_Result verified{};
+  std::string why = verify_reason(invalid, &verified);
+  EXPECT_EQ(verified, GRJIT_ERR_INVALID) << why;
+  EXPECT_NE(why.find("dynamic callee token"), std::string::npos);
 }
 
 TEST(CallIr, TheBuilderRecordsTheAttributeTheHooksTheTokenAndBothStates) {
@@ -115,7 +165,7 @@ TEST(CallIr, SlotAndPointerCallsRecordTheExplicitCalleeEnvironment) {
     if (through_pointer) b.cnst(target, 0x1000);
     const GRJIT_Operand args[] = {V(x)};
     const GRJIT_FrameSlot state[] = {grjit_frame_slot_vreg(x), grjit_frame_slot_dead()};
-    const GRCORE_PollIdentity id{7, 3};
+    const GRCORE_PollIdentity id{7, 3, 0};
     GRJIT_Result r = through_pointer
         ? grjit_builder_call_ptr_results_env(b.b, &result, 1, V(target), 99,
             V(environment), args, 1, id, state, 2, id, state, 2)
@@ -135,17 +185,18 @@ TEST(CallIr, SlotAndPointerCallsRecordTheExplicitCalleeEnvironment) {
 }
 
 TEST(CallIr, CatchingCallsRecordExplicitEnvironmentAndLandingBlock) {
-  for (int kind = 0; kind != 3; ++kind) {
+  for (int kind = 0; kind != 4; ++kind) {
     B b("catch-call-environment");
     GRJIT_CallHooks h = all_hooks();
     const GRJIT_VReg environment = b.param(GRJIT_TYPE_PTR);
     const GRJIT_VReg slot_entry = b.param(GRJIT_TYPE_PTR);
     const GRJIT_VReg target = b.param(GRJIT_TYPE_PTR);
+    const GRJIT_VReg callee_token = b.param(GRJIT_TYPE_I64);
     b.callable(h, 0);
     const auto body = b.block();
     const auto landing = b.block();
     b.at(body);
-    const GRCORE_PollIdentity id{4, 2};
+    const GRCORE_PollIdentity id{4, 2, 0};
     GRJIT_Result r;
     if (kind == 0) {
       r = grjit_builder_call_slot_catch_results_env(b.b, nullptr, 0,
@@ -155,10 +206,14 @@ TEST(CallIr, CatchingCallsRecordExplicitEnvironmentAndLandingBlock) {
       r = grjit_builder_call_slot_operand_catch_results_env(b.b, nullptr, 0,
           V(slot_entry), 99, V(environment), nullptr, 0, id, nullptr, 0,
           id, nullptr, 0, landing);
-    } else {
+    } else if (kind == 2) {
       r = grjit_builder_call_ptr_catch_results_env(b.b, nullptr, 0,
           V(target), 99, V(environment), nullptr, 0, id, nullptr, 0,
           id, nullptr, 0, landing);
+    } else {
+      r = grjit_builder_call_slot_dynamic_catch_results_env(b.b, nullptr, 0,
+          V(slot_entry), V(callee_token), V(environment), nullptr, 0, id,
+          nullptr, 0, id, nullptr, 0, landing);
     }
     ASSERT_EQ(r, GRJIT_OK);
     ASSERT_EQ(grjit_builder_ret(b.b, grjit_operand_none()), GRJIT_OK);
@@ -177,10 +232,14 @@ TEST(CallIr, CatchingCallsRecordExplicitEnvironmentAndLandingBlock) {
     EXPECT_EQ(call.environment.kind, GRJIT_OPERAND_VREG);
     EXPECT_EQ(call.environment.vreg, environment);
     EXPECT_EQ(call.kind, kind == 2 ? GRJIT_OP_CALL_PTR : GRJIT_OP_CALL_SLOT);
-    if (kind == 1) {
+    if (kind == 1 || kind == 3) {
       EXPECT_EQ(call.address, 0u);
       EXPECT_EQ(call.a.kind, GRJIT_OPERAND_VREG);
       EXPECT_EQ(call.a.vreg, slot_entry);
+    }
+    if (kind == 3) {
+      EXPECT_EQ(call.callee_operand.kind, GRJIT_OPERAND_VREG);
+      EXPECT_EQ(call.callee_operand.vreg, callee_token);
     }
   }
 }
@@ -193,7 +252,7 @@ TEST(CallIr, CatchLandingCannotReadARegisterUnassignedBeforeTheCall) {
   const auto landing = b.block();
   const GRJIT_VReg unassigned = b.reg(GRJIT_TYPE_I64);
   b.at(body);
-  const GRCORE_PollIdentity id{5, 1};
+  const GRCORE_PollIdentity id{5, 1, 0};
   ASSERT_EQ(grjit_builder_call_slot_catch_results(b.b, nullptr, 0,
       reinterpret_cast<uintptr_t>(&g_entry_word), 99, nullptr, 0, id,
       nullptr, 0, id, nullptr, 0, landing), GRJIT_OK);
@@ -215,7 +274,7 @@ TEST(CallIr, CatchLandingCannotReadCallResults) {
   const auto landing = b.block();
   const GRJIT_VReg result = b.reg(GRJIT_TYPE_I64);
   b.at(body);
-  const GRCORE_PollIdentity id{5, 2};
+  const GRCORE_PollIdentity id{5, 2, 0};
   ASSERT_EQ(grjit_builder_call_slot_catch_results(b.b, &result, 1,
       reinterpret_cast<uintptr_t>(&g_entry_word), 99, nullptr, 0, id,
       nullptr, 0, id, nullptr, 0, landing), GRJIT_OK);
@@ -259,7 +318,7 @@ TEST(CallIr, ARegisterTheCatchLandingReadsIsLiveAcrossAnEarlierCollectionPointEv
         ASSERT_EQ(grjit_builder_br(b.b, catching), GRJIT_OK);
         b.at(catching);
       }
-      const GRCORE_PollIdentity id{3, 2};
+      const GRCORE_PollIdentity id{3, 2, 0};
       ASSERT_EQ(grjit_builder_call_slot_catch_results(b.b, &r, 1,
           reinterpret_cast<uintptr_t>(&g_entry_word), 99, nullptr, 0, id, nullptr, 0, id, nullptr, 0,
           landing), GRJIT_OK);

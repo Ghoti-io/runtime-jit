@@ -162,7 +162,7 @@ GRJIT_CallHooks hooks() {
   return h;
 }
 
-const GRCORE_PollIdentity kId{1, 5};
+const GRCORE_PollIdentity kId{1, 5, 0};
 
 /* f(a0 .. a{n-1}) = native(a0 .. a{n-1}), the parameters of the types given. */
 struct Bare {
@@ -563,6 +563,44 @@ TEST(Natives, ANativeCallIsASiteWhoseMapNamesWhatIsLiveAfterItButNotItsResultOrI
   });
 }
 
+TEST(Natives, ConsecutiveNoStatusNativesKeepTheSecondCallSiteOnItsOwnLiveSet) {
+  JitWorld w;
+  NativeTab t;
+  uint32_t id = t.add(reinterpret_cast<const void *>(n_read_cell), {TR}, TR);
+  B b("two-native-sites", 3);
+  GRJIT_VReg first_arg = b.param(TR);
+  GRJIT_VReg second_arg = b.param(TR);
+  GRJIT_VReg survivor = b.param(TR);
+  GRJIT_VReg first_result = b.reg(TR);
+  GRJIT_VReg second_result = b.reg(TR);
+  b.callable(hooks());
+  b.natives(t);
+  b.at(b.block());
+  b.cnst(first_result, 0);
+  b.cnst(second_result, 0);
+  const std::vector<GRJIT_FrameSlot> dead(3, grjit_frame_slot_dead());
+  b.call_native(first_result, id, {V(first_arg)}, kId, dead);
+  b.call_native(second_result, id, {V(second_arg)}, kId, dead);
+  b.ret(V(survivor));
+  Fn f(b.finish());
+  xm::for_each_target_meta(f, w.pages(), [&](const GRCORE_CodeMeta * meta, const char *) {
+    std::vector<const GRCORE_CodeSite *> calls;
+    for (size_t i = 0; i < meta->site_count; ++i)
+      if (meta->sites[i].kind == GRCORE_SITE_GC_POINT_CALL)
+        calls.push_back(&meta->sites[i]);
+    ASSERT_EQ(meta->site_count, 4u);
+    ASSERT_EQ(calls.size(), 2u);
+    std::set<int64_t> first_live, second_live;
+    for (size_t i = 0; i < calls[0]->live_count; ++i)
+      first_live.insert(calls[0]->live[i].value);
+    for (size_t i = 0; i < calls[1]->live_count; ++i)
+      second_live.insert(calls[1]->live[i].value);
+    EXPECT_EQ(first_live, (std::set<int64_t>{grjit_emit_slot(second_arg),
+                                              grjit_emit_slot(survivor)}));
+    EXPECT_EQ(second_live, (std::set<int64_t>{grjit_emit_slot(survivor)}));
+  });
+}
+
 /* ---- The native stack ----------------------------------------------------------------- */
 
 TEST(Natives, ANativeWithAStatusMakesThreeSitesEachWithItsKindItsIdentityItsStateAndItsMap) {
@@ -579,7 +617,7 @@ TEST(Natives, ANativeWithAStatusMakesThreeSitesEachWithItsKindItsIdentityItsStat
   b.natives(t);
   b.at(b.block());
   b.cnst(res, 0);
-  const GRCORE_PollIdentity before{3, 11}, after{3, 12};
+  const GRCORE_PollIdentity before{3, 11, 0}, after{3, 12, 0};
   // The state before the call does not name the result; the state after names it and in_after only.
   b.call_native(res, id, {V(arg)}, before,
       {grjit_frame_slot_constant(11), grjit_frame_slot_vreg(in_before), grjit_frame_slot_dead()}, after,
@@ -3003,7 +3041,7 @@ TEST(Natives, EveryBackendEmitsANativeCallOnAnyHost) {
   b.callable(hooks());
   b.natives(t);
   b.at(b.block());
-  b.call_native(x, id, {V(x)}, GRCORE_PollIdentity{0, 0}, {grjit_frame_slot_vreg(x)});
+  b.call_native(x, id, {V(x)}, GRCORE_PollIdentity{0, 0, 0}, {grjit_frame_slot_vreg(x)});
   b.ret(V(x));
   Fn f(b.finish());
   GRJIT_Emitted e;
@@ -3034,7 +3072,7 @@ TEST(Natives, TheNativeStackCheckSubtractsExactlyTheNeedOnArm64AndIsEmittedForBo
     b.callable(hooks());
     b.natives(t);
     b.at(b.block());
-    b.call_native(x, id, {V(x)}, GRCORE_PollIdentity{0, 0}, {grjit_frame_slot_vreg(x)});
+    b.call_native(x, id, {V(x)}, GRCORE_PollIdentity{0, 0, 0}, {grjit_frame_slot_vreg(x)});
     b.ret(V(x));
     Fn f(b.finish());
     for (GRJIT_Arch arch : {GRJIT_ARCH_X86_64, GRJIT_ARCH_ARM64}) {
@@ -3086,7 +3124,7 @@ TEST(Natives, ANativeCallIsRefusedWithAClearErrorWhereItIsNotEmitted) {
   b.callable(h);
   b.natives(t);
   b.at(b.block());
-  b.call_native(x, id, {V(x)}, GRCORE_PollIdentity{0, 0}, {grjit_frame_slot_vreg(x)});
+  b.call_native(x, id, {V(x)}, GRCORE_PollIdentity{0, 0, 0}, {grjit_frame_slot_vreg(x)});
   b.ret(V(x));
   Fn f(b.finish());
   JitWorld w;

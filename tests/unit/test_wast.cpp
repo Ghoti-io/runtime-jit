@@ -1606,14 +1606,46 @@ wast::Report run_suite_arm(const char * name, const std::string & text, GRJIT_Fe
   const char * arm = disabled == GRJIT_FEATURES_NONE ? "the features the host has" : "every optional feature masked off";
   wast::Report r = run_text(text, name, disabled);
   std::printf("%s [%s]\n", wast::summary(name, r).c_str(), arm);
-  for (size_t i = 0; i < r.failures.size() && i < 20; i++) {
-    ADD_FAILURE() << r.failures[i];
+  const bool requested = floatfx::memcheck_double_rounding_requested();
+  EXPECT_FALSE(requested && !floatfx::running_under_valgrind())
+      << "the Valgrind-only conversion accommodation requires an active Valgrind client";
+  const uint32_t probe = requested ? floatfx::memcheck_double_rounding_probe_bits() : 0x5F000001u;
+  EXPECT_TRUE(probe == 0x5F000000u || probe == 0x5F000001u)
+      << "the Valgrind u64->f32 conversion probe returned an unrecognized result";
+  const bool vex_rounding = requested && floatfx::running_under_valgrind() && probe == 0x5F000000u;
+  const bool vex_conversions = vex_rounding && std::strcmp(name, "conversions.wast") == 0;
+  if (vex_conversions) {
+    // GCC 16.2 produces the spec's bits for all eight inputs outside Valgrind. Valgrind 3.24/VEX
+    // double-rounds each under Memcheck; the exact inputs/outputs were independently reproduced by
+    // cutil-valgrind-wast-convert-probe-20261018-0441. Keep executing every assertion, count every
+    // semantic divergence, and fail on any changed line, function, output, or extra failure.
+    const std::vector<std::string> want_vex_failures = {
+        "conversions.wast:471: \"f32.convert_i64_s\" got 0x5efffffe, expected 0x5effffff",
+        "conversions.wast:472: \"f32.convert_i64_s\" got 0xdf000000, expected 0xdeffffff",
+        "conversions.wast:473: \"f32.convert_i64_s\" got 0x5a000000, expected 0x5a000001",
+        "conversions.wast:474: \"f32.convert_i64_s\" got 0xda000000, expected 0xda000001",
+        "conversions.wast:520: \"f32.convert_i64_u\" got 0x5a000000, expected 0x5a000001",
+        "conversions.wast:521: \"f32.convert_i64_u\" got 0x5f000000, expected 0x5effffff",
+        "conversions.wast:522: \"f32.convert_i64_u\" got 0x5f000000, expected 0x5f000001",
+        "conversions.wast:523: \"f32.convert_i64_u\" got 0x5f7ffffe, expected 0x5f7fffff",
+    };
+    EXPECT_EQ(r.failures, want_vex_failures) << arm;
+    EXPECT_EQ(r.failed, 8u) << arm;
+    EXPECT_EQ(r.passed, 585u) << arm;
+    EXPECT_EQ(r.passed + r.failed, want_passed) << arm;
+    std::printf("Memcheck VEX f32.convert_i64: 8 exact semantic divergences observed [%s]; "
+                "ordinary execution checks all 593 assertions\n", arm);
+  } else {
+    for (size_t i = 0; i < r.failures.size() && i < 20; i++) {
+      ADD_FAILURE() << r.failures[i];
+    }
+    EXPECT_EQ(r.failed, 0u) << arm;
   }
-  EXPECT_EQ(r.failed, 0u) << arm;
   EXPECT_TRUE(r.unknown_forms.empty());
   EXPECT_EQ(r.traps, want_traps);
   if (kExecutes) {
-    EXPECT_EQ(r.passed, want_passed) << "the number of assertions that ran and held, pinned to wg-3.0 (" << arm << ")";
+    EXPECT_EQ(r.passed, want_passed - (vex_conversions ? 8u : 0u))
+        << "the number of assertions that ran and held, pinned to wg-3.0 (" << arm << ")";
   } else {
     EXPECT_EQ(r.passed, 0u);
     want_excluded[kNotRunHere] = want_passed;

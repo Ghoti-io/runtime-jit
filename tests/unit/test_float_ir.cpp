@@ -25,6 +25,7 @@
 
 #include "../../src/code/code_internal.h"
 
+#include <algorithm>
 #include <cfloat>
 #if defined(__SSE__)
 #include <xmmintrin.h>
@@ -658,7 +659,7 @@ TEST(FloatPrint, TheTypesPrintAsF32AndF64AndTheOperationsByTheirWasmName) {
   b.cmp(GRJIT_CMP_LT, w, V(x), I(static_cast<int64_t>(B64(-1.0))));
   GRJIT_Operand args[] = {grjit_operand_f32_imm(B32(1.0f)), grjit_operand_f64_imm(B64(2.0)), V(y)};
   EXPECT_EQ(grjit_builder_call(b.b, GRJIT_NO_VREG, 0x1000, GRJIT_CALL_NO_GC, GRCORE_SITE_GC_POINT_CALL,
-                args, 3, GRCORE_PollIdentity{0, 0}, nullptr, 0),
+                args, 3, GRCORE_PollIdentity{0, 0, 0}, nullptr, 0),
       GRJIT_OK);
   b.ret(V(z));
   Fn fn(b.finish());
@@ -880,10 +881,10 @@ TEST(FloatVerify, AFloatIsNotAConditionAnAddressAnAccessOfTheWrongWidthOrAStackM
   std::vector<Case> cases = {
       {"guard on an f64", [&](B & b) {
          GRJIT_VReg x = b.param(f64);
-         b.at(b.block()); b.guard(V(x), {1, 1}); b.ret(V(x)); }, false},
+         b.at(b.block()); b.guard(V(x), {1, 1, 0}); b.ret(V(x)); }, false},
       {"guard on an f32", [&](B & b) {
          GRJIT_VReg x = b.param(f32);
-         b.at(b.block()); b.guard(V(x), {1, 1}); b.ret(V(x)); }, false},
+         b.at(b.block()); b.guard(V(x), {1, 1, 0}); b.ret(V(x)); }, false},
       {"br_if on an f64", [&](B & b) {
          GRJIT_VReg x = b.param(f64);
          GRJIT_BlockId a = b.block(), c = b.block();
@@ -1021,7 +1022,7 @@ void lower_and_upper(B & b, GRJIT_VReg x, const Imm & m, GRJIT_Cmp lo_cmp, GRJIT
   b.cmp(lo_cmp, l, V(x), I(m.lo));
   b.cmp(hi_cmp, h, V(x), I(m.hi));
   b.bin(join_with_or ? GRJIT_OP_OR : GRJIT_OP_AND, ok, V(l), V(h));
-  b.guard(V(ok), {kTrapFunction, kSiteIntegerOverflow});
+  b.guard(V(ok), {kTrapFunction, kSiteIntegerOverflow, 0});
 }
 
 } // namespace
@@ -1121,9 +1122,9 @@ TEST(FloatVerify, TheGuardsMayBeTwoGuardsMirroredOrJoinedInEitherOrderButNotByOr
       Fn f(trunc_function(k, [&](B & b, GRJIT_VReg x) {
         GRJIT_VReg l = b.reg(GRJIT_TYPE_I32), h = b.reg(GRJIT_TYPE_I32);
         b.cmp(lo_cmp, l, V(x), I(m.lo));
-        b.guard(V(l), {kTrapFunction, kSiteIntegerOverflow});
+        b.guard(V(l), {kTrapFunction, kSiteIntegerOverflow, 0});
         b.cmp(GRJIT_CMP_LT, h, V(x), I(m.hi));
-        b.guard(V(h), {kTrapFunction, kSiteIntegerOverflow});
+        b.guard(V(h), {kTrapFunction, kSiteIntegerOverflow, 0});
       }));
       EXPECT_EQ(refused(f.f), "") << "two guards, one bound each";
     }
@@ -1132,9 +1133,9 @@ TEST(FloatVerify, TheGuardsMayBeTwoGuardsMirroredOrJoinedInEitherOrderButNotByOr
       Fn f(trunc_function(k, [&](B & b, GRJIT_VReg x) {
         GRJIT_VReg l = b.reg(GRJIT_TYPE_I32), h = b.reg(GRJIT_TYPE_I32);
         b.cmp(GRJIT_CMP_LT, h, V(x), I(m.hi));
-        b.guard(V(h), {kTrapFunction, kSiteIntegerOverflow});
+        b.guard(V(h), {kTrapFunction, kSiteIntegerOverflow, 0});
         b.cmp(lo_cmp, l, V(x), I(m.lo));
-        b.guard(V(l), {kTrapFunction, kSiteIntegerOverflow});
+        b.guard(V(l), {kTrapFunction, kSiteIntegerOverflow, 0});
       }));
       EXPECT_EQ(refused(f.f), "");
     }
@@ -1145,7 +1146,7 @@ TEST(FloatVerify, TheGuardsMayBeTwoGuardsMirroredOrJoinedInEitherOrderButNotByOr
         b.cmp(lo_cmp == GRJIT_CMP_GT ? GRJIT_CMP_LT : GRJIT_CMP_LE, l, I(m.lo), V(x));
         b.cmp(GRJIT_CMP_GT, h, I(m.hi), V(x));
         b.bin(GRJIT_OP_AND, ok, V(h), V(l));
-        b.guard(V(ok), {kTrapFunction, kSiteIntegerOverflow});
+        b.guard(V(ok), {kTrapFunction, kSiteIntegerOverflow, 0});
       }));
       EXPECT_EQ(refused(f.f), "") << "the mirrored compares, joined in the other order";
     }
@@ -1154,7 +1155,7 @@ TEST(FloatVerify, TheGuardsMayBeTwoGuardsMirroredOrJoinedInEitherOrderButNotByOr
       Fn f(trunc_function(k, [&](B & b, GRJIT_VReg x) {
         GRJIT_VReg l = b.reg(GRJIT_TYPE_I32);
         b.cmp(lo_cmp, l, V(x), I(m.lo));
-        b.guard(V(l), {kTrapFunction, kSiteIntegerOverflow});
+        b.guard(V(l), {kTrapFunction, kSiteIntegerOverflow, 0});
       }));
       EXPECT_NE(refused(f.f), "") << "only the lower bound";
     }
@@ -1162,7 +1163,7 @@ TEST(FloatVerify, TheGuardsMayBeTwoGuardsMirroredOrJoinedInEitherOrderButNotByOr
       Fn f(trunc_function(k, [&](B & b, GRJIT_VReg x) {
         GRJIT_VReg h = b.reg(GRJIT_TYPE_I32);
         b.cmp(GRJIT_CMP_LT, h, V(x), I(m.hi));
-        b.guard(V(h), {kTrapFunction, kSiteIntegerOverflow});
+        b.guard(V(h), {kTrapFunction, kSiteIntegerOverflow, 0});
       }));
       EXPECT_NE(refused(f.f), "") << "only the upper bound";
     }
@@ -1229,7 +1230,7 @@ TEST(FloatVerify, AGuardOnAnotherRegisterOrAStaleOrAnotherBlocksGuardDoesNotCoun
       b.cmp(GRJIT_CMP_LT, h, V(x), I(m.hi));
       b.mov(x, V(z));
       b.bin(GRJIT_OP_AND, ok, V(l), V(h));
-      b.guard(V(ok), {kTrapFunction, kSiteIntegerOverflow});
+      b.guard(V(ok), {kTrapFunction, kSiteIntegerOverflow, 0});
       b.un(k.is_signed ? GRJIT_OP_TRUNC_S : GRJIT_OP_TRUNC_U, r, V(x));
       b.ret(V(r));
       Fn f(b.finish());
@@ -1245,7 +1246,7 @@ TEST(FloatVerify, AGuardOnAnotherRegisterOrAStaleOrAnotherBlocksGuardDoesNotCoun
       b.cmp(GRJIT_CMP_LT, h, V(x), I(m.hi));
       b.bin(GRJIT_OP_AND, ok, V(l), V(h));
       b.mov(ok, I(1));
-      b.guard(V(ok), {kTrapFunction, kSiteIntegerOverflow});
+      b.guard(V(ok), {kTrapFunction, kSiteIntegerOverflow, 0});
       b.un(k.is_signed ? GRJIT_OP_TRUNC_S : GRJIT_OP_TRUNC_U, r, V(x));
       b.ret(V(r));
       Fn f(b.finish());
@@ -1358,6 +1359,14 @@ TEST(FloatVerify, AnAllocationThatFailsInTheRangeAnalysisIsOutOfMemoryAndLeaksNo
 
 TEST(FloatRun, EveryOperationGivesTheWorkedAnswerFromTheCodeAndFromTheEvaluator) {
   FLOAT_RUN_HERE();
+  const bool requested = floatfx::memcheck_double_rounding_requested();
+  ASSERT_FALSE(requested && !floatfx::running_under_valgrind())
+      << "the Valgrind-only conversion accommodation requires an active Valgrind client";
+  const uint32_t probe = requested ? floatfx::memcheck_double_rounding_probe_bits() : 0x5F000001u;
+  ASSERT_TRUE(probe == 0x5F000000u || probe == 0x5F000001u)
+      << "the Valgrind u64->f32 conversion probe returned an unrecognized result";
+  const bool memcheck_boundary = requested && probe == 0x5F000000u;
+  size_t omitted_boundary_cases = 0;
   JitWorld w;
   size_t nan_cases = 0;
   for (GRJIT_Features disabled : two_arms()) {
@@ -1366,6 +1375,11 @@ TEST(FloatRun, EveryOperationGivesTheWorkedAnswerFromTheCodeAndFromTheEvaluator)
   std::map<std::string, std::unique_ptr<Built>> built;
   nan_cases = 0;
   for (const Worked & k : kWorked) {
+    if (memcheck_boundary && std::string(k.instr) == "f32.convert_i64_u" &&
+        k.a == floatfx::kMemcheckDoubleRoundingInput) {
+      omitted_boundary_cases++;
+      continue;
+    }
     SCOPED_TRACE(std::string(k.instr) + " " + hex(k.a) + " " + hex(k.b));
     auto & slot = built[k.instr];
     if (!slot) {
@@ -1396,6 +1410,13 @@ TEST(FloatRun, EveryOperationGivesTheWorkedAnswerFromTheCodeAndFromTheEvaluator)
     nan_cases += k.cls != Cls::Exact;
   }
   EXPECT_GT(nan_cases, 20u) << "the NaN classes are exercised";
+  }
+  EXPECT_EQ(omitted_boundary_cases, memcheck_boundary ? 2u : 0u);
+  if (memcheck_boundary) {
+    std::printf("Memcheck VEX u64->f32 double-rounding: omitted exactly %zu worked inputs; "
+                "ordinary execution checks 0x5F000001\n", omitted_boundary_cases);
+  } else if (requested) {
+    std::printf("Memcheck u64->f32 probe returned 0x5F000001; full worked inputs exercised\n");
   }
 }
 
@@ -1467,9 +1488,17 @@ size_t sweep_one(JitWorld & w, const std::string & instr, const std::vector<uint
 
 TEST(FloatRun, EveryOperationAtEveryWidthAgreesWithTheEvaluatorOnTheBoundaryValues) {
   FLOAT_RUN_HERE();
+  const bool requested = floatfx::memcheck_double_rounding_requested();
+  ASSERT_FALSE(requested && !floatfx::running_under_valgrind())
+      << "the Valgrind-only conversion accommodation requires an active Valgrind client";
+  const uint32_t probe = requested ? floatfx::memcheck_double_rounding_probe_bits() : 0x5F000001u;
+  ASSERT_TRUE(probe == 0x5F000000u || probe == 0x5F000001u)
+      << "the Valgrind u64->f32 conversion probe returned an unrecognized result";
+  const bool memcheck_boundary = requested && probe == 0x5F000000u;
   JitWorld w;
   const std::vector<uint64_t> f64s = f64_values(), f32s = f32_values();
   size_t compared = 0, traps = 0;
+  size_t omitted_boundary_cases = 0;
   for (GRJIT_Features disabled : two_arms()) {
   SCOPED_TRACE(arm_name(disabled));
   ArmScope arm(disabled);
@@ -1485,7 +1514,14 @@ TEST(FloatRun, EveryOperationAtEveryWidthAgreesWithTheEvaluatorOnTheBoundaryValu
       for (const char * sign : {"s", "u"}) {
         const std::string c = std::string(ty) + ".convert_" + from + "_" + sign;
         SCOPED_TRACE(c);
-        compared += sweep_one(w, c, int_values(std::string(from) == "i32"), {0}, &traps);
+        std::vector<uint64_t> inputs = int_values(std::string(from) == "i32");
+        if (memcheck_boundary && c == "f32.convert_i64_u") {
+          const auto old_size = inputs.size();
+          inputs.erase(std::remove(inputs.begin(), inputs.end(), floatfx::kMemcheckDoubleRoundingInput),
+              inputs.end());
+          omitted_boundary_cases += old_size - inputs.size();
+        }
+        compared += sweep_one(w, c, inputs, {0}, &traps);
       }
     }
     for (const char * to : {"i32", "i64"}) {
@@ -1502,6 +1538,13 @@ TEST(FloatRun, EveryOperationAtEveryWidthAgreesWithTheEvaluatorOnTheBoundaryValu
     compared += sweep_one(w, narrow ? "i32.reinterpret_f32" : "i64.reinterpret_f64", vals, {0}, &traps);
     compared += sweep_one(w, narrow ? "f32.reinterpret_i32" : "f64.reinterpret_i64", int_values(narrow), {0}, &traps);
   }
+  }
+  EXPECT_EQ(omitted_boundary_cases, memcheck_boundary ? 2u : 0u);
+  if (memcheck_boundary) {
+    std::printf("Memcheck VEX u64->f32 double-rounding: omitted exactly %zu boundary sweep inputs; "
+                "ordinary execution checks 0x5F000001\n", omitted_boundary_cases);
+  } else if (requested) {
+    std::printf("Memcheck u64->f32 probe returned 0x5F000001; full boundary sweep exercised\n");
   }
   std::printf("float boundary sweep: %zu runs compared with the evaluator (twice: with the host's features and "
               "with every optional feature masked off), %zu of them guard exits\n",
@@ -2046,7 +2089,7 @@ TEST(FloatHelpers, ACallOverTheLimitIsRefusedAsBeforeAndANativeTakesNoFloat) {
   b.at(b.block());
   std::vector<GRJIT_Operand> args(7, V(x));
   EXPECT_EQ(grjit_builder_call(b.b, GRJIT_NO_VREG, 0x1000, GRJIT_CALL_NO_GC, GRCORE_SITE_GC_POINT_CALL,
-                args.data(), args.size(), GRCORE_PollIdentity{0, 0}, nullptr, 0),
+                args.data(), args.size(), GRCORE_PollIdentity{0, 0, 0}, nullptr, 0),
       GRJIT_ERR_LIMIT)
       << "no stack-passed float exists on SysV: more than six arguments is the limit it always was";
   // A float value named as a native's argument is refused by the verifier (the table has no float).
@@ -2130,7 +2173,7 @@ TEST(FloatRun, AFloatInAFrameStateIsRecordedWithItsRepresentationAndRawNeverARef
   b.bin(GRJIT_OP_FADD, s, V(x), V(x));
   b.bin(GRJIT_OP_FMUL, d, V(y), V(y));
   b.cmp(GRJIT_CMP_NE, one, V(x), V(x)); // 0 for a number, 1 for a NaN
-  b.guard(V(one), {5, 7},
+  b.guard(V(one), {5, 7, 0},
       {grjit_frame_slot_vreg(x), grjit_frame_slot_vreg(y), grjit_frame_slot_vreg(z),
           grjit_frame_slot_vreg(s), grjit_frame_slot_vreg(d)});
   b.ret(V(s));
@@ -2184,7 +2227,7 @@ TEST(FloatRun, AFloatLiveAcrossAPollACallAndANativeIsRawInTheFrameStateAndNeverI
     return std::vector<GRJIT_FrameSlot>{grjit_frame_slot_vreg(x), grjit_frame_slot_vreg(y),
         grjit_frame_slot_vreg(r)};
   };
-  b.poll({9, 1}, state());
+  b.poll({9, 1, 0}, state());
   b.call_gc(u, reinterpret_cast<const void *>(&float_live_helper), {I(5)}, {9, 2}, state());
   b.call_native(v, native, {V(u)}, {9, 3}, state());
   b.bin(GRJIT_OP_FADD, t, V(x), V(x));
@@ -2720,7 +2763,7 @@ TEST(FloatRun, ATypedFloatImmediateWorksOnEitherSideOfAnOperationAMoveAndATrunca
   b.cmp(GRJIT_CMP_GT, l, V(x), grjit_operand_f64_imm(B64(-2147483649.0)));
   b.cmp(GRJIT_CMP_GT, h, grjit_operand_f64_imm(B64(2147483648.0)), V(x));
   b.bin(GRJIT_OP_AND, ok, V(l), V(h));
-  b.guard(V(ok), {kTrapFunction, kSiteIntegerOverflow});
+  b.guard(V(ok), {kTrapFunction, kSiteIntegerOverflow, 0});
   b.un(GRJIT_OP_TRUNC_S, r, V(x));
   b.ret(V(r));
   Fn f(b.finish());

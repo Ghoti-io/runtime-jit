@@ -434,7 +434,7 @@ TEST(IntVerify, TheWidthOfAnOperationIsItsDestinationsAndTheWidthsNeverMix) {
          b.at(e); b.br_if(V(x), t, f); b.at(t); b.ret(I(1)); b.at(f); b.ret(I(0)); }, true},
       {"guard on an i32", [&](B & b) {
          GRJIT_VReg x = b.param(i32);
-         b.at(b.block()); b.guard(V(x), {1, 1}); b.ret(V(x)); }, true},
+         b.at(b.block()); b.guard(V(x), {1, 1, 0}); b.ret(V(x)); }, true},
       {"load into an i32, 32 bits", [&](B & b) {
          GRJIT_VReg p = b.param(GRJIT_TYPE_PTR), r = b.reg(i32);
          b.at(b.block()); b.load(r, p, 0, 32); b.ret(V(r)); }, true},
@@ -535,7 +535,7 @@ struct Parts {
   GRJIT_VReg guard_nonzero() {
     GRJIT_VReg c = b.reg(T);
     b.cmp(GRJIT_CMP_NE, c, V(y), I(0));
-    b.guard(V(c), {9, 1});
+    b.guard(V(c), {9, 1, 0});
     return c;
   }
   void guard_overflow_and(GRJIT_VReg dividend, GRJIT_VReg divisor) {
@@ -544,14 +544,14 @@ struct Parts {
     b.cmp(GRJIT_CMP_EQ, e2, V(divisor), I(-1));
     b.bin(GRJIT_OP_AND, t, V(e1), V(e2));
     b.cmp(GRJIT_CMP_EQ, c, V(t), I(0));
-    b.guard(V(c), {9, 2});
+    b.guard(V(c), {9, 2, 0});
   }
   void guard_overflow_or(GRJIT_VReg dividend, GRJIT_VReg divisor) {
     GRJIT_VReg n1 = b.reg(T), n2 = b.reg(T), c = b.reg(T);
     b.cmp(GRJIT_CMP_NE, n1, V(dividend), I(min));
     b.cmp(GRJIT_CMP_NE, n2, V(divisor), I(-1));
     b.bin(GRJIT_OP_OR, c, V(n1), V(n2));
-    b.guard(V(c), {9, 2});
+    b.guard(V(c), {9, 2, 0});
   }
 };
 
@@ -630,11 +630,11 @@ TEST(IntVerify, TheOtherSpellingsOfANonZeroTestAreAccepted) {
     GRJIT_VReg r = b.reg(GRJIT_TYPE_I32), c = b.reg(GRJIT_TYPE_I32);
     b.at(b.block());
     switch (spelling) {
-      case 0: b.guard(V(p.y), {9, 1}); break;                                // the divisor itself
-      case 1: b.cmp(GRJIT_CMP_UGT, c, V(p.y), I(0)); b.guard(V(c), {9, 1}); break;
-      case 2: b.cmp(GRJIT_CMP_ULT, c, I(0), V(p.y)); b.guard(V(c), {9, 1}); break;
-      case 3: b.cmp(GRJIT_CMP_NE, c, I(0), V(p.y)); b.guard(V(c), {9, 1}); break;
-      default: b.cmp(GRJIT_CMP_NE, c, V(p.y), I(0)); b.guard(V(c), {9, 1}); break;
+      case 0: b.guard(V(p.y), {9, 1, 0}); break;                                // the divisor itself
+      case 1: b.cmp(GRJIT_CMP_UGT, c, V(p.y), I(0)); b.guard(V(c), {9, 1, 0}); break;
+      case 2: b.cmp(GRJIT_CMP_ULT, c, I(0), V(p.y)); b.guard(V(c), {9, 1, 0}); break;
+      case 3: b.cmp(GRJIT_CMP_NE, c, I(0), V(p.y)); b.guard(V(c), {9, 1, 0}); break;
+      default: b.cmp(GRJIT_CMP_NE, c, V(p.y), I(0)); b.guard(V(c), {9, 1, 0}); break;
     }
     b.bin(GRJIT_OP_DIV_U, r, V(p.x), V(p.y));
     b.ret(V(r));
@@ -650,34 +650,34 @@ TEST(IntVerify, AGuardThatDoesNotSayTheDivisorIsNotZeroIsRefused) {
     bool ok;
   };
   std::vector<Case> cases = {
-      {"a guard of the dividend", [](B & b, Parts & p) { b.guard(V(p.x), {9, 1}); }, false},
+      {"a guard of the dividend", [](B & b, Parts & p) { b.guard(V(p.x), {9, 1, 0}); }, false},
       {"a compare with 1, not 0", [](B & b, Parts & p) {
-         GRJIT_VReg c = b.reg(p.T); b.cmp(GRJIT_CMP_NE, c, V(p.y), I(1)); b.guard(V(c), {9, 1}); }, false},
+         GRJIT_VReg c = b.reg(p.T); b.cmp(GRJIT_CMP_NE, c, V(p.y), I(1)); b.guard(V(c), {9, 1, 0}); }, false},
       {"EQ 0 (fires when the divisor is not zero)", [](B & b, Parts & p) {
-         GRJIT_VReg c = b.reg(p.T); b.cmp(GRJIT_CMP_EQ, c, V(p.y), I(0)); b.guard(V(c), {9, 1}); }, false},
+         GRJIT_VReg c = b.reg(p.T); b.cmp(GRJIT_CMP_EQ, c, V(p.y), I(0)); b.guard(V(c), {9, 1, 0}); }, false},
       {"a compare of the dividend with zero", [](B & b, Parts & p) {
-         GRJIT_VReg c = b.reg(p.T); b.cmp(GRJIT_CMP_NE, c, V(p.x), I(0)); b.guard(V(c), {9, 1}); }, false},
-      {"a constant guard", [](B & b, Parts &) { b.guard(I(1), {9, 1}); }, false},
+         GRJIT_VReg c = b.reg(p.T); b.cmp(GRJIT_CMP_NE, c, V(p.x), I(0)); b.guard(V(c), {9, 1, 0}); }, false},
+      {"a constant guard", [](B & b, Parts &) { b.guard(I(1), {9, 1, 0}); }, false},
       {"the compare is of a register assigned after it", [](B & b, Parts & p) {
          GRJIT_VReg c = b.reg(p.T);
          b.cmp(GRJIT_CMP_NE, c, V(p.y), I(0));
          b.bin(GRJIT_OP_ADD, p.y, V(p.y), I(1));   // y is a different value now
-         b.guard(V(c), {9, 1}); }, false},
+         b.guard(V(c), {9, 1, 0}); }, false},
       {"the divisor assigned after the guard", [](B & b, Parts & p) {
          GRJIT_VReg c = b.reg(p.T);
          b.cmp(GRJIT_CMP_NE, c, V(p.y), I(0));
-         b.guard(V(c), {9, 1});
+         b.guard(V(c), {9, 1, 0});
          b.bin(GRJIT_OP_ADD, p.y, V(p.y), I(0)); }, false},
       {"the flag assigned between the compare and the guard", [](B & b, Parts & p) {
          GRJIT_VReg c = b.reg(p.T);
          b.cmp(GRJIT_CMP_NE, c, V(p.y), I(0));
          b.cnst(c, 1);
-         b.guard(V(c), {9, 1}); }, false},
+         b.guard(V(c), {9, 1, 0}); }, false},
       {"the guard in an earlier block", [](B & b, Parts & p) {
          GRJIT_VReg c = b.reg(p.T);
          GRJIT_BlockId next = b.block();
          b.cmp(GRJIT_CMP_NE, c, V(p.y), I(0));
-         b.guard(V(c), {9, 1});
+         b.guard(V(c), {9, 1, 0});
          b.br(next);
          b.at(next); }, false},
       {"the guard in the same block", [](B &, Parts & p) { p.guard_nonzero(); }, true},
@@ -685,7 +685,7 @@ TEST(IntVerify, AGuardThatDoesNotSayTheDivisorIsNotZeroIsRefused) {
          GRJIT_VReg c = b.reg(p.T);
          b.cnst(p.x, 5);                                    // an unrelated assignment
          b.cmp(GRJIT_CMP_NE, c, V(p.y), I(0));
-         b.guard(V(c), {9, 1}); }, true},
+         b.guard(V(c), {9, 1, 0}); }, true},
   };
   for (const Case & c : cases) {
     SCOPED_TRACE(c.what);
@@ -731,7 +731,7 @@ TEST(IntVerify, TheOverflowGuardMustBeAboutTheOperandsOfTheDivisionAndStillTrue)
          b.cmp(GRJIT_CMP_EQ, e2, V(p.y), I(-1));
          b.bin(GRJIT_OP_AND, t, V(e1), V(e2));
          b.cmp(GRJIT_CMP_EQ, c, V(t), I(0));
-         b.guard(V(c), {9, 2}); }, false},
+         b.guard(V(c), {9, 2, 0}); }, false},
       {"the wrong constant for the divisor", [](B & b, Parts & p) {
          GRJIT_VReg e1 = b.reg(p.T), e2 = b.reg(p.T), t = b.reg(p.T), c = b.reg(p.T);
          p.guard_nonzero();
@@ -739,7 +739,7 @@ TEST(IntVerify, TheOverflowGuardMustBeAboutTheOperandsOfTheDivisionAndStillTrue)
          b.cmp(GRJIT_CMP_EQ, e2, V(p.y), I(1));
          b.bin(GRJIT_OP_AND, t, V(e1), V(e2));
          b.cmp(GRJIT_CMP_EQ, c, V(t), I(0));
-         b.guard(V(c), {9, 2}); }, false},
+         b.guard(V(c), {9, 2, 0}); }, false},
       {"OR where AND is needed", [](B & b, Parts & p) {
          GRJIT_VReg e1 = b.reg(p.T), e2 = b.reg(p.T), t = b.reg(p.T), c = b.reg(p.T);
          p.guard_nonzero();
@@ -747,7 +747,7 @@ TEST(IntVerify, TheOverflowGuardMustBeAboutTheOperandsOfTheDivisionAndStillTrue)
          b.cmp(GRJIT_CMP_EQ, e2, V(p.y), I(-1));
          b.bin(GRJIT_OP_OR, t, V(e1), V(e2));
          b.cmp(GRJIT_CMP_EQ, c, V(t), I(0));
-         b.guard(V(c), {9, 2}); }, false},
+         b.guard(V(c), {9, 2, 0}); }, false},
       {"the flag of the first comparison assigned before the join", [](B & b, Parts & p) {
          GRJIT_VReg e1 = b.reg(p.T), e2 = b.reg(p.T), t = b.reg(p.T), c = b.reg(p.T);
          p.guard_nonzero();
@@ -756,14 +756,14 @@ TEST(IntVerify, TheOverflowGuardMustBeAboutTheOperandsOfTheDivisionAndStillTrue)
          b.cnst(e1, 0);
          b.bin(GRJIT_OP_AND, t, V(e1), V(e2));
          b.cmp(GRJIT_CMP_EQ, c, V(t), I(0));
-         b.guard(V(c), {9, 2}); }, false},
+         b.guard(V(c), {9, 2, 0}); }, false},
       {"a guard of the join itself (fires when MIN and -1: the wrong way round)", [](B & b, Parts & p) {
          GRJIT_VReg e1 = b.reg(p.T), e2 = b.reg(p.T), t = b.reg(p.T);
          p.guard_nonzero();
          b.cmp(GRJIT_CMP_EQ, e1, V(p.x), I(p.min));
          b.cmp(GRJIT_CMP_EQ, e2, V(p.y), I(-1));
          b.bin(GRJIT_OP_AND, t, V(e1), V(e2));
-         b.guard(V(t), {9, 2}); }, false},
+         b.guard(V(t), {9, 2, 0}); }, false},
       {"the right guards", [](B &, Parts & p) {
          p.guard_nonzero();
          p.guard_overflow_and(p.x, p.y); }, true},
@@ -796,7 +796,7 @@ TEST(IntVerify, AConstantDivisorIsJudgedAsItStands) {
         if (not_min_guard) {
           GRJIT_VReg c = b.reg(T);
           b.cmp(GRJIT_CMP_NE, c, V(p.x), I(p.min));
-          b.guard(V(c), {9, 2});
+          b.guard(V(c), {9, 2, 0});
         }
         b.bin(k, r, V(p.x), I(divisor));
         b.ret(V(r));
@@ -1104,7 +1104,7 @@ TEST(IntRun, AnI32InAFrameStateIsRecordedWithTheRepresentationI32AndAnI64WithBit
   GRJIT_VReg x = b.param(GRJIT_TYPE_I32), y = b.param(GRJIT_TYPE_I64), z = b.reg(GRJIT_TYPE_I32);
   b.at(b.block());
   b.bin(GRJIT_OP_ADD, z, V(x), I(1));
-  b.guard(V(x), {5, 7},
+  b.guard(V(x), {5, 7, 0},
       {grjit_frame_slot_vreg(x), grjit_frame_slot_vreg(y), grjit_frame_slot_vreg(z)});
   b.ret(V(z));
   Fn f(b.finish());
@@ -1474,7 +1474,7 @@ TEST(IntRun, AnI32LiveAcrossAPollACallAndANativeIsRawInTheFrameStateAndNeverInTh
              keep = b.reg(GRJIT_TYPE_I64);
   b.at(b.block());
   auto state = [&] { return std::vector<GRJIT_FrameSlot>{grjit_frame_slot_vreg(x), grjit_frame_slot_vreg(r)}; };
-  b.poll({9, 1}, state());
+  b.poll({9, 1, 0}, state());
   b.call_gc(u, reinterpret_cast<const void *>(&live_helper), {I(5)}, {9, 2}, state());
   b.call_native(v, native, {V(u)}, {9, 3}, state());
   b.bin(GRJIT_OP_ADD, t, V(x), I(1));

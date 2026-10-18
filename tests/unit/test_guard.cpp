@@ -25,7 +25,7 @@ GRJIT_Function * build(bool with_guard) {
   b.bin(GRJIT_OP_ADD, w, V(bb), I(1));
   b.cmp(GRJIT_CMP_NE, c, V(a), I(0));
   if (with_guard) {
-    b.guard(V(c), {5, 99},
+    b.guard(V(c), {5, 99, 0},
         {grjit_frame_slot_vreg(v), grjit_frame_slot_vreg(w),
             grjit_frame_slot_constant(77), grjit_frame_slot_dead()});
   }
@@ -113,7 +113,7 @@ TEST(Guard, ManyGuardsEachHaveTheirOwnSiteAndExit) {
   b.at(b.block());
   for (int i = 0; i < 5; i++) {
     b.cmp(GRJIT_CMP_NE, c, V(x), I(i));
-    b.guard(V(c), {1, static_cast<uint64_t>(10 + i)}, {grjit_frame_slot_constant(i)});
+    b.guard(V(c), {1, static_cast<uint64_t>(10 + i), 0}, {grjit_frame_slot_constant(i)});
   }
   b.ret(V(x));
   Fn f(b.finish());

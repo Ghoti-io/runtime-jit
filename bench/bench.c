@@ -178,10 +178,10 @@ static GRJIT_Function * build_loop(LoopKind kind) {
   check(grjit_builder_br_if(b, grjit_operand_vreg(t), body, done), "op");
   check(grjit_builder_set_block(b, body), "at");
   if (kind == LOOP_POLL) {
-    GRCORE_PollIdentity id = {1, 1};
+    GRCORE_PollIdentity id = {1, 1, 0};
     check(grjit_builder_poll(b, id, NULL, 0), "poll");
   } else if (kind == LOOP_CALL) {
-    GRCORE_PollIdentity id = {0, 0};
+    GRCORE_PollIdentity id = {0, 0, 0};
     check(grjit_builder_call(b, GRJIT_NO_VREG, (uint64_t)(uintptr_t)no_op_helper,
               GRJIT_CALL_NO_GC, GRCORE_SITE_GC_POINT_CALL, NULL, 0, id, NULL, 0),
         "call");
@@ -313,7 +313,7 @@ static GRJIT_Function * build_call_loop(const GRCORE_EntrySlot * slot) {
   check(grjit_builder_cmp(b, GRJIT_CMP_LT, t, grjit_operand_vreg(i), grjit_operand_vreg(n)), "op");
   check(grjit_builder_br_if(b, grjit_operand_vreg(t), body, done), "op");
   check(grjit_builder_set_block(b, body), "at");
-  GRCORE_PollIdentity id = {1, 1};
+  GRCORE_PollIdentity id = {1, 1, 0};
   GRJIT_FrameSlot st[2] = {grjit_frame_slot_vreg(i), grjit_frame_slot_vreg(sum)};
   GRJIT_Operand args[1] = {grjit_operand_vreg(sum)};
   check(grjit_builder_call_slot(b, sum, (uint64_t)(uintptr_t)&slot->entry, 0, args, 1, id, st,
@@ -405,7 +405,7 @@ static GRJIT_Function * build_tail_loop(const GRCORE_EntrySlot * slot) {
   check(grjit_builder_set_block(b, body), "at");
   check(grjit_builder_binary(b, GRJIT_OP_SUB, n1, grjit_operand_vreg(n), grjit_operand_imm(1)), "op");
   check(grjit_builder_binary(b, GRJIT_OP_ADD, s1, grjit_operand_vreg(sum), grjit_operand_imm(1)), "op");
-  GRCORE_PollIdentity id = {1, 1};
+  GRCORE_PollIdentity id = {1, 1, 0};
   GRJIT_FrameSlot st[2] = {grjit_frame_slot_vreg(n), grjit_frame_slot_vreg(sum)};
   GRJIT_Operand args[2] = {grjit_operand_vreg(n1), grjit_operand_vreg(s1)};
   check(grjit_builder_tail_call_slot(
@@ -499,8 +499,8 @@ static GRJIT_Function * build_native_loop(NativeLoopKind kind) {
   check(grjit_builder_br_if(b, grjit_operand_vreg(t), body, done), "op");
   check(grjit_builder_set_block(b, body), "at");
   GRJIT_FrameSlot st[2] = {grjit_frame_slot_vreg(i), grjit_frame_slot_vreg(sum)};
-  GRJIT_FrameState before = {{1, 1}, 2, st};
-  GRJIT_FrameState after = {{1, 2}, 2, st};
+  GRJIT_FrameState before = {{1, 1, 0}, 2, st};
+  GRJIT_FrameState after = {{1, 2, 0}, 2, st};
   GRJIT_Operand args[1] = {grjit_operand_vreg(sum)};
   if (kind == LOOP_HELPER_GC) {
     check(grjit_builder_call(b, sum, (uint64_t)(uintptr_t)helper_inc, GRJIT_CALL_GC_POINT,
@@ -617,7 +617,7 @@ static GRJIT_Function * build_sites(void) {
   check(grjit_builder_block(b, &entry), "block");
   check(grjit_builder_set_block(b, entry), "at");
   check(grjit_builder_const(b, acc, 0), "op");
-  GRCORE_PollIdentity id = {0, 0};
+  GRCORE_PollIdentity id = {0, 0, 0};
   for (unsigned i = 0; i < SITES_N; i++) {
     GRJIT_VReg r;
     check(grjit_builder_vreg(b, GRJIT_TYPE_REF, &r), "vreg");
@@ -749,7 +749,7 @@ static GRJIT_Function * build_kernel(KernelKind k) {
   check(grjit_builder_cmp(b, GRJIT_CMP_LT, t, grjit_operand_vreg(i), grjit_operand_vreg(n)), "op");
   check(grjit_builder_br_if(b, grjit_operand_vreg(t), body, done), "op");
   check(grjit_builder_set_block(b, body), "at");
-  const GRCORE_PollIdentity id = {1, 1};
+  const GRCORE_PollIdentity id = {1, 1, 0};
 #define VR(r) grjit_operand_vreg(r)
 #define IMM(v) grjit_operand_imm(v)
 #define OPK(call) check(call, "op")
@@ -1122,7 +1122,7 @@ static GRJIT_Function * build_hundred_int_div(void) {
   check(grjit_builder_vreg(b, GRJIT_TYPE_I64, &q), "vreg");
   check(grjit_builder_block(b, &entry), "block");
   check(grjit_builder_set_block(b, entry), "at");
-  const GRCORE_PollIdentity id = {1, 1};
+  const GRCORE_PollIdentity id = {1, 1, 0};
   for (int i = 0; i < 100; i++) {
     check(grjit_builder_binary(b, GRJIT_OP_OR, d, grjit_operand_vreg(a), grjit_operand_imm(1)), "op");
     check(grjit_builder_cmp(b, GRJIT_CMP_NE, t, grjit_operand_vreg(d), grjit_operand_imm(0)), "op");

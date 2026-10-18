@@ -12,6 +12,8 @@
 
 #include "../../src/x86_64/asm_internal.h"
 
+#include <ghoti.io/runtime-core/a/compiled.h>
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -45,6 +47,10 @@ std::vector<Case> cases() {
       {"mov r9, imm64", [](A a) { grjit_asm_mov_ri64(a, GRJIT_R9, 0x1122334455667788ull); },
           {0x49, 0xB9, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11},
           "movabs r9,0x1122334455667788"},
+      {"mov rbp, imm64 chain marker", [](A a) {
+        grjit_asm_mov_ri64(a, GRJIT_RBP, (uint64_t)GRCORE_COMPILED_CHAIN_END);
+      }, {0x48, 0xBD, 0x01, 0x4E, 0x45, 0x54, 0x49, 0x4A, 0x52, 0x47},
+          "movabs rbp,0x47524a4954454e01"},
       {"mov eax, 5 (short form)", [](A a) { grjit_asm_mov_ri(a, GRJIT_RAX, 5); },
           {0xB8, 0x05, 0x00, 0x00, 0x00}, "mov eax,0x5"},
       {"mov r10d, 5", [](A a) { grjit_asm_mov_ri(a, GRJIT_R10, 5); },

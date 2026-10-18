@@ -142,10 +142,10 @@ GRJIT_Function * calls_with(unsigned params, unsigned args, bool tail) {
     slots.push_back(grjit_frame_slot_vreg(p[i]));
   }
   if (tail) {
-    b.tail_call_slot(&word, 1, a, GRCORE_PollIdentity{1, 2}, slots);
+    b.tail_call_slot(&word, 1, a, GRCORE_PollIdentity{1, 2, 0}, slots);
   } else {
     std::vector<GRJIT_FrameSlot> after = slots;
-    b.call_slot(r, &word, 1, a, GRCORE_PollIdentity{1, 2}, slots, GRCORE_PollIdentity{1, 3}, after);
+    b.call_slot(r, &word, 1, a, GRCORE_PollIdentity{1, 2, 0}, slots, GRCORE_PollIdentity{1, 3, 0}, after);
     b.ret(V(r));
   }
   return b.finish();
@@ -475,7 +475,7 @@ TEST(Win64Calls, ACallableTwoResultSlotCallEmitsItsBufferAndReturnPath) {
   b.at(b.block());
   const GRJIT_VReg results[] = {a, c};
   const GRJIT_Operand args[] = {I(0), I(1), I(2), I(3), I(4), I(5), I(6), I(7), I(8), I(9), I(10), I(11)};
-  const GRCORE_PollIdentity id{1, 2};
+  const GRCORE_PollIdentity id{1, 2, 0};
   ASSERT_EQ(grjit_builder_call_slot_results(b.b, results, 2, 0x123400,
                 0x7789, args, 12, id, nullptr, 0, id, nullptr, 0), GRJIT_OK);
   const GRJIT_Operand values[] = {V(a), V(c)};
@@ -526,7 +526,7 @@ TEST(Win64Calls, CatchCallHasSeparateLandingMetadataAndRethrowPath) {
   const auto body = b.block();
   const auto landing = b.block();
   b.at(body);
-  const GRCORE_PollIdentity id{1, 2};
+  const GRCORE_PollIdentity id{1, 2, 0};
   ASSERT_EQ(grjit_builder_call_slot_catch_results(b.b, nullptr, 0, 0x123400,
                 0x7789, nullptr, 0, id, nullptr, 0, id, nullptr, 0, landing), GRJIT_OK);
   ASSERT_EQ(grjit_builder_ret(b.b, grjit_operand_none()), GRJIT_OK);
@@ -1008,7 +1008,7 @@ TEST(Win64CallsRun, AHookThatScribblesOnItsShadowSpaceFindsTheFramesOutgoingArea
   for (auto & r : v) {
     slots.push_back(grjit_frame_slot_vreg(r));
   }
-  b.poll(GRCORE_PollIdentity{1, 1}, slots);
+  b.poll(GRCORE_PollIdentity{1, 1, 0}, slots);
   b.bin(GRJIT_OP_ADD, sum, V(v[0]), V(v[1]));
   for (int i = 2; i < 7; i++) {
     b.bin(GRJIT_OP_ADD, sum, V(sum), V(v[i]));

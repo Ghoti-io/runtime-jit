@@ -37,7 +37,7 @@ constexpr uint32_t kPartialFault = 0xBAD0;
 struct Result {
   uint32_t exit = 99;
   std::vector<uint64_t> out;
-  GRCORE_PollIdentity guard_identity{0, 0};
+  GRCORE_PollIdentity guard_identity{0, 0, 0};
   bool timed_out = false;
 };
 

@@ -109,7 +109,7 @@ inline GRJIT_Function * sentinel_function(const void * clobber, size_t fold_limi
   b.cmp(GRJIT_CMP_GT, l, V(a), grjit_operand_f64_imm(f64bits(-2147483649.0)));
   b.cmp(GRJIT_CMP_LT, h, V(a), grjit_operand_f64_imm(f64bits(2147483648.0)));
   b.bin(GRJIT_OP_AND, ok, V(l), V(h));
-  b.guard(V(ok), {kTrapFunction, kSiteIntegerOverflow}, state());
+  b.guard(V(ok), {kTrapFunction, kSiteIntegerOverflow, 0}, state());
   b.un(GRJIT_OP_TRUNC_S, tr, V(a));
   // a store and a load of each width
   b.store(p, 0, 64, V(c4));
@@ -122,8 +122,8 @@ inline GRJIT_Function * sentinel_function(const void * clobber, size_t fold_limi
     b.call(c1, clobber, {V(c1)});
   }
   // a poll, whose slow path calls the helper, and a guard on the mode
-  b.poll({7, 1}, state());
-  b.guard(V(mode), {7, 2}, state());
+  b.poll({7, 1, 0}, state());
+  b.guard(V(mode), {7, 2, 0}, state());
   // fold: every register through its bits
   size_t folded = 0;
   auto fold64 = [&](GRJIT_VReg f) {

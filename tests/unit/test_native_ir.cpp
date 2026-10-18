@@ -34,8 +34,8 @@ GRJIT_CallHooks hooks() {
 uint64_t n_plain(void *) { return 0; }
 GRJIT_NativeResult n_status(void *) { return {0, 0, 0}; }
 
-const GRCORE_PollIdentity kId{7, 3};
-const GRCORE_PollIdentity kAfter{7, 4};
+const GRCORE_PollIdentity kId{7, 3, 0};
+const GRCORE_PollIdentity kAfter{7, 4, 0};
 
 constexpr GRJIT_Type TI = GRJIT_TYPE_I64;
 constexpr GRJIT_Type TR = GRJIT_TYPE_REF;

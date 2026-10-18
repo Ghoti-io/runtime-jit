@@ -59,12 +59,12 @@ GRJIT_Function * build(const GRJIT_Allocator * allocator, bool callable = false)
   b.cnst(r, 0x1001);
   b.cnst(q, 0x1009);
   b.cnst(d, 0);
-  b.poll({1, 1}, {grjit_frame_slot_vreg(r), grjit_frame_slot_constant(3)});
+  b.poll({1, 1, 0}, {grjit_frame_slot_vreg(r), grjit_frame_slot_constant(3)});
   b.br_if(V(c), a, o);
   b.at(a);
-  b.call_gc(d, reinterpret_cast<const void *>(helper), {V(r)}, {1, 2},
+  b.call_gc(d, reinterpret_cast<const void *>(helper), {V(r)}, {1, 2, 0},
       {grjit_frame_slot_vreg(r), grjit_frame_slot_vreg(q)});
-  b.guard(V(d), {1, 3}, {grjit_frame_slot_vreg(q), grjit_frame_slot_vreg(r)});
+  b.guard(V(d), {1, 3, 0}, {grjit_frame_slot_vreg(q), grjit_frame_slot_vreg(r)});
   b.br(o);
   b.at(o);
   b.cmp(GRJIT_CMP_EQ, d, V(r), V(r));

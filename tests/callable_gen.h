@@ -66,7 +66,7 @@ void each_call_function(F && visit) {
           GRJIT_BlockId b1 = variant == 1 ? b.block() : 0;
           GRJIT_BlockId b2 = variant == 1 ? b.block() : 0;
           b.at(b0);
-          const GRCORE_PollIdentity at{1, id};
+          const GRCORE_PollIdentity at{1, id, 0};
           std::vector<GRJIT_FrameSlot> state = {grjit_frame_slot_constant(id),
               params > 0 ? grjit_frame_slot_vreg(p[0]) : grjit_frame_slot_dead(),
               params > 1 ? grjit_frame_slot_vreg(p[1]) : grjit_frame_slot_dead()};
@@ -142,7 +142,7 @@ void each_tail_function(F && visit) {
           p.push_back(b.param(rotate[i % 3]));
         }
         b.at(b.block());
-        const GRCORE_PollIdentity at{3, id};
+        const GRCORE_PollIdentity at{3, id, 0};
         std::vector<GRJIT_FrameSlot> state = {grjit_frame_slot_constant(id),
             params > 0 ? grjit_frame_slot_vreg(p[0]) : grjit_frame_slot_dead(),
             params > 1 ? grjit_frame_slot_vreg(p[1]) : grjit_frame_slot_dead()};
@@ -216,8 +216,8 @@ void each_native_function(F && visit) {
             GRJIT_BlockId b2 = variant == 1 ? b.block() : 0;
             b.at(b0);
             b.cnst(flag, 1);
-            const GRCORE_PollIdentity at{2, id};
-            const GRCORE_PollIdentity after{2, id + 1};
+            const GRCORE_PollIdentity at{2, id, 0};
+            const GRCORE_PollIdentity after{2, id + 1, 0};
             std::vector<GRJIT_FrameSlot> state = {grjit_frame_slot_constant(id),
                 params > 0 ? grjit_frame_slot_vreg(p[0]) : grjit_frame_slot_dead(),
                 params > 1 ? grjit_frame_slot_vreg(p[1]) : grjit_frame_slot_dead(),

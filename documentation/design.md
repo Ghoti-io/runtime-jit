@@ -618,6 +618,13 @@ included, has been rebuilt into its guest frame, `out[0]` is the cause, and `out
 holds no frame state. The internal entry follows, on a 16-byte boundary with a
 sixteen-byte tag before it: a word that holds a magic number and the function's
 parameter count, then the engine's token for the function (`grjit_builder_set_token`).
+The token is an opaque call target identity and may include a module or program
+index. For deoptimization, `grjit_builder_set_guest_function` separately names
+the 32-bit guest function ID stored on the matching runtime-core guest frame.
+The verifier compares that declared ID with every frame state's guest function;
+engines must set it on both compiled builders and their interpreter frame-push
+paths. Tang, for example, uses a program-qualified token and the function
+index within that program as the guest frame ID.
 A `FAILED` status (below) reaches the adapter as the fatal exit
 `GRJIT_EXIT_REBUILD_FAILED`.
 

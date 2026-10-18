@@ -97,6 +97,9 @@ typedef struct GRJIT_A64Emit {
   uint32_t internal_offset;  ///< Where the internal entry is, after the adapter and the tag.
 } GRJIT_A64Emit;
 
+void grjit_a64_emit_operand_load(GRJIT_A64Emit *e, GRJIT_A64Reg r,
+    const GRJIT_Operand *o);
+
 /**
  * Emits the whole function into `out`: prologue, every block, then the stubs.
  * The recorded sites come back sorted by offset. A function whose conditional

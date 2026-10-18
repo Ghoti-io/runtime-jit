@@ -47,6 +47,13 @@
 #include <unordered_set>
 #include <utility>
 
+#if defined(__linux__) && defined(__has_include)
+#if __has_include(<valgrind/memcheck.h>)
+#include <valgrind/memcheck.h>
+#define FX_HAS_VALGRIND_MEMCHECK 1
+#endif
+#endif
+
 namespace fx {
 
 using u64 = uint64_t;
@@ -630,7 +637,8 @@ inline bool Engine::push_frame(int fn, const u64 * args, size_t n, bool compiled
   if (r != GRCORE_OK) {
     return false;
   }
-  grcore_stack_set_identity(stack, ref, GRCORE_PollIdentity{static_cast<u64>(fn), 0});
+  grcore_stack_set_identity(stack, ref,
+      GRCORE_PollIdentity{static_cast<u64>(fn), 0, 0});
   uint64_t * S = grcore_stack_slots(stack, ref);
   S[0] = 0;
   for (int i = 0; i < F.locals(); i++) {
@@ -675,7 +683,23 @@ __attribute__((no_sanitize_address, no_sanitize_thread))
 inline void scan_range_for_pins(const GRCORE_ConservativeRange * r, const std::unordered_set<u64> & live,
     std::unordered_set<u64> * pinned) {
   for (uint64_t at = (r->lo + 7) & ~uint64_t{7}; at + 8 <= r->hi; at += 8) {
-    uint64_t w = *reinterpret_cast<const volatile uint64_t *>(at);
+    // A native stack range contains padding and indeterminate C++ objects.
+    // Read its machine representation at the ABI boundary, rather than
+    // evaluating an uninitialized object through a C++ lvalue.
+    uint64_t w;
+#if defined(__x86_64__)
+    __asm__ __volatile__("movq (%1), %0" : "=r"(w) : "r"(at) : "memory");
+#elif defined(__aarch64__)
+    __asm__ __volatile__("ldr %0, [%1]" : "=r"(w) : "r"(at) : "memory");
+#else
+#error "The conservative-root fixture needs a native word-load definition"
+#endif
+#if defined(FX_HAS_VALGRIND_MEMCHECK)
+    // Memcheck tracks the arbitrary source bytes as possibly undefined.
+    // Only the local candidate is declared defined; the scanned stack is
+    // untouched, so genuine uninitialized uses elsewhere remain visible.
+    (void)VALGRIND_MAKE_MEM_DEFINED(&w, sizeof(w));
+#endif
     uint64_t a = ((w & r->mask) >> r->shift) + r->base;
     if (live.count(a) != 0) {
       pinned->insert(a);
@@ -823,7 +847,7 @@ inline GRJIT_Function * Engine::build_ir(int fn) {
       }
     }
     const Ins & in = F.code[pc];
-    const GRCORE_PollIdentity id{static_cast<u64>(fn), static_cast<u64>(pc)};
+    const GRCORE_PollIdentity id{static_cast<u64>(fn), static_cast<u64>(pc), 0};
     switch (in.k) {
       case K::CONST: b.cnst(in.d, in.imm); break;
       case K::MOV: b.mov(in.d, V(in.a)); break;
@@ -888,7 +912,8 @@ inline GRJIT_Function * Engine::build_ir(int fn) {
         // instruction, and the result (which the call's frame slot holds by then).
         if ((natives[static_cast<size_t>(in.native)].flags & GRJIT_NATIVE_STATUS) != 0) {
           b.call_native(in.d, static_cast<uint32_t>(in.native), operands(in.args), id, state(pc),
-              GRCORE_PollIdentity{static_cast<u64>(fn), static_cast<u64>(pc) + 1}, state(pc + 1));
+              GRCORE_PollIdentity{static_cast<u64>(fn),
+                  static_cast<u64>(pc) + 1, 0}, state(pc + 1));
         } else {
           b.call_native(in.d, static_cast<uint32_t>(in.native), operands(in.args), id, state(pc));
         }

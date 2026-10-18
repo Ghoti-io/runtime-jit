@@ -205,8 +205,14 @@ ifeq ($(filter-out $(DEPLESS_GOALS),$(or $(MAKECMDGOALS),all)),)
 SKIP_DEP_CHECK := 1
 endif
 
-# The name carries $(BRANCH). ghoti.io-cutil never matches the installed file.
-CUTIL_PC ?= ghoti.io-cutil$(BRANCH)
+# Dependencies have independent release majors. Keep their release defaults
+# explicit, while allowing a development branch to follow matching -dev
+# dependency packages. Other branch identities can set CUTIL_BRANCH and
+# RTCORE_BRANCH (or the complete *_PC names) deliberately.
+DEPENDENCY_RELEASE_BRANCH := $(patsubst %-debug,%,$(BRANCH))
+DEPENDENCY_BUILD_SUFFIX := $(if $(filter %-debug,$(BRANCH)),-debug,)
+CUTIL_BRANCH ?= $(if $(filter -dev,$(DEPENDENCY_RELEASE_BRANCH)),-dev,-0)$(DEPENDENCY_BUILD_SUFFIX)
+CUTIL_PC ?= ghoti.io-cutil$(CUTIL_BRANCH)
 CUTIL_CFLAGS := $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --cflags $(CUTIL_PC) 2>/dev/null)
 CUTIL_LIBS := $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --libs $(CUTIL_PC) 2>/dev/null)
 ifeq ($(strip $(CUTIL_CFLAGS)),)
@@ -219,7 +225,8 @@ INCLUDE += $(CUTIL_CFLAGS)
 # runtime-core: the page provider, the code-metadata format and the layout
 # descriptor this library emits against. Found the same way, by pkg-config alone and with the same
 # branch suffix, and a hard error when it is missing.
-RTCORE_PC ?= ghoti.io-runtime-core$(BRANCH)
+RTCORE_BRANCH ?= $(if $(filter -dev,$(DEPENDENCY_RELEASE_BRANCH)),-dev,-0)$(DEPENDENCY_BUILD_SUFFIX)
+RTCORE_PC ?= ghoti.io-runtime-core$(RTCORE_BRANCH)
 RTCORE_CFLAGS := $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --cflags $(RTCORE_PC) 2>/dev/null)
 RTCORE_LIBS := $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --libs $(RTCORE_PC) 2>/dev/null)
 ifeq ($(strip $(RTCORE_CFLAGS)),)
@@ -236,10 +243,15 @@ TESTFLAGS := `PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --libs --cfla
 
 # coverage clears this: --coverage links the gcov runtime, whose mangle_path
 # check-symbols is right to reject in a shipping library.
-TEST_GATES ?= check-symbols check-aliasing check-stamps check-fp-contract check-labels \
+TEST_GATES ?= check-symbols check-aliasing check-stamps check-fp-contract check-labels check-gtest-selection \
 	check-edges check-gates check-planted check-planted-calls examples
 
 VALGRIND_FLAGS := --leak-check=full --show-leak-kinds=definite,indirect,possible --track-origins=yes --error-exitcode=1 --suppressions=tests/valgrind.supp
+# Memcheck's generated-program sweep can exceed the ordinary 120-second
+# per-test watchdog. Keep a finite hang detector for instrumented runs.
+VALGRIND_WATCHDOG_SECONDS ?= 600
+VALGRIND_FLOAT_WORKED_FILTER := FloatRun.EveryOperationGivesTheWorkedAnswerFromTheCodeAndFromTheEvaluator:FloatRun.EveryOperationAtEveryWidthAgreesWithTheEvaluatorOnTheBoundaryValues
+VALGRIND_FLOAT_DIFFERENTIAL_FILTER := Differential.GeneratedFloatProgramsRunTheSameCompiledAndEvaluatedWithNansEqual:Differential.GeneratedFloatProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluatedWithNansEqual
 
 TEST_HELPER_SRC := $(wildcard tests/test_helpers.cpp)
 TEST_HELPER_OBJ := $(patsubst tests/%.cpp,$(OBJ_DIR)/tests/%.o,$(TEST_HELPER_SRC))
@@ -503,11 +515,7 @@ else
 endif
 
 test: $(APP_DIR)/$(TARGET) $(TEST_EXECUTABLES) $(BENCH_EXECUTABLES) $(TEST_GATES) ## Build and run the tests
-	@for test_exe in $(TEST_EXECUTABLES); do \
-		test_name=$$(basename $$test_exe $(EXE_EXTENSION)); \
-		printf '\n### Running %s ###\n\n' "$$test_name"; \
-		LD_LIBRARY_PATH="$(TEST_LD_PATH)" $$test_exe --gtest_brief=1 || exit 1; \
-	done
+	@LD_LIBRARY_PATH="$(TEST_LD_PATH)" python3 tools/run-gtest-matrix.py --mode ordinary -- $(TEST_EXECUTABLES)
 	@if [ -z "$(strip $(BENCH_EXECUTABLES))" ]; then \
 		printf 'test: no benchmark harness under bench/ (AD-26 requires one)\n' >&2; exit 1; \
 	fi
@@ -518,80 +526,35 @@ test: $(APP_DIR)/$(TARGET) $(TEST_EXECUTABLES) $(BENCH_EXECUTABLES) $(TEST_GATES
 	done
 
 test-quiet: $(APP_DIR)/$(TARGET) $(TEST_EXECUTABLES) ## Run tests, one line per suite
-	@total_tests=0; total_passed=0; total_failed=0; total_time=0; failed_suites=""; any_failed=0; \
-	printf '\n%-30s %8s %10s %s\n' "Test Suite" "Tests" "Time" "Status"; \
-	for test_exe in $(TEST_EXECUTABLES); do \
-		test_name=$$(basename $$test_exe $(EXE_EXTENSION)); \
-		output=$$(LD_LIBRARY_PATH="$(TEST_LD_PATH)" $$test_exe --gtest_brief=1 2>&1); \
-		exit_code=$$?; \
-		num_tests=$$(echo "$$output" | grep -oP '\[\s*=+\s*\]\s*\K\d+(?=\s+tests?)' | head -1); \
-		time_ms=$$(echo "$$output" | grep -oP '\(\K\d+(?=\s*ms\s*total\))' | head -1); \
-		[ -z "$$num_tests" ] && num_tests=0; \
-		[ -z "$$time_ms" ] && time_ms=0; \
-		total_tests=$$((total_tests + num_tests)); \
-		total_time=$$((total_time + time_ms)); \
-		if [ $$exit_code -eq 0 ]; then \
-			total_passed=$$((total_passed + num_tests)); \
-			printf '%-30s %8d %8dms PASS\n' "$$test_name" "$$num_tests" "$$time_ms"; \
-		else \
-			any_failed=1; \
-			failures=$$(echo "$$output" | grep -oP '\[\s*FAILED\s*\]\s*\K\d+' | head -1); \
-			[ -z "$$failures" ] && failures=$$num_tests; \
-			[ "$$failures" -eq 0 ] && failures=1; \
-			total_failed=$$((total_failed + failures)); \
-			total_passed=$$((total_passed + num_tests - failures)); \
-			printf '%-30s %8d %8dms FAIL (exit %d)\n' "$$test_name" "$$num_tests" "$$time_ms" "$$exit_code"; \
-			failed_suites="$$failed_suites\n=== $$test_name FAILURES ===\n$$output\n"; \
-		fi; \
-	done; \
-	if [ $$any_failed -eq 0 ]; then \
-		printf '%-30s %8d %6dms PASS\n\n' "TOTAL" "$$total_tests" "$$total_time"; \
-	else \
-		printf '%-30s %8d %6dms FAIL (%d failed)\n' "TOTAL" "$$total_tests" "$$total_time" "$$total_failed"; \
-		printf '%s\n' "$$failed_suites"; \
-		exit 1; \
-	fi
+	@LD_LIBRARY_PATH="$(TEST_LD_PATH)" python3 tools/run-gtest-matrix.py --mode ordinary --quiet -- $(TEST_EXECUTABLES)
 
-test-valgrind: $(APP_DIR)/$(TARGET) $(TEST_EXECUTABLES) ## Run the tests under Valgrind
+.PHONY: check-gtest-selection
+check-gtest-selection: $(APP_DIR)/testFloat_ir$(EXE_EXTENSION) ## Plant hostile inherited GTest settings and verify full selection
+	@LD_LIBRARY_PATH="$(TEST_LD_PATH)" python3 tools/run-gtest-matrix.py --mode ordinary --quiet --selection-control -- $(APP_DIR)/testFloat_ir$(EXE_EXTENSION)
+
+.PHONY: valgrind-float-ordinary
+valgrind-float-ordinary: $(APP_DIR)/testFloat_ir$(EXE_EXTENSION) $(APP_DIR)/testDifferential$(EXE_EXTENSION)
 ifeq ($(OS_NAME), Linux)
-	@for test_exe in $(TEST_EXECUTABLES); do \
-		printf '\n### Valgrind %s ###\n\n' "$$(basename $$test_exe)"; \
-		LD_LIBRARY_PATH="$(TEST_LD_PATH)" valgrind $(VALGRIND_FLAGS) $$test_exe --gtest_brief=1 || exit 1; \
+	@set -e; \
+	for pair in "testFloat_ir|$(VALGRIND_FLOAT_WORKED_FILTER)" "testDifferential|$(VALGRIND_FLOAT_DIFFERENTIAL_FILTER)"; do \
+		test_name=$${pair%%|*}; filter=$${pair#*|}; \
+		printf 'Valgrind float boundary: ordinary exact-bit companion %s (2 selected tests)\n' "$$test_name"; \
+		LD_LIBRARY_PATH="$(TEST_LD_PATH)" python3 tools/run-gtest-matrix.py --mode ordinary --filter "$$filter" --expected-count 2 -- "$(APP_DIR)/$$test_name$(EXE_EXTENSION)"; \
 	done
 else
 	@printf 'Valgrind is only available on Linux\n' >&2; exit 1
 endif
 
-test-valgrind-quiet: $(APP_DIR)/$(TARGET) $(TEST_EXECUTABLES) ## Valgrind, one line per suite
+test-valgrind: $(APP_DIR)/$(TARGET) $(TEST_EXECUTABLES) valgrind-float-ordinary ## Run the tests under Valgrind
 ifeq ($(OS_NAME), Linux)
-	@total_tests=0; total_failed=0; total_time=0; failed_suites=""; \
-	printf '\n%-30s %8s %10s %s\n' "Test Suite (Valgrind)" "Tests" "Time" "Status"; \
-	for test_exe in $(TEST_EXECUTABLES); do \
-		test_name=$$(basename $$test_exe $(EXE_EXTENSION)); \
-		output=$$(LD_LIBRARY_PATH="$(TEST_LD_PATH)" valgrind $(VALGRIND_FLAGS) $$test_exe --gtest_brief=1 2>&1); \
-		exit_code=$$?; \
-		num_tests=$$(echo "$$output" | grep -oP '\[\s*=+\s*\]\s*\K\d+(?=\s+tests?)' | head -1); \
-		time_ms=$$(echo "$$output" | grep -oP '\(\K\d+(?=\s*ms\s*total\))' | head -1); \
-		[ -z "$$num_tests" ] && num_tests=0; \
-		[ -z "$$time_ms" ] && time_ms=0; \
-		total_tests=$$((total_tests + num_tests)); \
-		total_time=$$((total_time + time_ms)); \
-		has_leak=$$(echo "$$output" | grep -c "are definitely lost\|are indirectly lost\|are possibly lost" || true); \
-		if [ $$exit_code -eq 0 ] && [ $$has_leak -eq 0 ]; then \
-			printf '%-30s %8d %8dms PASS\n' "$$test_name" "$$num_tests" "$$time_ms"; \
-		else \
-			total_failed=$$((total_failed + 1)); \
-			printf '%-30s %8d %8dms FAIL\n' "$$test_name" "$$num_tests" "$$time_ms"; \
-			failed_suites="$$failed_suites\n=== $$test_name ===\n$$output\n"; \
-		fi; \
-	done; \
-	if [ $$total_failed -eq 0 ]; then \
-		printf '%-30s %8d %6dms PASS\n\n' "TOTAL" "$$total_tests" "$$total_time"; \
-	else \
-		printf '%-30s %8d %6dms FAIL (%d suites)\n' "TOTAL" "$$total_tests" "$$total_time" "$$total_failed"; \
-		printf '%s\n' "$$failed_suites"; \
-		exit 1; \
-	fi
+	@LD_LIBRARY_PATH="$(TEST_LD_PATH)" python3 tools/run-gtest-matrix.py --mode valgrind --valgrind-flags '$(VALGRIND_FLAGS)' --watchdog "$(VALGRIND_WATCHDOG_SECONDS)" -- $(TEST_EXECUTABLES)
+else
+	@printf 'Valgrind is only available on Linux\n' >&2; exit 1
+endif
+
+test-valgrind-quiet: $(APP_DIR)/$(TARGET) $(TEST_EXECUTABLES) valgrind-float-ordinary ## Valgrind, one line per suite
+ifeq ($(OS_NAME), Linux)
+	@LD_LIBRARY_PATH="$(TEST_LD_PATH)" python3 tools/run-gtest-matrix.py --mode valgrind --quiet --valgrind-flags '$(VALGRIND_FLAGS)' --watchdog "$(VALGRIND_WATCHDOG_SECONDS)" -- $(TEST_EXECUTABLES)
 else
 	@printf 'Valgrind is only available on Linux\n' >&2; exit 1
 endif

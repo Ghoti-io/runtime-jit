@@ -166,14 +166,15 @@ M = [
     ("short reservation: the up-front check that the cells suffice is gone", "core",
      "src/a/deopt.c",
      "  if (need > (reservation == NULL ? 0 : reservation->capacity)) {\n    return GRCORE_ERR_INVALID; /* a short reservation is a defect, caught here */\n  }",
-     "  if (false) {\n    return GRCORE_ERR_INVALID;\n  }"),
+     "  if (false) {\n    return GRCORE_ERR_INVALID;\n  }",
+     ["testRebuild:ChainRebuild.AReservationOneCellShortIsRefusedUpFrontAndNothingIsWritten"]),
     ("stack-map reference left out: the root pass skips the last live entry of a compiled frame", "core",
      "src/a/roots.c",
      "  for (size_t i = 0; i < site->live_count; i++) {\n    const GRCORE_CodeLocation * loc = &site->live[i];",
      "  for (size_t i = 0; i + 1 < site->live_count; i++) {\n    const GRCORE_CodeLocation * loc = &site->live[i];"),
     ("pairing lost: a compiled frame's guest frame is reported beside it", "core",
      "src/a/roots.c",
-     "      if (have_guest && can_pair && index == remaining - 1 &&\n          h.engine == cf.engine && h.function == cf.identity.function) {",
+     "      if (have_guest && can_pair && index == remaining - 1 &&\n          h.engine == cf.engine &&\n          h.guest_function == cf.site->guest_function) {",
      "      if (false) {"),
     ("walk start not taken from the cell: a walk finds no run", "core",
      "src/a/compiled.c",
@@ -196,7 +197,8 @@ M = [
     ("a call through a pointer does not store the walk start before its push", "jit",
      "src/x86_64/emit.c",
      "  GRJIT_Label push_ret = grjit_asm_label(a);\n  grjit_emit_store_walk_cell(e, push_ret);",
-     "  GRJIT_Label push_ret = grjit_asm_label(a);\n  if (op->kind == GRJIT_OP_CALL_SLOT) {\n    grjit_emit_store_walk_cell(e, push_ret);\n  }"),
+     "  GRJIT_Label push_ret = grjit_asm_label(a);\n  if (op->kind == GRJIT_OP_CALL_SLOT) {\n    grjit_emit_store_walk_cell(e, push_ret);\n  }",
+     ["testCalls:Calls.PointerCallStoresWalkCellBeforeFramePush"]),
     ("a call through a pointer enters code that is retired", "jit",
      "src/code/target.c",
      "      range.retired || target < range.start + GRJIT_ENTRY_TAG_BYTES) {",
@@ -220,7 +222,8 @@ M = [
     ("a derived pointer passed as an argument is not recorded in the push site's map", "jit",
      "src/backend/metadata.c",
      "    der_total += push_derived_args(f, &recs[i]);",
-     "    der_total += 0 * push_derived_args(f, &recs[i]);"),
+     "    der_total += 0 * push_derived_args(f, &recs[i]);",
+     ["testCalls:Calls.ADerivedPointerPassedAsAnArgumentFollowsItsBaseWhenThePushCollects"]),
 
     # Tail calls (story 5).
     ("a refused tail hook is ignored: the frame is replaced although the guest frame was not", "jit",
@@ -238,7 +241,8 @@ M = [
     ("a tail call leaves the return address where it was, not where the callee's return pops it from", "jit",
      "src/x86_64/emit.c",
      "  grjit_asm_store64(a, GRJIT_RBP, ra_new, scratch);",
-     "  grjit_asm_store64(a, GRJIT_RBP, 8, scratch);"),
+     "  grjit_asm_store64(a, GRJIT_RBP, 8, scratch);",
+     ["testTail:Tail.StackArgumentTailCallStoresReturnAddressAtTheReplacementStackPointer"]),
     ("the verifier does not need a tail hook for a tail call", "jit",
      "src/ir/verify.c",
      "        if (h->tail == NULL || (slot && h->compile == NULL)) {",
@@ -252,7 +256,8 @@ M = [
     ("a tail call takes the caller's base from rbp, not from its saved word (the callee's chain loops)", "jit",
      'src/x86_64/emit.c',
      '  grjit_asm_load64(a, link_tmp, GRJIT_RBP, 0);\n  grjit_asm_store64(a, GRJIT_RBP, ra_new - 8, link_tmp);\n  size_t copy_to = n;',
-     '  grjit_asm_mov_rr(a, link_tmp, GRJIT_RBP);\n  grjit_asm_store64(a, GRJIT_RBP, ra_new - 8, link_tmp);\n  size_t copy_to = n;'),
+     '  grjit_asm_mov_rr(a, link_tmp, GRJIT_RBP);\n  grjit_asm_store64(a, GRJIT_RBP, ra_new - 8, link_tmp);\n  size_t copy_to = n;',
+     ['testTail:Tail.StackArgumentTailCallCopiesTheSavedFrameLinkIntoTheReplacementFrame']),
     ("a tail call's code pointer is not a use for the definite-assignment check", "jit",
      'src/ir/function.c',
      '      visit_operand(&op->a, visit, user); /* the code pointer of a pointer call */',
@@ -267,16 +272,16 @@ M = [
      '    grjit_asm_mov_ri(a, C_ARG(e, 4), n > 1 ? 1 : n);\n    grjit_asm_mov_ri(a, C_ARG(e, 5), op->callee_result_count);'),
     ('the tail hook is handed its arguments from the second slot', "jit",
      'src/x86_64/emit.c',
-     '  GRJIT_Label hook_ret = grjit_asm_label(a);\n  grjit_emit_store_walk_cell(e, hook_ret);\n  grjit_asm_load64(a, C_ARG(e, 0), GRJIT_RBP, GRJIT_SLOT_CTX);\n  if (op->environment.kind == GRJIT_OPERAND_NONE)\n    grjit_asm_load64(a, C_ARG(e, 1), GRJIT_RBP, GRJIT_SLOT_ENV);\n  else\n    load_operand(e, C_ARG(e, 1), &op->environment);\n  grjit_asm_mov_ri(a, C_ARG(e, 2), op->callee);\n  grjit_asm_lea(a, C_ARG(e, 3), GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, 0));',
-     '  GRJIT_Label hook_ret = grjit_asm_label(a);\n  grjit_emit_store_walk_cell(e, hook_ret);\n  grjit_asm_load64(a, C_ARG(e, 0), GRJIT_RBP, GRJIT_SLOT_CTX);\n  if (op->environment.kind == GRJIT_OPERAND_NONE)\n    grjit_asm_load64(a, C_ARG(e, 1), GRJIT_RBP, GRJIT_SLOT_ENV);\n  else\n    load_operand(e, C_ARG(e, 1), &op->environment);\n  grjit_asm_mov_ri(a, C_ARG(e, 2), op->callee);\n  grjit_asm_lea(a, C_ARG(e, 3), GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, n > 1 ? 1 : 0));'),
+     '  GRJIT_Label hook_ret = grjit_asm_label(a);\n  grjit_emit_store_walk_cell(e, hook_ret);\n  grjit_asm_load64(a, C_ARG(e, 0), GRJIT_RBP, GRJIT_SLOT_CTX);\n  if (op->environment.kind == GRJIT_OPERAND_NONE)\n    grjit_asm_load64(a, C_ARG(e, 1), GRJIT_RBP, GRJIT_SLOT_ENV);\n  else\n    load_operand(e, C_ARG(e, 1), &op->environment);\n  load_callee(e, C_ARG(e, 2), op);\n  grjit_asm_lea(a, C_ARG(e, 3), GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, 0));',
+     '  GRJIT_Label hook_ret = grjit_asm_label(a);\n  grjit_emit_store_walk_cell(e, hook_ret);\n  grjit_asm_load64(a, C_ARG(e, 0), GRJIT_RBP, GRJIT_SLOT_CTX);\n  if (op->environment.kind == GRJIT_OPERAND_NONE)\n    grjit_asm_load64(a, C_ARG(e, 1), GRJIT_RBP, GRJIT_SLOT_ENV);\n  else\n    load_operand(e, C_ARG(e, 1), &op->environment);\n  load_callee(e, C_ARG(e, 2), op);\n  grjit_asm_lea(a, C_ARG(e, 3), GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, n > 1 ? 1 : 0));'),
     ('the push hook is handed one argument, whatever the count', "jit",
      'src/x86_64/emit.c',
      '    grjit_asm_mov_ri(a, C_ARG(e, 4), n);\n    grjit_asm_mov_ri(a, C_ARG(e, 5), op->result_count);',
      '    grjit_asm_mov_ri(a, C_ARG(e, 4), n > 1 ? 1 : n);\n    grjit_asm_mov_ri(a, C_ARG(e, 5), op->result_count);'),
     ('the push hook is handed its arguments from the second slot', "jit",
      'src/x86_64/emit.c',
-     '  GRJIT_Label push_ret = grjit_asm_label(a);\n  grjit_emit_store_walk_cell(e, push_ret);\n  grjit_asm_load64(a, C_ARG(e, 0), GRJIT_RBP, GRJIT_SLOT_CTX);\n  if (op->environment.kind == GRJIT_OPERAND_NONE)\n    grjit_asm_load64(a, C_ARG(e, 1), GRJIT_RBP, GRJIT_SLOT_ENV);\n  else\n    load_operand(e, C_ARG(e, 1), &op->environment);\n  grjit_asm_mov_ri(a, C_ARG(e, 2), op->callee);\n  grjit_asm_lea(a, C_ARG(e, 3), GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, 0));',
-     '  GRJIT_Label push_ret = grjit_asm_label(a);\n  grjit_emit_store_walk_cell(e, push_ret);\n  grjit_asm_load64(a, C_ARG(e, 0), GRJIT_RBP, GRJIT_SLOT_CTX);\n  if (op->environment.kind == GRJIT_OPERAND_NONE)\n    grjit_asm_load64(a, C_ARG(e, 1), GRJIT_RBP, GRJIT_SLOT_ENV);\n  else\n    load_operand(e, C_ARG(e, 1), &op->environment);\n  grjit_asm_mov_ri(a, C_ARG(e, 2), op->callee);\n  grjit_asm_lea(a, C_ARG(e, 3), GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, n > 1 ? 1 : 0));'),
+     '  GRJIT_Label push_ret = grjit_asm_label(a);\n  grjit_emit_store_walk_cell(e, push_ret);\n  grjit_asm_load64(a, C_ARG(e, 0), GRJIT_RBP, GRJIT_SLOT_CTX);\n  if (op->environment.kind == GRJIT_OPERAND_NONE)\n    grjit_asm_load64(a, C_ARG(e, 1), GRJIT_RBP, GRJIT_SLOT_ENV);\n  else\n    load_operand(e, C_ARG(e, 1), &op->environment);\n  load_callee(e, C_ARG(e, 2), op);\n  grjit_asm_lea(a, C_ARG(e, 3), GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, 0));',
+     '  GRJIT_Label push_ret = grjit_asm_label(a);\n  grjit_emit_store_walk_cell(e, push_ret);\n  grjit_asm_load64(a, C_ARG(e, 0), GRJIT_RBP, GRJIT_SLOT_CTX);\n  if (op->environment.kind == GRJIT_OPERAND_NONE)\n    grjit_asm_load64(a, C_ARG(e, 1), GRJIT_RBP, GRJIT_SLOT_ENV);\n  else\n    load_operand(e, C_ARG(e, 1), &op->environment);\n  load_callee(e, C_ARG(e, 2), op);\n  grjit_asm_lea(a, C_ARG(e, 3), GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, n > 1 ? 1 : 0));'),
     ("a call's code pointer is not a use for the definite-assignment check", "jit",
      'src/ir/function.c',
      '      visit_operand(&op->a, visit, user); /* the code pointer of a pointer call */',
@@ -370,7 +375,7 @@ M = [
      "src/a/registry.c",
      "  if (stack->jit_live == 0) {\n    grcore_code_release(code);\n    const GRCORE_Allocator * a = engine_allocator(stack->context);\n    a->free_fn(a->ctx, node);\n    return;\n  }\n  node->code",
      "  if (true) {\n    grcore_code_release(code);\n    const GRCORE_Allocator * a = engine_allocator(stack->context);\n    a->free_fn(a->ctx, node);\n    return;\n  }\n  node->code",
-     ['testNatives']),
+     ['testRegistry:Retire.ASlotClearedUnderALiveJitRecordIsReleasedWhenTheLastOneLeavesAndNotBefore']),
     ("early free (native): unregistering a range under a live JIT record releases it at once", "core",
      "src/a/registry.c",
      "  if (stack->jit_live == 0) {\n    grcore_code_release(r->entries[at].code);",
@@ -389,7 +394,7 @@ M = [
     ('review: call site frame state/identity is the after state for a status native', 'jit', 'src/x86_64/emit.c', '      st->identity, live, op->state, op);', '      (status ? f->states[op->exit_state].identity : st->identity), live, status ? op->exit_state : op->state, op);', ['testNatives']),
     ('review: status exit site is a GC_POINT_CALL not a GUARD', 'jit', 'src/x86_64/exit.c', '  grjit_emit_add_site(&e->c, (uint32_t)grjit_asm_size(a), GRCORE_SITE_GUARD,\n      state->identity, p->live_index, p->op->exit_state);', '  grjit_emit_add_site(&e->c, (uint32_t)grjit_asm_size(a), GRCORE_SITE_GC_POINT_CALL,\n      state->identity, p->live_index, p->op->exit_state);', ['testNatives']),
     ("review: walk cell not stored by the exits' hook for natives (cell holds call's start)", 'jit', 'src/x86_64/exit.c', '  grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_OUT, C_ARG(e, 1));\n  call_deopt_hook(e, ret);', '  grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_OUT, GRJIT_RSI);\n  grjit_asm_mov_rr(a, C_ARG(e, 0), GRJIT_RCX);\n  grjit_asm_mov_ri(a, GRJIT_RAX, (uint64_t)(uintptr_t)e->c.f->hooks.deopt);\n  grjit_asm_call_r(a, GRJIT_RAX);\n  grjit_asm_mov32_rr(a, GRJIT_RAX, GRJIT_RAX);\n  grjit_asm_test_rr(a, GRJIT_RAX, GRJIT_RAX);\n  grjit_asm_jcc(a, GRJIT_COND_NE, e->ret_failed);\n  if (0) call_deopt_hook(e, ret);', ['testNatives']),
-    ('review: live cursor advances 3 for a native without status', 'jit', 'src/x86_64/emit.c', 'e->c.live_cursor += status ? 3 : 2;', 'e->c.live_cursor += 3;', ['testNatives']),
+    ('review: live cursor advances 3 for a native without status', 'jit', 'src/x86_64/emit.c', 'e->c.live_cursor += status ? 3 : 2;', 'e->c.live_cursor += 3;', ['testNatives:Natives.ConsecutiveNoStatusNativesKeepTheSecondCallSiteOnItsOwnLiveSet']),
     ('review: deopt hook gets no context (rdi zero) on every exit', 'jit', 'src/x86_64/exit.c', '  grjit_asm_mov_rr(a, C_ARG(e, 0), GRJIT_RCX);\n  grjit_asm_mov_ri(a, GRJIT_RAX, (uint64_t)(uintptr_t)e->c.f->hooks.deopt);', '  grjit_asm_mov_ri(a, C_ARG(e, 0), 0);\n  grjit_asm_mov_ri(a, GRJIT_RAX, (uint64_t)(uintptr_t)e->c.f->hooks.deopt);', ['testNatives']),
     ('review: pre-call exit site is a GC_POINT_CALL', 'jit', 'src/x86_64/exit.c', '  grjit_emit_add_site(&e->c, (uint32_t)grjit_asm_size(a), GRCORE_SITE_GUARD,\n      state->identity, p->live_index, p->op->state);\n  grjit_asm_mov_ri(a, GRJIT_RAX, 0);', '  grjit_emit_add_site(&e->c, (uint32_t)grjit_asm_size(a), GRCORE_SITE_GC_POINT_CALL,\n      state->identity, p->live_index, p->op->state);\n  grjit_asm_mov_ri(a, GRJIT_RAX, 0);', ['testNatives']),
     ('review: liveness: pre-call exit of a status native uses the state after', 'jit', 'src/backend/liveness.c', 'const uint32_t which_state = k == 2 ? op->exit_state : op->state;', 'const uint32_t which_state = k >= 1 && op->exit_state != GRJIT_NO_STATE ? op->exit_state : op->state;', ['testNatives']),
@@ -445,7 +450,7 @@ M = [
     ("IR multi-result RET reverses the result-buffer ordering", "jit", "src/x86_64/emit.c",
      "            grjit_asm_store64(a, GRJIT_RDX, (int32_t)(8 * (i - 1)), GRJIT_RAX);",
      "            grjit_asm_store64(a, GRJIT_RDX, (int32_t)(8 * i), GRJIT_RAX);",
-     ['testCompile']),
+     ['testCompile:Compile.CallableReturnWritesThreeResultsInOrderWithinItsOutputBuffer']),
     ("IR INSTANCE reads the wrong entry context slot", "jit", "src/x86_64/emit.c",
      "      grjit_asm_load64(a, GRJIT_RAX, GRJIT_RBP, GRJIT_SLOT_ENV);\n      store_result(e, op->dst, GRJIT_RAX);",
      "      grjit_asm_load64(a, GRJIT_RAX, GRJIT_RBP, GRJIT_SLOT_CTX);\n      store_result(e, op->dst, GRJIT_RAX);",
@@ -912,7 +917,7 @@ M_ARM64.extend([
     ('an arm64 tail call reads the result buffer\'s pointer from the frame after the stack-argument copy', 'jit', 'src/arm64/emit.c',
      '  if (e->c.shape.has_result_buffer && n >= ireg) {\n    store_slot(e, GRJIT_A64_X11,\n        (int32_t)(sp_new + 8 * (int64_t)(n - ireg)));\n  }',
      '  if (e->c.shape.has_result_buffer && n >= ireg) {\n    load_slot(e, GRJIT_A64_X11, GRJIT_SLOT_ARGS);\n    store_slot(e, GRJIT_A64_X11,\n        (int32_t)(sp_new + 8 * (int64_t)(n - ireg)));\n  }',
-     ['testCompile']),
+     ['testArm64_calls:Arm64Calls.TailCallSavesResultBufferBeforeStagingStackArguments']),
     ('the arm64 stub that re-reads an installed slot loads it from the constant address field, zero for a slot named by a register', 'jit', 'src/arm64/exit.c',
      '  if (p->op->address != 0) {\n    grjit_a64_mov_ri(a, GRJIT_A64_X16, p->op->address);\n  } else if (p->op->a.kind == GRJIT_OPERAND_VREG) {',
      '  if (true) {\n    grjit_a64_mov_ri(a, GRJIT_A64_X16, p->op->address);\n  } else if (p->op->a.kind == GRJIT_OPERAND_VREG) {',
@@ -979,31 +984,49 @@ def build_and_run(core, jit, mutated_lib, timeout, extra_env=None, only=None):
         rc, out = sh('make -j8 install PREFIX=%s' % P, core)
         if rc != 0:
             return 'BUILD FAILED', out[-300:]
-        for t in ([] if only else CORE_TESTS):
+        core_selected = [item.partition(':') for item in (only or CORE_TESTS)]
+        core_selected = [(t, sep, filt) for t, sep, filt in core_selected if t in CORE_TESTS]
+        for t, _, _ in core_selected:
             rc, out = sh('make -j8 build/linux/release/apps/%s PREFIX=%s' % (t, P), core)
             if rc != 0:
                 return 'BUILD FAILED', out[-300:]
-    for t in (only or JIT_TESTS):
+    parsed = [item.partition(':') for item in (only or JIT_TESTS)]
+    jit_selected = [(t, sep, filt) for t, sep, filt in parsed if t not in CORE_TESTS]
+    for t, _, _ in jit_selected:
         rc, out = sh('make -j8 build/linux/release/apps/%s PREFIX=%s' % (t, P), jit)
         if rc != 0:
             return 'BUILD FAILED', out[-300:]
     # Every test program of both libraries that bears on the defect runs; the
     # first verdict that is not a pass decides.
-    runs = ([(core, t) for t in CORE_TESTS] if mutated_lib == 'core' and not only else []) + \
-           [(jit, t) for t in (only or JIT_TESTS)]
-    for tree, t in runs:
-        rc, out = sh('./build/linux/release/apps/%s --gtest_brief=1' % t, tree, timeout, extra_env)
-        verdict = judge(rc, out, t)
+    runs = ([(core, t, filt) for t, _, filt in core_selected] if mutated_lib == 'core' else []) + \
+           [(jit, t, filt) for t, _, filt in jit_selected]
+    for tree, t, filt in runs:
+        command = './build/linux/release/apps/%s' % t
+        if filt:
+            command += ' --gtest_filter=' + filt
+        rc, out = sh(command, tree, timeout, extra_env)
+        verdict = judge(rc, out, t, filt or None)
         if verdict is not None:
             return verdict
     return 'MISSED', ''
 
 
-def judge(rc, out, t):
-    """One test program's result -> a verdict, or None when it passed."""
+def judge(rc, out, t, expected=None):
+    """One test program's result -> a verdict, or None when it passed.
+
+    A successful process that matched zero tests is not a control or a catch.
+    The verbose Google Test RUN lines also prove a focused mutation exercised
+    the exact intended case before any failure is credited to that mutation.
+    """
+    started = re.findall(r'^\[\s*RUN\s*\]\s+(\S+)', out, re.MULTILINE)
+    if not started:
+        return 'BUILD FAILED', '%s did not enter any Google Test case: %s' % (t, out[-200:])
+    if expected is not None and started != [expected]:
+        return 'BUILD FAILED', '%s expected exactly %s, entered %s' % (t, expected, started)
     if rc == 'timeout':
         return 'TIMEOUT', t
-    failed = sorted(set(re.findall(r'\[  FAILED  \] (\S+)', out)))
+    failed = sorted({name for name in re.findall(r'\[  FAILED  \] (\S+)', out)
+                     if '.' in name})
     if isinstance(rc, int) and rc < 0 or (rc != 0 and not failed and rc >= 128):
         return 'CAUGHT', '%s: killed by a signal (crash)' % t
     if rc != 0:
@@ -1016,10 +1039,15 @@ def judge(rc, out, t):
             # as a test run, which is not evidence about the defect.
             return 'BUILD FAILED', '%s exited %s without naming a failing test: %s' % (t, rc, out[-200:])
         return 'CAUGHT', '%s: %s' % (t, ', '.join(f.split('.', 1)[-1][:50] for f in failed[:2]))
-    if WIN64 and rc == 0 and '[  PASSED  ]' not in out:
-        # The program ended with status zero and never said its tests passed: it died without a word, as a
-        # process whose frame register a callee changed does (the C++ code after the call runs on garbage).
-        return 'CAUGHT', '%s: ended without a summary (no PASSED line)' % t
+    passed = re.search(r'^\[\s*PASSED\s*\]\s+([1-9][0-9]*)\s+tests?\.', out,
+                       re.MULTILINE)
+    if passed is None:
+        if WIN64:
+            # A mutant can corrupt the Win64 frame and leave the process with
+            # status zero but no summary. A RUN line above proves the selected
+            # case actually started before counting this as a catch.
+            return 'CAUGHT', '%s: ended without a pass summary' % t
+        return 'BUILD FAILED', '%s exited zero without a positive Google Test pass summary' % t
     return None
 
 
@@ -1027,21 +1055,28 @@ def build_and_run_arm64(jit, timeout, extra_env, only):
     """The arm64 form: the jit tests built with the cross compiler and run under qemu-user. A catch
     by the pin test alone is PIN-ONLY, not a catch."""
     tests = only or JIT_TESTS_ARM64
-    for t in tests + ['testPin']:
+    parsed = [item.partition(':') for item in tests]
+    for t, _, _ in parsed:
         rc, out = sh('make -j8 build/linux/release/apps/%s PREFIX=%s %s' % (t, P, CROSS_MAKE), jit)
         if rc != 0:
             return 'BUILD FAILED', out[-300:]
+    rc, out = sh('make -j8 build/linux/release/apps/testPin PREFIX=%s %s' % (P, CROSS_MAKE), jit)
+    if rc != 0:
+        return 'BUILD FAILED', out[-300:]
     qemu = 'qemu-aarch64 -L %s -E LD_LIBRARY_PATH=%s:./build/linux/release/apps ' % (
         QEMU_SYSROOT, os.path.join(P, 'lib', 'ghoti.io'))
-    for t in tests:
-        rc, out = sh(qemu + './build/linux/release/apps/%s --gtest_brief=1' % t, jit, timeout, extra_env)
-        verdict = judge(rc, out, t)
+    for t, _, filt in parsed:
+        command = qemu + './build/linux/release/apps/%s' % t
+        if filt:
+            command += ' --gtest_filter=' + filt
+        rc, out = sh(command, jit, timeout, extra_env)
+        verdict = judge(rc, out, t, filt or None)
         if verdict is not None:
             return verdict
-    rc, out = sh(qemu + './build/linux/release/apps/testPin --gtest_brief=1', jit, timeout, extra_env)
+    rc, out = sh(qemu + './build/linux/release/apps/testPin', jit, timeout, extra_env)
     pinned = judge(rc, out, 'testPin')
-    if pinned is not None and pinned[0] == 'CAUGHT':
-        return 'PIN-ONLY', pinned[1]
+    if pinned is not None:
+        return ('PIN-ONLY', pinned[1]) if pinned[0] == 'CAUGHT' else pinned
     return 'MISSED', ''
 
 
@@ -1050,19 +1085,26 @@ def build_and_run_win64(jit, timeout, extra_env, only):
     test alone is PIN-ONLY, not a catch. A test that dies under wine without naming a failure (an
     unhandled exception, a page fault) is a crash, which is a catch here as a signal is natively."""
     tests = only or JIT_TESTS_WIN64
-    for t in tests + ['testPin']:
+    parsed = [item.partition(':') for item in tests]
+    for t, _, _ in parsed:
         rc, out = sh('make -j4 build/win64/release/apps/%s.exe PREFIX=%s' % (t, P), jit)
         if rc != 0:
             return 'BUILD FAILED', out[-300:]
-    for t in tests:
-        rc, out = sh('cd build/win64/release/apps && ./%s.exe --gtest_brief=1' % t, jit, timeout, extra_env)
-        verdict = judge(rc, out.replace('\r', ''), t)
+    rc, out = sh('make -j4 build/win64/release/apps/testPin.exe PREFIX=%s' % P, jit)
+    if rc != 0:
+        return 'BUILD FAILED', out[-300:]
+    for t, _, filt in parsed:
+        command = 'cd build/win64/release/apps && ./%s.exe' % t
+        if filt:
+            command += ' --gtest_filter=' + filt
+        rc, out = sh(command, jit, timeout, extra_env)
+        verdict = judge(rc, out.replace('\r', ''), t, filt or None)
         if verdict is not None:
             return verdict
-    rc, out = sh('cd build/win64/release/apps && ./testPin.exe --gtest_brief=1', jit, timeout, extra_env)
+    rc, out = sh('cd build/win64/release/apps && ./testPin.exe', jit, timeout, extra_env)
     pinned = judge(rc, out.replace('\r', ''), 'testPin')
-    if pinned is not None and pinned[0] == 'CAUGHT':
-        return 'PIN-ONLY', pinned[1]
+    if pinned is not None:
+        return ('PIN-ONLY', pinned[1]) if pinned[0] == 'CAUGHT' else pinned
     return 'MISSED', ''
 
 

@@ -182,7 +182,7 @@ struct Gen {
       case 16: {
         uint64_t offset = pick(100);
         std::vector<GRJIT_FrameSlot> st = state();
-        b.poll({2, offset}, st);
+        b.poll({2, offset, 0}, st);
         break;
       }
       default: {
@@ -194,7 +194,7 @@ struct Gen {
         if (pick(3) == 0) {
           uint64_t offset = pick(100);
           std::vector<GRJIT_FrameSlot> st = state();
-          b.guard(V(t), {3, offset}, st);
+          b.guard(V(t), {3, offset, 0}, st);
         }
         break;
       }

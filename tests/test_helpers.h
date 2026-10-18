@@ -230,7 +230,7 @@ struct B {
   void call(GRJIT_VReg d, const void * fn, std::vector<GRJIT_Operand> args = {}) {
     EXPECT_EQ(grjit_builder_call(b, d, reinterpret_cast<uintptr_t>(fn),
                   GRJIT_CALL_NO_GC, GRCORE_SITE_GC_POINT_CALL, args.data(),
-                  args.size(), GRCORE_PollIdentity{0, 0}, nullptr, 0),
+                  args.size(), GRCORE_PollIdentity{0, 0, 0}, nullptr, 0),
         GRJIT_OK);
   }
   void call_gc(GRJIT_VReg d, const void * fn, std::vector<GRJIT_Operand> args,
@@ -629,7 +629,9 @@ inline ChildOutcome run_in_child(const std::function<void()> & body, unsigned ti
 
 /* Whether the build is under ThreadSanitizer, which runs the generated-program sweeps some 40 times slower, and the
  * divisor a sweep applies to its program count (and to its thresholds) there so it stays well inside the watchdog:
- * 1 in every other build, so the full counts run in the ordinary, ASan and Valgrind builds. */
+ * 1 in every other build, so the full counts run in the ordinary, ASan and
+ * Valgrind builds. The Valgrind Makefile targets use a longer finite watchdog
+ * because Memcheck slows this full sweep. */
 #if defined(__SANITIZE_THREAD__)
 #define GRJIT_TEST_UNDER_TSAN 1
 #elif defined(__has_feature)

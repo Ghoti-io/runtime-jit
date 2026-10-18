@@ -68,6 +68,8 @@ struct GRJIT_Function {
   bool callable;            ///< Has an internal entry and the hooks below.
   uint64_t token;           ///< The engine's token for this function, which a call
                             ///< through a code pointer must name (AD-28).
+  uint32_t guest_function; ///< Runtime-core guest-frame function ID.
+  bool guest_function_explicit; ///< Set when it does not come from a 32-bit token.
   GRJIT_CallHooks hooks;    ///< Valid when `callable`.
   const GRJIT_NativeTable * natives; ///< What `CALL_NATIVE` names; borrowed.
   GRJIT_VRegInfo * vregs;

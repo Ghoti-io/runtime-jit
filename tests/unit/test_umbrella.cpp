@@ -38,7 +38,7 @@ TEST(Umbrella, DeclaresTheWholeSurfaceFromCxx) {
   EXPECT_EQ(GRJIT_EXIT_DEOPT, 1);
   EXPECT_EQ(GRJIT_EXIT_RETURNED, 0);
   // The runtime-core formats the code carries come through the same headers.
-  EXPECT_EQ(GRCORE_CODEMETA_FORMAT_VERSION, 1u);
+  EXPECT_EQ(GRCORE_CODEMETA_FORMAT_VERSION, 2u);
 }
 
 int main(int argc, char ** argv) {

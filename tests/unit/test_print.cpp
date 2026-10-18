@@ -26,8 +26,8 @@ TEST(Print, AFunctionPrintsEveryOperationInAFixedForm) {
   b.call(c, reinterpret_cast<const void *>(0x1000), {V(a), I(2)});
   b.call_gc(GRJIT_NO_VREG, reinterpret_cast<const void *>(0x2000), {V(r)}, {3, 4},
       {grjit_frame_slot_vreg(r), grjit_frame_slot_dead()}, GRCORE_SITE_GC_POINT_ALLOC_SLOW);
-  b.poll({5, 6}, {grjit_frame_slot_constant(-1), grjit_frame_slot_dead()});
-  b.guard(V(a), {7, 8}, {grjit_frame_slot_dead(), grjit_frame_slot_vreg(c)});
+  b.poll({5, 6, 0}, {grjit_frame_slot_constant(-1), grjit_frame_slot_dead()});
+  b.guard(V(a), {7, 8, 0}, {grjit_frame_slot_dead(), grjit_frame_slot_vreg(c)});
   b.un(GRJIT_OP_NOT, c, V(c));
   b.mov(c, V(a));
   b.br_if(V(a), b1, b2);

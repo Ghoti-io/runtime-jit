@@ -468,8 +468,8 @@ TEST(Arm64Branches, APollAndAGuardWhoseStubsAreOverAMebibyteAwayStillReachThem) 
   b.poll_helper(H::poll);
   b.at(b.block());
   b.cnst(d, 5);
-  b.poll({1, 2}, {grjit_frame_slot_vreg(x), grjit_frame_slot_constant(9), grjit_frame_slot_dead()});
-  b.guard(V(x), {1, 3}, {grjit_frame_slot_vreg(d), grjit_frame_slot_constant(9), grjit_frame_slot_dead()});
+  b.poll({1, 2, 0}, {grjit_frame_slot_vreg(x), grjit_frame_slot_constant(9), grjit_frame_slot_dead()});
+  b.guard(V(x), {1, 3, 0}, {grjit_frame_slot_vreg(d), grjit_frame_slot_constant(9), grjit_frame_slot_dead()});
   filler(b, d, n);
   b.ret(V(d));
   Fn f(b.finish());
@@ -600,7 +600,7 @@ TEST(Arm64Abi, AHelperThatReturnsThirtyTwoBitsMayLeaveTheUpperHalfDirtyAndTheRef
   GRJIT_VReg d = b.reg();
   b.at(b.block());
   b.cnst(d, 77);
-  b.poll({1, 1}, {grjit_frame_slot_dead(), grjit_frame_slot_dead(), grjit_frame_slot_dead()});
+  b.poll({1, 1, 0}, {grjit_frame_slot_dead(), grjit_frame_slot_dead(), grjit_frame_slot_dead()});
   b.ret(V(d));
   Fn f(b.finish());
   Emitted em(f, nullptr, H::hook);

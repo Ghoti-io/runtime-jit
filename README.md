@@ -127,6 +127,43 @@ Compiled code assumes the default MXCSR / FPCR and never writes it; the library 
 with `-ffp-contract=off`.
 `documentation/design.md` has the decisions, the NaN rule and what was rejected.
 
+Valgrind 3.24/VEX rounds the exact `u64` input `0x8000008000000001` to
+`f32` through a binary64 halfway value: an ordinary standalone GCC conversion
+and the ordinary JIT tests produce `0x5F000001`, while the same standalone
+conversion under Memcheck produces `0x5F000000` with zero reported memory
+errors (EVO proof `cutil-rjit-valgrind-conversion-probe-20261018-0341`).
+`make test-valgrind` first runs the four affected float test bodies
+ordinarily on the same binaries, requiring two selected passing tests in each
+executable. During Memcheck, a test-only conversion probe activates a counted
+accommodation only if VEX still has this behavior. It omits this one worked
+input and substitutes its adjacent representable input in generated argument
+sets; every other float case continues under Memcheck. The gate prints and
+checks exactly two worked omissions, two boundary-sweep omissions, and 802
+generated argument substitutions in each differential arm. If VEX is
+corrected, the probe leaves all inputs intact. Production conversion semantics
+and exact-bit ordinary tests are unaffected.
+
+The pinned `conversions.wast` suite exposes eight more inputs in the same VEX
+rounding family: four signed and four unsigned `i64` to `f32` conversions.
+An independent GCC 16.2/Valgrind 3.24 probe reproduced the spec's eight bit
+patterns ordinarily and the eight observed VEX patterns under Memcheck
+(`cutil-valgrind-wast-convert-probe-20261018-0441`). Both feature arms still
+execute all 593 assertions under Memcheck. While the active Valgrind probe
+detects the defect, the test requires exactly 585 passes and the eight exact
+line, function, expected-bit, and observed-bit divergence records in each arm;
+every other failure remains fatal. Ordinary execution requires 593 passes.
+Zero Memcheck memory errors is checked separately from these semantic results.
+
+The full ordinary and Memcheck targets run through `tools/run-gtest-matrix.py`.
+It clears inherited Google Test filters and shards, requires every selected test
+to start and complete once, audits named skips, and compares the Memcheck test
+inventory with the ordinary run. `make test` also runs a planted inherited
+filter, shard, and repeat control against that selection guard.
+The calls fixture scans arbitrary native-stack words for conservative roots;
+its Memcheck annotation defines only the local candidate word after an ABI
+load. It leaves the source stack untouched so unrelated uninitialized reads
+remain visible.
+
 The eight scalar float and conversion files of the same suite commit run too (`f32`, `f64`,
 `f32_cmp`, `f64_cmp`, `f32_bitwise`, `f64_bitwise`, `conversions`, `float_misc`; `tools/wasm/fetch.sh`
 fetches them): a NaN result is checked against the suite's `nan:canonical` or `nan:arithmetic` and

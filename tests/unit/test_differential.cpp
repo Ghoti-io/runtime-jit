@@ -77,13 +77,24 @@ struct Outcome {
   std::vector<uint8_t> arena;
   std::vector<uint64_t> calls;
   uint32_t polls = 0;
-  GRCORE_PollIdentity identity{0, 0};
+  GRCORE_PollIdentity identity{0, 0, 0};
 };
 
 std::string describe(const GRJIT_Function * f, uint64_t seed, const std::string & what) {
   char head[96];
   std::snprintf(head, sizeof head, "seed %llu: ", static_cast<unsigned long long>(seed));
   return std::string(head) + what + "\n" + print(f);
+}
+
+std::string argument_words(const std::vector<uint64_t> & args) {
+  std::string words;
+  char hex[24];
+  for (uint64_t arg : args) {
+    std::snprintf(hex, sizeof hex, " 0x%016llx",
+        static_cast<unsigned long long>(arg));
+    words += hex;
+  }
+  return "argument words:" + words;
 }
 
 /* The features whose arm an operation of `f` takes when it is allowed: the set a compile of `f` can
@@ -392,16 +403,16 @@ IntProgram generate_int_program(IntGen & g) {
       }
       GRJIT_VReg c = b.reg(T);
       switch (g.pick(3)) {
-        case 0: b.cmp(GRJIT_CMP_NE, c, V(y), I(0)); b.guard(V(c), {7, ++site}, state()); break;
-        case 1: b.guard(V(y), {7, ++site}, state()); break;
-        default: b.cmp(GRJIT_CMP_UGT, c, V(y), I(0)); b.guard(V(c), {7, ++site}, state()); break;
+        case 0: b.cmp(GRJIT_CMP_NE, c, V(y), I(0)); b.guard(V(c), {7, ++site, 0}, state()); break;
+        case 1: b.guard(V(y), {7, ++site, 0}, state()); break;
+        default: b.cmp(GRJIT_CMP_UGT, c, V(y), I(0)); b.guard(V(c), {7, ++site, 0}, state()); break;
       }
     }
     if (k == GRJIT_OP_DIV_S) {
       if (y_imm && !a_imm && imm_is_neg1(narrow, yv)) {
         GRJIT_VReg c = b.reg(T);
         b.cmp(GRJIT_CMP_NE, c, V(a), I(min));
-        b.guard(V(c), {7, ++site}, state());
+        b.guard(V(c), {7, ++site, 0}, state());
       } else if (!y_imm && !a_imm) {
         if (g.pick(2) == 0) {
           GRJIT_VReg e1 = b.reg(T), e2 = b.reg(T), t = b.reg(T), fine = b.reg(T);
@@ -409,13 +420,13 @@ IntProgram generate_int_program(IntGen & g) {
           b.cmp(GRJIT_CMP_EQ, e2, V(y), I(-1));
           b.bin(GRJIT_OP_AND, t, V(e1), V(e2));
           b.cmp(GRJIT_CMP_EQ, fine, V(t), I(0));
-          b.guard(V(fine), {7, ++site}, state());
+          b.guard(V(fine), {7, ++site, 0}, state());
         } else {
           GRJIT_VReg n1 = b.reg(T), n2 = b.reg(T), fine = b.reg(T);
           b.cmp(GRJIT_CMP_NE, n1, V(a), I(min));
           b.cmp(GRJIT_CMP_NE, n2, V(y), I(-1));
           b.bin(GRJIT_OP_OR, fine, V(n1), V(n2));
-          b.guard(V(fine), {7, ++site}, state());
+          b.guard(V(fine), {7, ++site, 0}, state());
         }
       }
     }
@@ -863,7 +874,7 @@ FloatProgram generate_float_program(IntGen & g) {
         if (g.pick(2) == 0) {
           GRJIT_VReg same = fresh(GRJIT_TYPE_I32);
           b.cmp(GRJIT_CMP_EQ, same, V(x), V(x));
-          b.guard(V(same), {7, ++site}, state());
+          b.guard(V(same), {7, ++site, 0}, state());
         }
         GRJIT_VReg l = fresh(GRJIT_TYPE_I32), h = fresh(GRJIT_TYPE_I32), ok = fresh(GRJIT_TYPE_I32);
         switch (g.pick(3)) {
@@ -883,7 +894,7 @@ FloatProgram generate_float_program(IntGen & g) {
             b.bin(GRJIT_OP_AND, ok, V(l), V(h));
             break;
         }
-        b.guard(V(ok), {7, ++site}, state());
+        b.guard(V(ok), {7, ++site, 0}, state());
         b.un(is_signed ? GRJIT_OP_TRUNC_S : GRJIT_OP_TRUNC_U, d, V(x));
         (to64 ? pi64 : pi32).push_back(d);
         prog.truncs++;
@@ -976,8 +987,16 @@ TEST(Differential, GeneratedFloatProgramsRunTheSameCompiledAndEvaluatedWithNansE
   if (!floatfx::host_fp_is_default()) {
     GTEST_SKIP() << "the host's MXCSR / FPCR is not the default the compiled code assumes";
   }
+  const bool requested = floatfx::memcheck_double_rounding_requested();
+  ASSERT_FALSE(requested && !floatfx::running_under_valgrind())
+      << "the Valgrind-only conversion accommodation requires an active Valgrind client";
+  const uint32_t probe = requested ? floatfx::memcheck_double_rounding_probe_bits() : 0x5F000001u;
+  ASSERT_TRUE(probe == 0x5F000000u || probe == 0x5F000001u)
+      << "the Valgrind u64->f32 conversion probe returned an unrecognized result";
+  const bool memcheck_boundary = requested && probe == 0x5F000000u;
   JitWorld w;
   size_t returned = 0, deopted = 0, truncs = 0, converts = 0, compares = 0, multi_block = 0, arm_programs = 0;
+  size_t substituted_boundary_args = 0;
   const size_t masks = featfx::every_subset_masks().size();
   // Under TSan the sweep runs 1/kTsanDivisor of the programs (the same seeds, the first ones) and its thresholds
   // shrink with it; every other build runs all 3000.
@@ -1008,6 +1027,10 @@ TEST(Differential, GeneratedFloatProgramsRunTheSameCompiledAndEvaluatedWithNansE
         } else {
           v = i64e[g.pick(i64e.size())];
         }
+        if (memcheck_boundary && i >= 8 && v == floatfx::kMemcheckDoubleRoundingInput) {
+          v = floatfx::kMemcheckAdjacentInput;
+          substituted_boundary_args++;
+        }
         args.push_back(v);
       }
       arg_sets.push_back(args);
@@ -1028,7 +1051,8 @@ TEST(Differential, GeneratedFloatProgramsRunTheSameCompiledAndEvaluatedWithNansE
       ireval::Result eval = ireval::eval(f, w.ctx, nullptr, args);
       ASSERT_EQ(compiled.exit, eval.exit) << describe(f, seed, "different exits");
       if (compiled.exit == GRJIT_EXIT_RETURNED) {
-        ASSERT_EQ(compiled.out[0], eval.out[0]) << describe(f, seed, "different results");
+        ASSERT_EQ(compiled.out[0], eval.out[0])
+            << argument_words(args) << "\n" << describe(f, seed, "different results");
         returned++;
       } else {
         ASSERT_EQ(compiled.exit, uint32_t{GRJIT_EXIT_DEOPT});
@@ -1052,6 +1076,13 @@ TEST(Differential, GeneratedFloatProgramsRunTheSameCompiledAndEvaluatedWithNansE
       returned, deopted, truncs, converts, compares, multi_block);
   std::printf("float differential: every program run under each of the %zu subsets of the host's features; "
               "%zu compiles took a feature arm\n", masks, arm_programs);
+  if (memcheck_boundary) {
+    std::printf("Memcheck VEX u64->f32 double-rounding: substituted %zu generated boundary arguments; "
+                "ordinary execution checks 0x5F000001\n", substituted_boundary_args);
+  } else if (requested) {
+    std::printf("Memcheck u64->f32 probe returned 0x5F000001; full generated inputs exercised\n");
+  }
+  EXPECT_EQ(substituted_boundary_args, memcheck_boundary ? 802u : 0u);
   // Thresholds at about nine tenths of what the fixed seeds give (10649, 7351, 3937, 8222, 4108, 2196), the
   // run counts once per mask.
   EXPECT_GT(returned, 9500u * masks / kTsanDivisor);
@@ -1072,8 +1103,16 @@ TEST(Differential, GeneratedFloatProgramsRunTheSameWhenArm64CodeIsSimulatedAndEv
   if (!floatfx::host_fp_is_default()) {
     GTEST_SKIP() << "the host's MXCSR / FPCR is not the default the simulator's arithmetic assumes";
   }
+  const bool requested = floatfx::memcheck_double_rounding_requested();
+  ASSERT_FALSE(requested && !floatfx::running_under_valgrind())
+      << "the Valgrind-only conversion accommodation requires an active Valgrind client";
+  const uint32_t probe = requested ? floatfx::memcheck_double_rounding_probe_bits() : 0x5F000001u;
+  ASSERT_TRUE(probe == 0x5F000000u || probe == 0x5F000001u)
+      << "the Valgrind u64->f32 conversion probe returned an unrecognized result";
+  const bool memcheck_boundary = requested && probe == 0x5F000000u;
   JitWorld w;
   size_t returned = 0, deopted = 0;
+  size_t substituted_boundary_args = 0;
   for (uint64_t seed = 1; seed <= 3000; seed++) {
     IntGen g(seed * 0x9E3779B97F4A7C15ull + 0xF10A7);
     FloatProgram prog = generate_float_program(g);
@@ -1097,6 +1136,10 @@ TEST(Differential, GeneratedFloatProgramsRunTheSameWhenArm64CodeIsSimulatedAndEv
         } else {
           v = i64e[g.pick(i64e.size())];
         }
+        if (memcheck_boundary && i >= 8 && v == floatfx::kMemcheckDoubleRoundingInput) {
+          v = floatfx::kMemcheckAdjacentInput;
+          substituted_boundary_args++;
+        }
         args.push_back(v);
       }
       arg_sets.push_back(args);
@@ -1107,10 +1150,17 @@ TEST(Differential, GeneratedFloatProgramsRunTheSameWhenArm64CodeIsSimulatedAndEv
       SimTarget::Run run = c.run(w, args);
       ireval::Result eval = ireval::eval(f, w.ctx, nullptr, args);
       ASSERT_TRUE(same_as_evaluator(f, seed, run.exit, run.out, eval, c.meta(), 2, &returned, &deopted))
-          << "(the arm64 code, simulated)";
+          << "(the arm64 code, simulated) " << argument_words(args);
     }
   }
   std::printf("float differential, arm64 simulated: %zu returned, %zu guard exits\n", returned, deopted);
+  if (memcheck_boundary) {
+    std::printf("Memcheck VEX u64->f32 double-rounding: substituted %zu simulated boundary arguments; "
+                "ordinary execution checks 0x5F000001\n", substituted_boundary_args);
+  } else if (requested) {
+    std::printf("Memcheck u64->f32 probe returned 0x5F000001; full simulated inputs exercised\n");
+  }
+  EXPECT_EQ(substituted_boundary_args, memcheck_boundary ? 802u : 0u);
   EXPECT_GT(returned, 9500u);
   EXPECT_GT(deopted, 6600u);
 }

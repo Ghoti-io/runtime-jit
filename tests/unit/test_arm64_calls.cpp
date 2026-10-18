@@ -33,6 +33,11 @@ namespace {
 
 constexpr uint32_t kRequestOffset = 0x40;
 
+uint32_t arm64_ldur_x(unsigned reg, unsigned base, int32_t offset) {
+  return 0xF8400000u | ((static_cast<uint32_t>(offset) & 0x1ffu) << 12) |
+      (base << 5) | reg;
+}
+
 enum class C {
   MOVWIDE, ORR_REG, ORN_REG, ALU_REG, SUBS_REG, MUL, SHIFTV, CSINC, ADDSUB_IMM, SUBS_IMM, LDST_IMM, LDST_REG,
   STP_PRE, LDP_POST, B, BCOND, CBZ, ADR, ADRP, BLR, BR, RET, BRK, UNKNOWN
@@ -387,7 +392,7 @@ TEST(Arm64Calls, ACallableTwoResultSlotCallEmitsItsBufferAndReturnPath) {
   b.at(block);
   const GRJIT_VReg results[] = {a, c};
   const GRJIT_Operand args[] = {I(0), I(1), I(2), I(3), I(4), I(5), I(6), I(7), I(8), I(9), I(10), I(11)};
-  const GRCORE_PollIdentity id{1, 2};
+  const GRCORE_PollIdentity id{1, 2, 0};
   ASSERT_EQ(grjit_builder_call_slot_results(b.b, results, 2, 0x123400,
                 0x7789, args, 12, id, nullptr, 0, id, nullptr, 0), GRJIT_OK);
   const GRJIT_Operand values[] = {V(a), V(c)};
@@ -457,7 +462,7 @@ TEST(Arm64Calls, CatchCallHasSeparateLandingMetadataAndRethrowPath) {
   const auto body = b.block();
   const auto landing = b.block();
   b.at(body);
-  const GRCORE_PollIdentity id{1, 2};
+  const GRCORE_PollIdentity id{1, 2, 0};
   ASSERT_EQ(grjit_builder_call_slot_catch_results(b.b, nullptr, 0, 0x123400,
                 0x7789, nullptr, 0, id, nullptr, 0, id, nullptr, 0, landing), GRJIT_OK);
   ASSERT_EQ(grjit_builder_ret(b.b, grjit_operand_none()), GRJIT_OK);
@@ -696,6 +701,60 @@ TEST(Arm64Calls, TheDispatchAndTheTailCallSequenceAreInTheCodeOfEveryFunctionTha
   EXPECT_GT(slot_calls, 100u);
   EXPECT_GT(ptr_calls, 200u);
   EXPECT_EQ(tails, 168u);
+}
+
+TEST(Arm64Calls, TailCallSavesResultBufferBeforeStagingStackArguments) {
+  GRJIT_CallHooks hooks{};
+  hooks.push = reinterpret_cast<decltype(hooks.push)>(0x30000);
+  hooks.pop = reinterpret_cast<decltype(hooks.pop)>(0x30100);
+  hooks.compile = reinterpret_cast<decltype(hooks.compile)>(0x30200);
+  hooks.deopt = reinterpret_cast<decltype(hooks.deopt)>(0x30300);
+  hooks.tail = reinterpret_cast<decltype(hooks.tail)>(0x30400);
+  B b("tail_result_buffer", 2);
+  b.callable(hooks, 2);
+  std::vector<GRJIT_VReg> params;
+  for (unsigned i = 0; i < 16; ++i) params.push_back(b.param(GRJIT_TYPE_I64));
+  std::vector<GRJIT_Operand> args;
+  for (unsigned i = 0; i < 10; ++i) args.push_back(V(params[i]));
+  b.at(b.block());
+  b.tail_call_slot(reinterpret_cast<const void *>(0x40000), 700, args,
+      GRCORE_PollIdentity{3, 0, 0},
+      {grjit_frame_slot_dead(), grjit_frame_slot_dead()}, 2);
+  Fn f(b.finish());
+  char why[256]{};
+  ASSERT_EQ(grjit_function_verify(f, nullptr, why, sizeof(why)), GRJIT_OK) << why;
+  GRJIT_Emitted e{};
+  ASSERT_EQ(grjit_emit_for(GRJIT_ARCH_ARM64, f, grjit_allocator_default(),
+      nullptr, nullptr, kRequestOffset, &e), GRJIT_OK);
+  struct EmittedCleanup {
+    GRJIT_Emitted * emitted;
+    ~EmittedCleanup() { grjit_emitted_free(emitted); }
+  } cleanup{&e};
+  GRJIT_CallableShape shape{};
+  grjit_callable_shape(f, GRJIT_ARM64_INTERNAL_REG_ARGS, &shape);
+  const uint32_t buffer_load = arm64_ldur_x(11, 29, GRJIT_SLOT_ARGS);
+  const uint32_t first_stack_arg = arm64_ldur_x(10, 29,
+      GRJIT_ARGS_SLOT(static_cast<const GRJIT_Function *>(f)->vreg_count,
+          shape.area_slots,
+          GRJIT_ARM64_INTERNAL_REG_ARGS));
+  const uint32_t tail_jump = 0xD61F0200u; // br x16
+  size_t buffer_at = e.size, arg_at = e.size, jump_at = e.size;
+  for (size_t off = e.internal_offset; off + 4 <= e.size; off += 4) {
+    const uint32_t word = word_at(e, off);
+    if (word == buffer_load && buffer_at == e.size) buffer_at = off;
+    if (word == first_stack_arg && arg_at == e.size) arg_at = off;
+    if (word == tail_jump) jump_at = off;
+  }
+  ASSERT_NE(buffer_at, e.size) << "the tail call must preserve the result buffer";
+  ASSERT_NE(arg_at, e.size) << "the tail call must stage a stack argument";
+  ASSERT_NE(jump_at, e.size) << "the tail call must jump to the callee";
+  ASSERT_LT(arg_at, jump_at) << "the stack argument must be staged before the tail jump";
+  EXPECT_LT(buffer_at, arg_at)
+      << "the result-buffer pointer must be saved before tail-call argument copies";
+  for (size_t off = arg_at + 4; off < jump_at; off += 4) {
+    EXPECT_NE(word_at(e, off), buffer_load)
+        << "the tail call must not reload the result-buffer pointer after staging stack arguments";
+  }
 }
 
 GRJIT_TEST_MAIN()

@@ -193,6 +193,8 @@ void grjit_op_visit_uses(const GRJIT_Function * function, const GRJIT_Op * op,
     case GRJIT_OP_TAIL_CALL_SLOT:
     case GRJIT_OP_TAIL_CALL_PTR:
       visit_operand(&op->a, visit, user); /* the code pointer of a pointer call */
+      if (op->callee_operand.kind != GRJIT_OPERAND_NONE)
+        visit_operand(&op->callee_operand, visit, user);
       if (op->environment.kind != GRJIT_OPERAND_NONE)
         visit_operand(&op->environment, visit, user);
       for (size_t i = 0; i < op->arg_count; i++) {

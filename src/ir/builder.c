@@ -399,6 +399,7 @@ static GRJIT_Op blank(GRJIT_OpKind kind) {
   op.dst = GRJIT_NO_VREG;
   op.a = grjit_operand_none();
   op.b = grjit_operand_none();
+  op.callee_operand = grjit_operand_none();
   op.state = GRJIT_NO_STATE;
   op.exit_state = GRJIT_NO_STATE;
   op.landing_target = GRJIT_NO_BLOCK;
@@ -592,6 +593,19 @@ GRJIT_Result grjit_builder_set_token(GRJIT_Builder * builder, uint64_t token) {
     return GRJIT_ERR_INVALID;
   }
   builder->function->token = token;
+  if (!builder->function->guest_function_explicit && token <= UINT32_MAX) {
+    builder->function->guest_function = (uint32_t)token;
+  }
+  return GRJIT_OK;
+}
+
+GRJIT_Result grjit_builder_set_guest_function(GRJIT_Builder * builder,
+    uint32_t guest_function) {
+  if (builder == NULL) {
+    return GRJIT_ERR_INVALID;
+  }
+  builder->function->guest_function = guest_function;
+  builder->function->guest_function_explicit = true;
   return GRJIT_OK;
 }
 
@@ -769,6 +783,47 @@ GRJIT_Result grjit_builder_call_slot_operand_results_env(
   return r;
 }
 
+GRJIT_Result grjit_builder_call_slot_dynamic_results_env(
+    GRJIT_Builder * builder, const GRJIT_VReg * results, size_t result_count,
+    GRJIT_Operand slot_entry_address, GRJIT_Operand callee_token,
+    GRJIT_Operand environment, const GRJIT_Operand * args, size_t arg_count,
+    GRCORE_PollIdentity identity, const GRJIT_FrameSlot * state_slots,
+    size_t state_count, GRCORE_PollIdentity exit_identity,
+    const GRJIT_FrameSlot * exit_slots, size_t exit_count) {
+  if (callee_token.kind != GRJIT_OPERAND_VREG) return GRJIT_ERR_INVALID;
+  GRJIT_Result r = grjit_builder_call_slot_operand_results_env(builder,
+      results, result_count, slot_entry_address, 0, environment, args,
+      arg_count, identity, state_slots, state_count, exit_identity,
+      exit_slots, exit_count);
+  if (r == GRJIT_OK) {
+    GRJIT_BlockInfo *block = &builder->function->blocks[builder->current];
+    block->ops[block->count - 1u].callee_operand = callee_token;
+  }
+  return r;
+}
+
+GRJIT_Result grjit_builder_call_slot_dynamic_catch_results_env(
+    GRJIT_Builder * builder, const GRJIT_VReg * results, size_t result_count,
+    GRJIT_Operand slot_entry_address, GRJIT_Operand callee_token,
+    GRJIT_Operand environment, const GRJIT_Operand * args, size_t arg_count,
+    GRCORE_PollIdentity identity, const GRJIT_FrameSlot * state_slots,
+    size_t state_count, GRCORE_PollIdentity exit_identity,
+    const GRJIT_FrameSlot * exit_slots, size_t exit_count,
+    GRJIT_BlockId landing_block) {
+  if (builder == NULL || landing_block >= builder->function->block_count ||
+      callee_token.kind != GRJIT_OPERAND_VREG)
+    return GRJIT_ERR_INVALID;
+  GRJIT_Result r = grjit_builder_call_slot_dynamic_results_env(builder,
+      results, result_count, slot_entry_address, callee_token, environment,
+      args, arg_count, identity, state_slots, state_count, exit_identity,
+      exit_slots, exit_count);
+  if (r == GRJIT_OK) {
+    GRJIT_BlockInfo *block = &builder->function->blocks[builder->current];
+    block->ops[block->count - 1u].landing_target = landing_block;
+  }
+  return r;
+}
+
 GRJIT_Result grjit_builder_call_ptr_results_env(GRJIT_Builder * builder,
     const GRJIT_VReg * results, size_t result_count, GRJIT_Operand target,
     uint64_t callee, GRJIT_Operand environment, const GRJIT_Operand * args,
@@ -882,6 +937,27 @@ GRJIT_Result grjit_builder_tail_call_slot_env(GRJIT_Builder * builder,
   if (r == GRJIT_OK) {
     GRJIT_BlockInfo * block = &builder->function->blocks[builder->current];
     block->ops[block->count - 1].environment = environment;
+  }
+  return r;
+}
+
+GRJIT_Result grjit_builder_tail_call_slot_dynamic_env(
+    GRJIT_Builder * builder, GRJIT_Operand slot_entry_address,
+    GRJIT_Operand callee_token, size_t result_count,
+    GRJIT_Operand environment, const GRJIT_Operand * args, size_t arg_count,
+    GRCORE_PollIdentity identity, const GRJIT_FrameSlot * state_slots,
+    size_t state_count) {
+  if (slot_entry_address.kind != GRJIT_OPERAND_VREG ||
+      callee_token.kind != GRJIT_OPERAND_VREG) return GRJIT_ERR_INVALID;
+  GRJIT_Result r = grjit_builder_tail_call_slot_env(builder, 1, 0,
+      result_count, environment, args, arg_count, identity, state_slots,
+      state_count);
+  if (r == GRJIT_OK) {
+    GRJIT_BlockInfo *block = &builder->function->blocks[builder->current];
+    GRJIT_Op *op = &block->ops[block->count - 1u];
+    op->address = 0;
+    op->a = slot_entry_address;
+    op->callee_operand = callee_token;
   }
   return r;
 }

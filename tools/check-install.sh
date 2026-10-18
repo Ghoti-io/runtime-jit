@@ -199,7 +199,7 @@ int main(void) {
     fprintf(stderr, "consumer: could not start a function\n");
     return 1;
   }
-  GRCORE_PollIdentity identity = {1, 2};
+  GRCORE_PollIdentity identity = {1, 2, 0};
   if (grjit_builder_poll(b, identity, NULL, 0) != GRJIT_OK ||
       grjit_builder_binary(b, GRJIT_OP_ADD, d, grjit_operand_vreg(x), grjit_operand_imm(41)) != GRJIT_OK ||
       grjit_builder_ret(b, grjit_operand_vreg(d)) != GRJIT_OK) {
@@ -229,7 +229,7 @@ int main(void) {
   }
   uint64_t args[1] = {1};
   uint64_t out[2] = {0, 0};
-  if (grjit_code_call(code, context, args, out) != GRJIT_EXIT_RETURNED || out[0] != 42) {
+  if (grjit_code_call(code, context, context, args, out) != GRJIT_EXIT_RETURNED || out[0] != 42) {
     fprintf(stderr, "consumer: the compiled function answered %llu\n", (unsigned long long)out[0]);
     return 1;
   }

@@ -234,7 +234,7 @@ inline WasmOp build_wasm_op(const std::string & instr, Guards guards = Guards{})
     b.at(b.block());
     if (guards.zero) {
       b.cmp(GRJIT_CMP_NE, not_zero, V(y), I(0));
-      b.guard(V(not_zero), {kTrapFunction, kSiteDivideByZero});
+      b.guard(V(not_zero), {kTrapFunction, kSiteDivideByZero, 0});
     }
     if (d->second == GRJIT_OP_DIV_S && guards.overflow) {
       GRJIT_VReg is_min = b.reg(T), is_neg1 = b.reg(T), both = b.reg(T), fine = b.reg(T);
@@ -242,7 +242,7 @@ inline WasmOp build_wasm_op(const std::string & instr, Guards guards = Guards{})
       b.cmp(GRJIT_CMP_EQ, is_neg1, V(y), I(-1));
       b.bin(GRJIT_OP_AND, both, V(is_min), V(is_neg1));
       b.cmp(GRJIT_CMP_EQ, fine, V(both), I(0));
-      b.guard(V(fine), {kTrapFunction, kSiteIntegerOverflow});
+      b.guard(V(fine), {kTrapFunction, kSiteIntegerOverflow, 0});
     }
     b.bin(d->second, r, V(x), V(y));
     b.ret(V(r));

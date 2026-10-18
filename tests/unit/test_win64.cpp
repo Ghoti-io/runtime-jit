@@ -163,10 +163,10 @@ GRJIT_Function * six_calls_a_poll_and_a_guard() {
   GRJIT_VReg r = b.reg(), c = b.reg();
   b.poll_helper(kFakePoll);
   b.at(b.block());
-  b.poll({4, 5}, {grjit_frame_slot_vreg(a[0]), grjit_frame_slot_vreg(a[1])});
+  b.poll({4, 5, 0}, {grjit_frame_slot_vreg(a[0]), grjit_frame_slot_vreg(a[1])});
   b.call(r, kFakeHelper6, {V(a[0]), V(a[1]), V(a[2]), V(a[3]), V(a[4]), V(a[5])});
   b.cmp(GRJIT_CMP_NE, c, V(r), I(0));
-  b.guard(V(c), {6, 7}, {grjit_frame_slot_vreg(a[0]), grjit_frame_slot_vreg(r)});
+  b.guard(V(c), {6, 7, 0}, {grjit_frame_slot_vreg(a[0]), grjit_frame_slot_vreg(r)});
   b.ret(V(r));
   return b.finish();
 }
@@ -1099,10 +1099,10 @@ GRJIT_Function * sentinel_function() {
   GRJIT_VReg t = b.reg(), c = b.reg(), r = b.reg();
   b.poll_helper(sentinel_poll);
   b.at(b.block());
-  b.poll({1, 1}, {grjit_frame_slot_vreg(x)});
+  b.poll({1, 1, 0}, {grjit_frame_slot_vreg(x)});
   b.call(t, reinterpret_cast<const void *>(six_sum), {V(x), V(x), V(x), V(x), V(x), V(x)});
   b.cmp(GRJIT_CMP_NE, c, V(x), I(0));
-  b.guard(V(c), {1, 2}, {grjit_frame_slot_vreg(x)});
+  b.guard(V(c), {1, 2, 0}, {grjit_frame_slot_vreg(x)});
   b.bin(GRJIT_OP_ADD, r, V(t), I(1));
   b.ret(V(r));
   return b.finish();

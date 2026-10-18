@@ -98,7 +98,7 @@ TEST(Limits, CallArgumentsAndFrameStateSlotsAreClampedToWhatTheBackendCanAddress
   b.at(b.block());
   std::vector<GRJIT_Operand> args(7, I(1));
   EXPECT_EQ(grjit_builder_call(b.b, GRJIT_NO_VREG, 0x1000, GRJIT_CALL_NO_GC,
-                GRCORE_SITE_GC_POINT_CALL, args.data(), 7, {0, 0}, nullptr, 0),
+                GRCORE_SITE_GC_POINT_CALL, args.data(), 7, {0, 0, 0}, nullptr, 0),
       GRJIT_ERR_LIMIT);
   GRJIT_Builder * huge = nullptr;
   EXPECT_EQ(grjit_builder_create("g", (size_t{1} << 30) / 8 + 1, &limits, nullptr, &huge),

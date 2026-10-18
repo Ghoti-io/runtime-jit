@@ -37,7 +37,7 @@ struct Seen {
   bool called = false;
   bool site_found = false;
   GRCORE_CodeSiteKind kind = GRCORE_SITE_KIND_COUNT;
-  GRCORE_PollIdentity identity{0, 0};
+  GRCORE_PollIdentity identity{0, 0, 0};
   std::vector<uint64_t> live_values;
   std::vector<GRCORE_SlotKind> live_kinds;
   struct Derived {
@@ -144,7 +144,7 @@ void build(Program * p, bool with_poll) {
   std::vector<GRJIT_FrameSlot> state = {grjit_frame_slot_vreg(r0), grjit_frame_slot_vreg(r1),
       grjit_frame_slot_constant(42), grjit_frame_slot_dead()};
   if (with_poll) {
-    b.poll({9, 77}, state);
+    b.poll({9, 77, 0}, state);
   } else {
     b.call_gc(res, reinterpret_cast<const void *>(gc_helper), {V(r0), V(i)}, {9, 77}, state);
   }
@@ -292,8 +292,8 @@ TEST(Readback, TheTableHasASitePerGcPointCallAndPollAndGuardAndNothingElse) {
   std::vector<GRJIT_FrameSlot> st = {grjit_frame_slot_vreg(x)};
   b.call(d, reinterpret_cast<const void *>(gc_helper), {V(x), V(x)});            // not a site
   b.call_gc(d, reinterpret_cast<const void *>(gc_helper), {V(x), V(x)}, {1, 1}, st);
-  b.poll({1, 2}, st);
-  b.guard(V(d), {1, 3}, st);
+  b.poll({1, 2, 0}, st);
+  b.guard(V(d), {1, 3, 0}, st);
   b.call_gc(d, reinterpret_cast<const void *>(gc_helper), {V(x), V(x)}, {1, 4}, st,
       GRCORE_SITE_GC_POINT_ALLOC_SLOW);
   b.ret(V(d));

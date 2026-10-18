@@ -515,6 +515,8 @@ typedef struct GRJIT_Op {
   uint64_t callee;            ///< For the calls and tail calls: the engine's
                               ///< token for the callee, which the push and
                               ///< compile hooks receive.
+  GRJIT_Operand callee_operand; ///< Optional I64 dynamic callee token; NONE
+                                ///< uses the immediate `callee` above.
   uint32_t exit_state;        ///< For `CALL_SLOT` and `CALL_PTR` (a tail call
                               ///< has the one `state`): the frame
                               ///< state of an exit *before* the call, or

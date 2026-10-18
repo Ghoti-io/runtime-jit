@@ -139,6 +139,35 @@ TEST(Compile, CallableEntryPassesItsResultBufferToTheInternalReturn) {
   EXPECT_EQ(out[1], 0x7766554433221100ull);
 }
 
+TEST(Compile, CallableReturnWritesThreeResultsInOrderWithinItsOutputBuffer) {
+  GRJIT_REQUIRE_BACKEND();
+  JitWorld w;
+  B b("callable-three-result-order");
+  GRJIT_CallHooks hooks{};
+  hooks.deopt = [](void *, uint64_t) -> uint32_t { return 0; };
+  ASSERT_EQ(grjit_builder_set_callable(b.b, &hooks, 3), GRJIT_OK);
+  b.at(b.block());
+  const GRJIT_VReg first = b.reg();
+  const GRJIT_VReg second = b.reg();
+  const GRJIT_VReg third = b.reg();
+  b.cnst(first, 0x1122334455667788ll);
+  b.cnst(second, 0x7766554433221100ll);
+  b.cnst(third, 0x1234567890abcdefll);
+  const GRJIT_Operand values[] = {V(first), V(second), V(third)};
+  ASSERT_EQ(grjit_builder_ret_multi(b.b, values, 3), GRJIT_OK);
+  Fn f(b.finish());
+  Compiled c(f, w.pages());
+  ASSERT_TRUE(c) << grjit_result_string(c.result);
+  uint64_t out[4] = {0, 0, 0, 0xD00DFEEDCAFEBEEFull};
+  EXPECT_EQ(grjit_code_entry(c.code)(w.ctx, w.ctx, nullptr, out),
+      uint32_t{GRJIT_EXIT_RETURNED});
+  EXPECT_EQ(out[0], 0x1122334455667788ull);
+  EXPECT_EQ(out[1], 0x7766554433221100ull);
+  EXPECT_EQ(out[2], 0x1234567890abcdefull);
+  EXPECT_EQ(out[3], 0xD00DFEEDCAFEBEEFull)
+      << "the return writes only the three declared result words";
+}
+
 TEST(Compile, OneResultCallableKeepsTheSingleRegisterReturnAndNoResultBuffer) {
   B b("single-result-callable");
   GRJIT_CallHooks hooks{};
@@ -169,7 +198,7 @@ TEST(Compile, CallableResultCountIsTheDeclaredSignatureWhenNoReturnIsReachable) 
   hooks.deopt = [](void *, uint64_t) -> uint32_t { return 0; };
   b.callable(hooks, 1);
   b.at(b.block());
-  b.guard(I(0), {1, 1});
+  b.guard(I(0), {1, 1, 0});
   ASSERT_EQ(grjit_builder_ret_multi(b.b, nullptr, 0), GRJIT_OK);
   Fn f(b.finish());
   Compiled c(f, w.pages());
@@ -227,7 +256,7 @@ TEST(Compile, NestedSlotCallUsesCalleeEnvironmentAndRestoresCallerEnvironment) {
   const GRJIT_VReg after = caller_builder.reg(GRJIT_TYPE_PTR);
   caller_builder.at(caller_builder.block());
   ASSERT_EQ(grjit_builder_instance(caller_builder.b, before), GRJIT_OK);
-  const GRCORE_PollIdentity id{1, 1};
+  const GRCORE_PollIdentity id{1, 1, 0};
   const GRJIT_FrameSlot state[] = {grjit_frame_slot_dead()};
   ASSERT_EQ(grjit_builder_call_slot_results_env(caller_builder.b, &returned, 1,
       reinterpret_cast<uintptr_t>(&callee_entry), 77, V(target_environment),
@@ -265,7 +294,7 @@ TEST(Compile, NestedSlotCallUsesCalleeEnvironmentAndRestoresCallerEnvironment) {
 TEST(Compile, ACalleeWhoseFrameIsSeveralPagesReadsTheEnvironmentItWasGivenAtEveryFrameSize) {
   GRJIT_REQUIRE_BACKEND();
   const GRJIT_CallHooks hooks = environment_hooks();
-  const GRCORE_PollIdentity id{1, 1};
+  const GRCORE_PollIdentity id{1, 1, 0};
   const GRJIT_FrameSlot state[] = {grjit_frame_slot_dead()};
   for (int regs : {2, 60, 500, 520, 1100, 3000}) {
     SCOPED_TRACE(regs);
@@ -337,7 +366,7 @@ TEST(Compile, ACallThroughASlotNamedByARegisterAsksTheCompileHookOfAnEmptySlotAn
   const GRJIT_VReg arg = tb.param(GRJIT_TYPE_I64);
   const GRJIT_VReg r = tb.reg();
   tb.at(tb.block());
-  const GRCORE_PollIdentity id{1, 1};
+  const GRCORE_PollIdentity id{1, 1, 0};
   const GRJIT_FrameSlot state[] = {grjit_frame_slot_dead()};
   const GRJIT_Operand args[] = {V(arg)};
   ASSERT_EQ(grjit_builder_call_slot_operand_results_env(tb.b, &r, 1, V(slot), 77, grjit_operand_none(),
@@ -365,7 +394,7 @@ TEST(Compile, TheArm64StubThatReadsAnInstalledSlotAgainDoesNotLoadFromAddressZer
   const GRJIT_VReg slot = tb.param(GRJIT_TYPE_PTR);
   const GRJIT_VReg r = tb.reg();
   tb.at(tb.block());
-  const GRCORE_PollIdentity id{1, 1};
+  const GRCORE_PollIdentity id{1, 1, 0};
   const GRJIT_FrameSlot state[] = {grjit_frame_slot_dead()};
   ASSERT_EQ(grjit_builder_call_slot_operand_results_env(tb.b, &r, 1, V(slot), 77, grjit_operand_none(),
       nullptr, 0, id, state, 1, id, state, 1), GRJIT_OK);
@@ -404,7 +433,7 @@ TEST(Compile, TailSlotCallTransfersItsExplicitCalleeEnvironment) {
   ASSERT_EQ(grjit_builder_set_callable(tail_builder.b, &hooks, 1), GRJIT_OK);
   const GRJIT_VReg target_environment = tail_builder.param(GRJIT_TYPE_PTR);
   tail_builder.at(tail_builder.block());
-  const GRCORE_PollIdentity id{1, 1};
+  const GRCORE_PollIdentity id{1, 1, 0};
   const GRJIT_FrameSlot state[] = {grjit_frame_slot_dead()};
   ASSERT_EQ(grjit_builder_tail_call_slot_env(tail_builder.b,
       reinterpret_cast<uintptr_t>(&callee_entry), 77, 1, V(target_environment),
@@ -470,7 +499,7 @@ TEST(Compile, TheEntryOfACallableFunctionWritesEveryResultAtEveryParameterCount)
 TEST(Compile, ATailCallToACalleeNeedingMoreStackArgumentsKeepsTheEnvironmentAndTheResultBuffer) {
   GRJIT_REQUIRE_BACKEND();
   const GRJIT_CallHooks hooks = environment_hooks();
-  const GRCORE_PollIdentity id{1, 1};
+  const GRCORE_PollIdentity id{1, 1, 0};
   const GRJIT_FrameSlot state[] = {grjit_frame_slot_dead()};
   long cases = 0;
   for (int explicit_environment = 0; explicit_environment < 2; explicit_environment++) {
@@ -778,7 +807,7 @@ TEST(Compile, TailOnlyMultiResultIncludesTheWholeOutBuffer) {
   b.callable(environment_hooks(), 3);
   b.at(b.block());
   ASSERT_EQ(grjit_builder_tail_call_slot(b.b, 0x1000, 7, 3, nullptr, 0,
-      GRCORE_PollIdentity{1, 1}, nullptr, 0), GRJIT_OK);
+      GRCORE_PollIdentity{1, 1, 0}, nullptr, 0), GRJIT_OK);
   Fn f(b.finish());
   Compiled c(f, w.pages());
   ASSERT_TRUE(c);
@@ -1006,7 +1035,7 @@ GRJIT_Function * with_sites(int sites, const GRJIT_Limits * limits) {
     b.cnst(k, i);
     b.bitcast(r, k);
     b.call_gc(GRJIT_NO_VREG, reinterpret_cast<const void *>(helper_zero), {},
-        GRCORE_PollIdentity{1, static_cast<uint64_t>(i)}, {});
+        GRCORE_PollIdentity{1, static_cast<uint64_t>(i), 0}, {});
     b.bitcast(t, r);
     b.bin(GRJIT_OP_ADD, acc, V(acc), V(t));
   }

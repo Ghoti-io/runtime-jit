@@ -78,7 +78,7 @@ int main(void) {
   CHECK(grjit_builder_cmp(b, GRJIT_CMP_NE, c, grjit_operand_vreg(x), grjit_operand_imm(0)));
   GRJIT_FrameSlot state[4] = {grjit_frame_slot_vreg(a), grjit_frame_slot_vreg(bb),
       grjit_frame_slot_constant(77), grjit_frame_slot_dead()};
-  GRCORE_PollIdentity identity = {5, 99};
+  GRCORE_PollIdentity identity = {5, 99, 0};
   CHECK(grjit_builder_guard(b, grjit_operand_vreg(c), identity, state, 4));
   CHECK(grjit_builder_binary(b, GRJIT_OP_ADD, r, grjit_operand_vreg(a), grjit_operand_vreg(bb)));
   CHECK(grjit_builder_ret(b, grjit_operand_vreg(r)));

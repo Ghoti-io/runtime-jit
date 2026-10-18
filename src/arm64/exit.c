@@ -110,7 +110,11 @@ void grjit_a64_emit_call_slow_stub(GRJIT_A64Emit * e, const GRJIT_Pending * p) {
   grjit_a64_cmp_imm(a, GRJIT_A64_X16, GRCORE_ENTRY_REFUSED);
   grjit_a64_bcond(a, GRJIT_A64_EQ, p->exit);
   grjit_a64_load(a, GRJIT_A64_MEM_X64, GRJIT_A64_X0, GRJIT_A64_FP, GRJIT_SLOT_CTX);
-  grjit_a64_mov_ri(a, GRJIT_A64_X1, p->op->callee);
+  if (p->op->callee_operand.kind == GRJIT_OPERAND_NONE)
+    grjit_a64_mov_ri(a, GRJIT_A64_X1, p->op->callee);
+  else
+    grjit_a64_emit_operand_load(e, GRJIT_A64_X1,
+        &p->op->callee_operand);
   grjit_a64_mov_ri(a, GRJIT_A64_X16, (uint64_t)(uintptr_t)e->c.f->hooks.compile);
   grjit_a64_blr(a, GRJIT_A64_X16);
   grjit_a64_mov32_rr(a, GRJIT_A64_X0, GRJIT_A64_X0);

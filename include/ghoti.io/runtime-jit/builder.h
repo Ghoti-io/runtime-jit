@@ -169,11 +169,27 @@ GRJIT_API GRJIT_Result grjit_builder_set_callable(
  * count (so a call can never be entered with the wrong number of arguments,
  * which would corrupt the stack, or into the wrong function, which a chain
  * rebuild would then misread). ::grjit_entry_slot_install makes the same check
- * when code is installed in a slot. The default is zero.
+ * when code is installed in a slot. If the token fits in 32 bits, it also
+ * supplies the default runtime-core guest-frame function ID unless that ID
+ * was set explicitly. A module-qualified token requires an explicit guest
+ * function ID when frame states are present. The default is zero.
  *
  * @return ::GRJIT_OK, or ::GRJIT_ERR_INVALID for NULL.
  */
 GRJIT_API GRJIT_Result grjit_builder_set_token(GRJIT_Builder * builder, uint64_t token);
+
+/**
+ * @brief Sets the runtime-core guest-frame function ID represented by this
+ *   code's frame states. This is distinct from the opaque 64-bit poll identity.
+ *
+ * Engines that rebuild or pair compiled frames with runtime-core guest frames
+ * may set this when the guest function ID differs from the 32-bit token default,
+ * and must set it for module-qualified tokens. This is distinct from the opaque
+ * 64-bit poll identity. The default is the token when it fits in 32 bits, or
+ * zero until explicitly set for a module-qualified token.
+ */
+GRJIT_API GRJIT_Result grjit_builder_set_guest_function(
+    GRJIT_Builder * builder, uint32_t guest_function);
 
 /**
  * @brief Gives the function the table its `CALL_NATIVE` operations name
@@ -413,6 +429,28 @@ GRJIT_API GRJIT_Result grjit_builder_call_slot_operand_results_env(
     size_t state_count, GRCORE_PollIdentity exit_identity,
     const GRJIT_FrameSlot * exit_slots, size_t exit_count);
 
+/** Dynamic token and slot form. The i64 token is passed to compile/push and
+ * must identify the code held by the supplied entry slot. The engine owns
+ * that association; the verifier checks the token operand's type and use. */
+GRJIT_API GRJIT_Result grjit_builder_call_slot_dynamic_results_env(
+    GRJIT_Builder * builder, const GRJIT_VReg * results, size_t result_count,
+    GRJIT_Operand slot_entry_address, GRJIT_Operand callee_token,
+    GRJIT_Operand environment, const GRJIT_Operand * args, size_t arg_count,
+    GRCORE_PollIdentity identity, const GRJIT_FrameSlot * state_slots,
+    size_t state_count, GRCORE_PollIdentity exit_identity,
+    const GRJIT_FrameSlot * exit_slots, size_t exit_count);
+
+/** Dynamic-slot call with an exception landing. The token and entry address
+ * are both supplied at runtime; the landing receives the pre-call values. */
+GRJIT_API GRJIT_Result grjit_builder_call_slot_dynamic_catch_results_env(
+    GRJIT_Builder * builder, const GRJIT_VReg * results, size_t result_count,
+    GRJIT_Operand slot_entry_address, GRJIT_Operand callee_token,
+    GRJIT_Operand environment, const GRJIT_Operand * args, size_t arg_count,
+    GRCORE_PollIdentity identity, const GRJIT_FrameSlot * state_slots,
+    size_t state_count, GRCORE_PollIdentity exit_identity,
+    const GRJIT_FrameSlot * exit_slots, size_t exit_count,
+    GRJIT_BlockId landing_block);
+
 /** Dynamic-slot catching variant with an explicit callee environment. */
 GRJIT_API GRJIT_Result grjit_builder_call_slot_operand_catch_results_env(
     GRJIT_Builder * builder, const GRJIT_VReg * results, size_t result_count,
@@ -512,6 +550,13 @@ GRJIT_API GRJIT_Result grjit_builder_tail_call_slot_env(GRJIT_Builder * builder,
     uint64_t slot_address, uint64_t callee, size_t result_count,
     GRJIT_Operand environment,
     const GRJIT_Operand * args, size_t arg_count,
+    GRCORE_PollIdentity identity, const GRJIT_FrameSlot * state_slots,
+    size_t state_count);
+/** Dynamic-token tail call through an engine-owned entry slot. */
+GRJIT_API GRJIT_Result grjit_builder_tail_call_slot_dynamic_env(
+    GRJIT_Builder * builder, GRJIT_Operand slot_entry_address,
+    GRJIT_Operand callee_token, size_t result_count,
+    GRJIT_Operand environment, const GRJIT_Operand * args, size_t arg_count,
     GRCORE_PollIdentity identity, const GRJIT_FrameSlot * state_slots,
     size_t state_count);
 

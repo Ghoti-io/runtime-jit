@@ -17,7 +17,15 @@
 #include "ir_eval.h"
 
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <cstdint>
+#if defined(__linux__) && defined(__has_include)
+#if __has_include(<valgrind/valgrind.h>)
+#include <valgrind/valgrind.h>
+#define GRJIT_TEST_HAS_VALGRIND_CLIENT 1
+#endif
+#endif
 #if defined(__SSE__)
 #include <xmmintrin.h>
 #endif
@@ -27,6 +35,32 @@
 #include <vector>
 
 namespace floatfx {
+
+/* Valgrind 3.24/VEX rounds this one u64 -> f32 halfway-plus-one input through
+ * binary64. The ordinary test still checks the exact 0x5F000001 result. A
+ * Memcheck target may request the narrowly counted input accommodation only
+ * while actually running under Valgrind. */
+constexpr uint64_t kMemcheckDoubleRoundingInput = UINT64_C(0x8000008000000001);
+constexpr uint64_t kMemcheckAdjacentInput = UINT64_C(0x8000008000000000);
+inline bool memcheck_double_rounding_requested() {
+  const char * value = std::getenv("GRJIT_MEMCHECK_F32_U64_DOUBLE_ROUNDING");
+  return value != nullptr && std::strcmp(value, "1") == 0;
+}
+inline bool running_under_valgrind() {
+#if defined(GRJIT_TEST_HAS_VALGRIND_CLIENT)
+  return RUNNING_ON_VALGRIND != 0;
+#else
+  return false;
+#endif
+}
+inline uint32_t memcheck_double_rounding_probe_bits() {
+  volatile uint64_t input = kMemcheckDoubleRoundingInput;
+  volatile float converted = static_cast<float>(input);
+  const float result = converted;
+  uint32_t bits = 0;
+  std::memcpy(&bits, &result, sizeof bits);
+  return bits;
+}
 
 using intfx::Outcome;
 using intfx::kTrapFunction;
@@ -234,7 +268,7 @@ inline FloatOp build_float_op(const std::string & instr, TruncGuards guards = Tr
       if (guards.nan) {
         GRJIT_VReg same = b.reg(GRJIT_TYPE_I32);
         b.cmp(GRJIT_CMP_EQ, same, V(x), V(x));
-        b.guard(V(same), {kTrapFunction, kSiteInvalidConversion});
+        b.guard(V(same), {kTrapFunction, kSiteInvalidConversion, 0});
       }
       if (guards.range) {
         const Bounds bd = trunc_bounds(is_signed, wide);
@@ -252,7 +286,7 @@ inline FloatOp build_float_op(const std::string & instr, TruncGuards guards = Tr
             I(static_cast<int64_t>(imm_bits(lo, dbl))));
         b.cmp(GRJIT_CMP_LT, h, V(x), I(static_cast<int64_t>(imm_bits(hi, dbl))));
         b.bin(GRJIT_OP_AND, ok, V(l), V(h));
-        b.guard(V(ok), {kTrapFunction, kSiteIntegerOverflow});
+        b.guard(V(ok), {kTrapFunction, kSiteIntegerOverflow, 0});
       }
       b.un(is_signed ? GRJIT_OP_TRUNC_S : GRJIT_OP_TRUNC_U, r, V(x));
       b.ret(V(r));

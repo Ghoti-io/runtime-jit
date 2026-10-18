@@ -9,6 +9,10 @@
 
 #include "test_helpers.h"
 
+namespace {
+uint32_t builder_test_poll(void *, uint64_t, uint64_t) { return 0; }
+} // namespace
+
 TEST(Builder, RecordsBlocksRegistersAndOperationsAndTheAccessorsReadThemBack) {
   B b("sum", 2);
   GRJIT_VReg p0 = b.param(GRJIT_TYPE_PTR);
@@ -130,7 +134,7 @@ TEST(Builder, TheOtherCapsAreLimitErrorsToo) {
   b.cnst(0, 2);
   EXPECT_EQ(grjit_builder_const(b.b, 0, 3), GRJIT_ERR_LIMIT);
   GRJIT_FrameSlot slots[3] = {grjit_frame_slot_dead(), grjit_frame_slot_dead(), grjit_frame_slot_dead()};
-  EXPECT_EQ(grjit_builder_poll(b.b, {0, 0}, slots, 3), GRJIT_ERR_LIMIT);
+  EXPECT_EQ(grjit_builder_poll(b.b, {0, 0, 0}, slots, 3), GRJIT_ERR_LIMIT);
   GRJIT_Builder * small = nullptr;
   EXPECT_EQ(grjit_builder_create("h", 3, &limits, nullptr, &small), GRJIT_ERR_LIMIT);
   EXPECT_EQ(small, nullptr);
@@ -141,16 +145,16 @@ TEST(Builder, ACallWithSevenArgumentsIsALimitErrorAndSixIsFine) {
   b.at(b.block());
   std::vector<GRJIT_Operand> args(7, I(1));
   EXPECT_EQ(grjit_builder_call(b.b, GRJIT_NO_VREG, 0x1000, GRJIT_CALL_NO_GC,
-                GRCORE_SITE_GC_POINT_CALL, args.data(), 7, {0, 0}, nullptr, 0),
+                GRCORE_SITE_GC_POINT_CALL, args.data(), 7, {0, 0, 0}, nullptr, 0),
       GRJIT_ERR_LIMIT);
   EXPECT_EQ(grjit_builder_call(b.b, GRJIT_NO_VREG, 0x1000, GRJIT_CALL_NO_GC,
-                GRCORE_SITE_GC_POINT_CALL, args.data(), 6, {0, 0}, nullptr, 0),
+                GRCORE_SITE_GC_POINT_CALL, args.data(), 6, {0, 0, 0}, nullptr, 0),
       GRJIT_OK);
   EXPECT_EQ(grjit_builder_call(b.b, GRJIT_NO_VREG, 0x1000, static_cast<GRJIT_CallAttr>(5),
-                GRCORE_SITE_GC_POINT_CALL, args.data(), 0, {0, 0}, nullptr, 0),
+                GRCORE_SITE_GC_POINT_CALL, args.data(), 0, {0, 0, 0}, nullptr, 0),
       GRJIT_ERR_INVALID);
   EXPECT_EQ(grjit_builder_call(b.b, GRJIT_NO_VREG, 0x1000, GRJIT_CALL_NO_GC,
-                GRCORE_SITE_GC_POINT_CALL, nullptr, 2, {0, 0}, nullptr, 0),
+                GRCORE_SITE_GC_POINT_CALL, nullptr, 2, {0, 0, 0}, nullptr, 0),
       GRJIT_ERR_INVALID);
 }
 
@@ -159,7 +163,7 @@ TEST(Builder, AFrameStateIsCopiedSoTheCallersArrayCanChange) {
   GRJIT_VReg v = b.reg();
   b.at(b.block());
   GRJIT_FrameSlot slots[2] = {grjit_frame_slot_vreg(v), grjit_frame_slot_constant(9)};
-  b.poll({4, 8}, {slots[0], slots[1]});
+  b.poll({4, 8, 0}, {slots[0], slots[1]});
   std::vector<GRJIT_Operand> args = {V(v)};
   b.call_gc(GRJIT_NO_VREG, reinterpret_cast<const void *>(0x1000), args, {5, 6},
       {grjit_frame_slot_dead(), grjit_frame_slot_dead()});
@@ -223,7 +227,7 @@ TEST(Builder, AnAllocationFailureAtEveryPointLeavesTheBuilderAsItWasAndLeaksNoth
     retry([&] { return grjit_builder_block(b, &blk); });
     retry([&] { return grjit_builder_set_block(b, blk); });
     GRJIT_FrameSlot slots[2] = {grjit_frame_slot_vreg(c), grjit_frame_slot_dead()};
-    retry([&] { return grjit_builder_poll(b, {1, 2}, slots, 2); });
+    retry([&] { return grjit_builder_poll(b, {1, 2, 0}, slots, 2); });
     GRJIT_Operand args[2] = {grjit_operand_vreg(a), grjit_operand_imm(3)};
     retry([&] {
       return grjit_builder_call(b, a, 0x2000, GRJIT_CALL_GC_POINT,
@@ -241,6 +245,43 @@ TEST(Builder, AnAllocationFailureAtEveryPointLeavesTheBuilderAsItWasAndLeaksNoth
       break; // the sweep has run past the last allocation
     }
   }
+}
+
+TEST(Builder, FrameStatesDefaultGuestFunctionFromA32BitToken) {
+  B b("f", 1);
+  ASSERT_EQ(grjit_builder_set_token(b.b, 37), GRJIT_OK);
+  b.poll_helper(builder_test_poll);
+  b.at(b.block());
+  b.poll({UINT64_C(0x100000002), 8, 0}, {grjit_frame_slot_dead()});
+  b.ret();
+  Fn f(b.finish());
+  char why[256] = {};
+  EXPECT_EQ(grjit_function_verify(f, nullptr, why, sizeof why), GRJIT_OK) << why;
+}
+
+TEST(Builder, ModuleQualifiedTokenNeedsExplicitGuestFunctionForFrameStates) {
+  constexpr uint64_t token = UINT64_C(0x100000001);
+  B missing("missing", 1);
+  ASSERT_EQ(grjit_builder_set_token(missing.b, token), GRJIT_OK);
+  missing.poll_helper(builder_test_poll);
+  missing.at(missing.block());
+  missing.poll({UINT64_C(0x100000002), 8, 0}, {grjit_frame_slot_dead()});
+  missing.ret();
+  Fn missing_fn(missing.finish());
+  char why[256] = {};
+  EXPECT_EQ(grjit_function_verify(missing_fn, nullptr, why, sizeof why),
+      GRJIT_ERR_INVALID);
+  EXPECT_NE(std::strstr(why, "explicit guest function"), nullptr);
+
+  B mapped("mapped", 1);
+  ASSERT_EQ(grjit_builder_set_token(mapped.b, token), GRJIT_OK);
+  ASSERT_EQ(grjit_builder_set_guest_function(mapped.b, 1), GRJIT_OK);
+  mapped.poll_helper(builder_test_poll);
+  mapped.at(mapped.block());
+  mapped.poll({UINT64_C(0x100000002), 8, 0}, {grjit_frame_slot_dead()});
+  mapped.ret();
+  Fn mapped_fn(mapped.finish());
+  EXPECT_EQ(grjit_function_verify(mapped_fn, nullptr, nullptr, 0), GRJIT_OK);
 }
 
 GRJIT_TEST_MAIN()

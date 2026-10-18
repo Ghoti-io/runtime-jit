@@ -167,6 +167,7 @@ GRJIT_Result grjit_metadata_build(const GRJIT_Function * f,
     s->code_offset = r->offset;
     s->kind = r->kind;
     s->identity = r->identity;
+    s->guest_function = f->guest_function;
     /* NULL + 0 is undefined in C: the arrays are not allocated when empty. */
     s->live = out->locations != NULL ? out->locations + loc_at : NULL;
     size_t refs = 0;

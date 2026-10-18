@@ -89,7 +89,7 @@ int main(void) {
   CHECK(grjit_builder_const(b, r1, 0x2001));
   CHECK(grjit_builder_const(b, q, 0x1011));
   GRJIT_FrameSlot state[2] = {grjit_frame_slot_vreg(r0), grjit_frame_slot_vreg(r1)};
-  GRCORE_PollIdentity poll_at = {1, 10}, call_at = {1, 20}, guard_at = {1, 30};
+  GRCORE_PollIdentity poll_at = {1, 10, 0}, call_at = {1, 20, 0}, guard_at = {1, 30, 0};
   CHECK(grjit_builder_poll(b, poll_at, state, 2));
   GRJIT_Operand arg = grjit_operand_vreg(r0);
   CHECK(grjit_builder_call(b, d, (uint64_t)(uintptr_t)helper, GRJIT_CALL_GC_POINT,
