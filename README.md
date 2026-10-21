@@ -131,7 +131,7 @@ Valgrind 3.24/VEX rounds the exact `u64` input `0x8000008000000001` to
 `f32` through a binary64 halfway value: an ordinary standalone GCC conversion
 and the ordinary JIT tests produce `0x5F000001`, while the same standalone
 conversion under Memcheck produces `0x5F000000` with zero reported memory
-errors (EVO proof `cutil-rjit-valgrind-conversion-probe-20261018-0341`).
+errors.
 `make test-valgrind` first runs the four affected float test bodies
 ordinarily on the same binaries, requiring two selected passing tests in each
 executable. During Memcheck, a test-only conversion probe activates a counted
