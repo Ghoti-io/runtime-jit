@@ -4,9 +4,10 @@
 verifier and printer, the x86-64 (Linux and Windows) and arm64 baseline backends
 with their assemblers, the stack maps and deopt records it emits in
 `runtime-core`'s format, W^X code memory and the Windows unwind registration,
-the integer operations and the Wasm spec-suite harness, the gates, the planted-defect proofs and the benchmark harness, taken
-from the runtime stack's architecture spine (AD-2, AD-4, AD-9, AD-12, AD-13,
-AD-14, AD-17 to AD-19, AD-21, AD-22, AD-26). What is not here is listed at the
+the integer operations and the Wasm spec-suite harness, the gates, the planted-defect proofs and the benchmark harness. The
+architectural decisions it follows are cited by the numbers the runtime
+libraries share (AD-2, AD-4, AD-9, AD-12, AD-13, AD-14, AD-17 to AD-19, AD-21,
+AD-22, AD-26), and the text around each citation states the rule it applies. What is not here is listed at the
 end.
 
 ## What this library is
@@ -335,7 +336,7 @@ own, `GRJIT_ARCH_X86_64_WIN64`, which `grjit_emit_for` can emit on any host. So
 what it emits, the unwind bytes and where they live are tested on Linux, with the
 bytes of a function pinned (`tests/unit/test_win64.cpp`, `test_pin.cpp`), and
 only *running* it needs Windows, which here means wine
-(`suite/tools/xwin/m1-run.sh` in the workspace). Nothing below has run on a Windows
+(`suite/tools/xwin/m1-run.sh`, in the suite repository). Nothing below has run on a Windows
 machine.
 
 **Calling convention.** Entry is `uint32_t (void * context, const uint64_t * args,
@@ -426,7 +427,8 @@ growth that the probes exist for is wine's implementation of it.
 
 ## The assembler
 
-`src/x86_64/asm.c` is new code (AD-9, spine Supersedes: not seeded from ctang's
+`src/x86_64/asm.c` is new code, not seeded from ctang's `binary.h` (AD-9:
+nothing in the runtime stack is built on ctang's bytecode, interpreter, JIT or
 `binary.h`), and `src/arm64/asm.c` is another, written for this library and not
 seeded from either (the arm64 one is described above). It encodes what the backend emits and no more, checked against byte
 sequences written out in the test and, where `objdump` is present, against its
@@ -525,7 +527,7 @@ slower with the JIT on than off, and `fib(22)` 1.2% slower (lang-tang's
 `design.md`, "Calls, measured", which also has the current figures), because every call left compiled code, deoptimized the
 caller into the interpreter, and re-entered the callee's compiled code from the
 top. The restriction was story 15's own rule ("no JIT frame calls a JIT frame"),
-not the spine's. This section is the protocol that removes it, as built and
+not an architectural rule. This section is the protocol that removes it, as built and
 described for x86-64 SysV; arm64 has its own convention of the same shape (the
 section "The arm64 convention for calls, tail calls and natives", below). Win64 has
 its own (the section "The Win64 convention for calls, tail calls and natives", below), and
@@ -1452,7 +1454,9 @@ profiler or an ETW stack sample) that lands on the last instructions of *any* ca
 recovered `in_A` bytes off there. Only asynchronous unwinds are affected (no exception crosses a compiled frame, AD-28), and a
 callee with no stack arguments ends in a plain `ret` and is not. This is accepted rather than designed away: the only way to
 remove it is a plain `ret` everywhere, which means giving up callee-pops, and story 5 chose callee-pops for tail calls. The check
-on a real Windows machine is item 1 of `planning/specs/spec-runtime-calls/checks-for-corey.md`.
+on a real Windows machine has not been run: there, `testWin64_calls`'s test
+`TheUnwinderRecoversTheCallerFromEveryInstructionOfBothProloguesAndEpilogues` walks every instruction of both prologues
+and epilogues, and its `ret imm16` rows assert wine's value, so run there they show whether Windows's unwinder agrees.
 
 **One emitted function, read.** A callable function of six parameters whose only operation is a tail call, through a slot,
 to a callee of seven arguments (`grjit_emit_for` for `GRJIT_ARCH_X86_64_WIN64`, bytes through the host's `objdump -D -b
@@ -2053,7 +2057,8 @@ accepted and changes nothing. Bits above `ALL` are reserved and ignored. The lib
 environment variable; the test fixtures read `GRJIT_TEST_DISABLE_FEATURES` (`all`, `none` or a number)
 to run a whole suite on the v1 sequences of a host that has the features.
 
-*Rejected: an allow set* (the spine's "ANDed with a mask" spelled literally): every zero-initialised
+*Rejected: an allow set* (the rule that detected features are "ANDed with a mask" that is a context
+option, spelled literally): every zero-initialised
 options struct, 30 call sites, would mean "v1 only", silently losing the feature arms and leaving the
 detected arm unexercised in every existing test, and a wrong allow set could name a feature the CPU
 lacks. The field is the engine's context option reaching a compile; `runtime-jit` has no context type,
@@ -2105,7 +2110,7 @@ POPCNT}`, and not in `{LZCNT}` or `{}`.
 
 ### The stamp, and what does not exist yet
 
-`grjit_features_stamp` writes the text the spine's cache stamp carries for a set: `x86_64-v1` for the
+`grjit_features_stamp` writes the text a code cache's stamp is to carry for a set: `x86_64-v1` for the
 empty set and `x86_64-v1+sse4.1+popcnt+lzcnt+bmi1` for the full one, always in bit order, lowercase,
 `+`-joined, NUL-terminated; a short buffer is `GRJIT_ERR_LIMIT` with `buf[0]` set to NUL, and
 `GRJIT_FEATURES_STAMP_MAX` bytes always suffice. `grjit_features_from_stamp` is its inverse and fails
@@ -2561,7 +2566,7 @@ The arms do not exist on arm64: the harness printed all fourteen pairs' rows as 
 - **A real Windows machine.** Everything about the Windows backend has run under
   wine and in the structural tests, and nowhere else: the stack walk, the
   registration, the probes, and `check-planted` (which is a Linux target; the
-  workspace's `suite/tools/xwin/m1-controls.sh` runs the Win64 planted defects against
+  suite repository's `tools/xwin/m1-controls.sh` runs the Win64 planted defects against
   the built executables instead).
 - **Pointer authentication and BTI** (above): unsupported and untested.
 - **Real arm64 hardware.** The arm64 backend's code runs under `qemu-aarch64`

@@ -46,10 +46,10 @@ macOS) `grjit_backend_available()` is false and `grjit_compile` returns
 `GRJIT_ERR_UNSUPPORTED`. The Windows flavour is the x86-64 emitter in the
 Microsoft x64 calling convention, with its unwind information registered with the
 system; it is emitted and its bytes tested on every host, and run under wine
-(`suite/tools/xwin/m1-run.sh` in the workspace), not yet on a Windows machine. The arm64 backend's
+(`suite/tools/xwin/m1-run.sh`, in the suite repository), not yet on a Windows machine. The arm64 backend's
 encodings and hazards are tested on every host (the assembler is plain C that
 emits bytes, and a small simulator in the tests executes what it emits); running
-its code for real is `suite/tools/xarch/jit-arm64.sh` in the workspace, under
+its code for real is `suite/tools/xarch/jit-arm64.sh`, in the suite repository, under
 `qemu-aarch64` (a regression in the arm64 branch of `grjit_compile` passes
 `make test` and fails only that script, so `suite/tools/m1-prerelease.sh` runs it,
 and the Windows run, as the step before a release). Calls between compiled
@@ -101,7 +101,7 @@ context's effective set is `running`: exactly when the recorded set is a subset 
 predicate are the contract it will use, not a feature anything consumes today. A CPU without
 LZCNT or BMI1 runs `lzcnt` and `tzcnt` as `bsr` and `bsf` instead of faulting, which is why
 detection is a pure decoder over the CPUID words with a test for each rule, and is also run under
-qemu CPU models (`suite/tools/xarch/jit-x86-cpu.sh` in the workspace). arm64 needs none of
+qemu CPU models (`suite/tools/xarch/jit-x86-cpu.sh`, in the suite repository). arm64 needs none of
 this (`clz`, `rbit`, `frint*` and `cnt` are baseline ARMv8-A): its detected, effective and recorded
 sets are always empty, the stamp is `arm64-v8` and a mask is accepted and ignored. The Win64 flavour
 takes the same four features as SysV. `documentation/design.md` has the decisions and what was
@@ -220,7 +220,8 @@ never stored in shared compiled code. `INSTANCE` reads the active activation's e
 ## Building
 
 `runtime-jit` depends on `cutil` and `runtime-core`, found through pkg-config
-only. Build the suite first from the workspace root (`./bootstrap.sh`), then:
+only. From the parent of a suite checkout, build and install the suite first
+(`./suite/install.sh`), then:
 
 ```bash
 export PKG_CONFIG_PATH="$PWD/.local/share/pkgconfig"
