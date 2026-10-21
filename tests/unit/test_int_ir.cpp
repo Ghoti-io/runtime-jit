@@ -4,8 +4,8 @@
  * The integer IR (spec-runtime-float, story 2): the `I32` type and the integer operations of
  * numeric-operations.md at both widths, their typing rules, the verifier's rule that a divide or
  * a remainder is preceded by its guards, and the code of each backend run against hand-worked
- * answers and the test evaluator: natively on x86-64 SysV and on arm64 (under qemu-aarch64 or on a
- * Raspberry Pi), under wine for Win64. A laptop of another architecture runs what it can: the arm64
+ * answers and the test evaluator: natively on x86-64 SysV and on arm64 (under qemu-aarch64 or on
+ * real arm64 hardware), under wine for Win64. A laptop of another architecture runs what it can: the arm64
  * code through the simulator in the differential, and every backend's emission in the refusal
  * tests below.
  *

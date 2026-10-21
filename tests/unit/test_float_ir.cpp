@@ -5,7 +5,7 @@
  * and reinterpretation operations of numeric-operations.md, their typing rules, the verifier's rule
  * that a float-to-integer truncation is preceded by its range guard, and the code of each backend run
  * against hand-worked answers and the test evaluator: natively on x86-64 SysV and on arm64 (under
- * qemu-aarch64 or on a Raspberry Pi), under wine for Win64. Floats through helper calls (the SysV
+ * qemu-aarch64 or on real arm64 hardware), under wine for Win64. Floats through helper calls (the SysV
  * classification is checked against an assembly probe here, the AAPCS64 and Microsoft x64 ones in
  * test_arm64_numeric.cpp and test_win64_numeric.cpp), through calls and tail calls between compiled
  * functions, and in frame states.

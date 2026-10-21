@@ -668,7 +668,7 @@ TEST(Differential, GeneratedIntegerProgramsRunTheSameCompiledAndEvaluated) {
 
 /* The same programs, the same argument sets, against the same evaluator, with the arm64 code the emitter
  * makes for each executed by the simulator in tests/a64_sim.h on any host. It is a dev loop and an extra
- * catch, not the verdict: qemu-aarch64 and the Raspberry Pi run the real thing (the native test above, on
+ * catch, not the verdict: qemu-aarch64 and real arm64 hardware run the real thing (the native test above, on
  * an arm64 host). */
 TEST(Differential, GeneratedIntegerProgramsRunTheSameWhenArm64CodeIsSimulatedAndEvaluated) {
   JitWorld w;

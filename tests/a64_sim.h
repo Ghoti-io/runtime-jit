@@ -37,7 +37,7 @@
  * `d8`-`d15` are callee-saved and checked at the return; every other vector register is
  * filled with noise after a call. A file of its own tests the simulator
  * (tests/unit/test_arm64_numeric.cpp): it is written by the same author as the emitter and
- * is a dev loop, not the verdict; qemu-aarch64 and the Pi are.
+ * is a dev loop, not the verdict; qemu-aarch64 and real arm64 hardware are.
  *
  * Copyright 2026 by Corey Pennycuff
  */

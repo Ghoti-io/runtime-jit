@@ -83,7 +83,7 @@ digest in `tools/wasm/SHA256SUMS`; it finds the library from a compile-time defi
 directory does not matter, and `GRJIT_WASM_SUITE_DIR` names another directory that holds `test/core/`), and every `assert_return` and `assert_trap`
 runs through the IR. Counts at that tag: `i32.wast` 374 passed, 85 excluded (the
 `assert_invalid` and `assert_malformed` it cannot run), 0 failed; `i64.wast` 384, 31, 0. They are the
-same on every backend: natively on x86-64, under `qemu-aarch64` and on a Raspberry Pi 4 for arm64,
+same on every backend: natively on x86-64, under `qemu-aarch64` and on a Cortex-A72 board for arm64,
 and under wine for Win64.
 
 ## CPU features

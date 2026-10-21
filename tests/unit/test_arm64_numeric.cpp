@@ -8,7 +8,7 @@
  *
  * The simulator is written by the same author as the emitter, so it can share a misreading of the
  * manual with it. It is a dev loop and an extra catch on every host, not a verdict: the instruments
- * that count for arm64 are qemu-aarch64 and the Raspberry Pi. So these tests hold it to hand-worked
+ * that count for arm64 are qemu-aarch64 and real arm64 hardware. So these tests hold it to hand-worked
  * answers (taken from the Arm Architecture Reference Manual's pseudocode, worked on paper) and, where
  * the host's own arithmetic must agree, to `<cmath>` and to the host's float conversions.
  *

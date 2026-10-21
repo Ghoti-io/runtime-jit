@@ -312,7 +312,7 @@ TEST(Asm, TheSystemDisassemblerReadsTheSameInstructions) {
 #endif
   // objdump is required on an x86-64 host: its absence fails this test, it is
   // not skipped (a skipped differential reports success over nothing). On a host
-  // of another architecture (a Raspberry Pi's objdump knows aarch64 and not
+  // of another architecture (an arm64 host's objdump knows aarch64 and not
   // x86-64) the tool cannot give the reading this test exists for; it is skipped
   // by name there, and the encodings are still checked byte for byte above.
 #if !defined(__x86_64__)

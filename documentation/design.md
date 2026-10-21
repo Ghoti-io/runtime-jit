@@ -695,7 +695,7 @@ no registered code. *Caller-pops stack arguments*: above.
 instrument is `bench/bench.c`, the loop of "Benchmarks" calling a callable function
 through an entry slot with `push` and `pop` doing nothing, so the figure is the
 convention, the status test and the hooks' two C calls and not an engine. The machine is
-the EVO-X2 (AMD Ryzen AI MAX+ 395, Linux 7.2.9, otherwise idle) through `tools/evo`, in
+a 32-thread x86-64 build box (AMD Ryzen AI MAX+ 395, Linux 7.2.9, otherwise idle), in
 the build image: GCC 16.2.0, `-std=c17 -O2 -g`, release, x86-64 SysV. The command is
 `make -C libs/runtime-jit build/linux/release/apps/bench/bench PREFIX=<prefix>` and then
 `build/linux/release/apps/bench/bench`, run three times in turn; each figure is the best
@@ -728,7 +728,7 @@ compiled in a fresh engine per run (compile inside the clock) and about 40% in s
 library-call figures beside it. (Compile
 of a 100-operation function: 5.5 us here, GCC 16.2; the 7.9 us is the "Benchmarks" table's first measurement, 2026-10-03, the Intel Core 7 150U with GCC 14.2.)
 
-On real arm64 (a Raspberry Pi 4, Cortex-A72, GCC 16.2.0 aarch64 `-O2 -g` release in the arm64 build image, through `tools/rpi`, the same commit and command, 2026-10-09, three runs; calibration 3.34 ns a step) the same loops read: plain 5.00 to 5.25, poll 6.12, helper call 6.67, **compiled call 17.61**, tail call 12.79, `loop-helper-gc` 6.12 to 6.25, `loop-native` 7.23 and `loop-native-status` 8.34 to 9.56 ns an iteration. A compiled call and return costs 12.6 ns more than the plain loop there, 3.8 times the calibration step (it is 1.9 on the EVO-X2), and a tail call 7.8 ns; compiling a 100-operation function takes 44 us. The 3.8 and the 1.9 are each machine's own figure (each against its own calibration), and the difference between them is not attributed to anything here (the machines differ in more than the convention, and nothing was measured to separate them).
+On real arm64 (a Cortex-A72 board, GCC 16.2.0 aarch64 `-O2 -g` release in the arm64 build image, the same commit and command, 2026-10-09, three runs; calibration 3.34 ns a step) the same loops read: plain 5.00 to 5.25, poll 6.12, helper call 6.67, **compiled call 17.61**, tail call 12.79, `loop-helper-gc` 6.12 to 6.25, `loop-native` 7.23 and `loop-native-status` 8.34 to 9.56 ns an iteration. A compiled call and return costs 12.6 ns more than the plain loop there, 3.8 times the calibration step (it is 1.9 on the x86-64 build box), and a tail call 7.8 ns; compiling a 100-operation function takes 44 us. The 3.8 and the 1.9 are each machine's own figure (each against its own calibration), and the difference between them is not attributed to anything here (the machines differ in more than the convention, and nothing was measured to separate them).
 
 A retired function costs one page
 (4,163 bytes with bookkeeping) while a compiled run stays open: 200 replacements
@@ -2191,7 +2191,7 @@ only; the other two backends refused any function that used them, by name. This 
 verifier rules, so the Wasm suite runs once per backend with x86-64's counts, a float can be passed to a helper in
 each ABI, and the one invariant that is specific to these two ABIs, that the callee-saved vector registers are never
 touched, is shown rather than assumed. The sequences below were written from the Arm Architecture Reference Manual
-and the Intel manual, checked on a Raspberry Pi 4 and under `qemu-aarch64` and `wine`, and are the decisions; the
+and the Intel manual, checked on a Cortex-A72 board and under `qemu-aarch64` and `wine`, and are the decisions; the
 rejected alternatives are at the end.
 
 **The representation does not change.** An `I32` and an `F32` are zero-extended in their 64-bit slot at all times,
@@ -2296,7 +2296,7 @@ the stack with a pattern, leaves noise above bit 31 of `d0` after a float result
 register after a call and checks the low halves of `d8`-`d15` at the return. It makes the arm64 differential and the
 arm64 planted defects run on any host, and it is a dev loop, not the verdict: it is written by the same author as the
 emitter and can share a misreading of the manual with it. The instruments that count are `qemu-aarch64` and a real
-Raspberry Pi 4 (which are independent of each other: qemu's softfloat is not the Pi's silicon).
+Cortex-A72 board (which are independent of each other: qemu's softfloat is not the board's silicon).
 
 **What the tests are.** `testArm64_numeric` and `testWin64_numeric` hold what is specific to one ABI: the simulator's own
 tests (hand-worked answers, the host's `<cmath>` where they must agree, every word it refuses), the structural scans, the
@@ -2319,7 +2319,7 @@ the shadow offset); 91 the Win64 flavour given no feature again; 92-100 arm64 ag
 helper's 32-bit result and a move not cut, a left rotation as a right one, the sign extensions in the wrong width, the
 f32 copysign mask, a demotion and a promotion that do not convert). 69-86, 92, 93 and 95-100 are caught on any host
 through the simulator (`make check-planted`); every one of 69-87 and 92-100 is caught by real arm64 code (`tools/arm64-plants.txt`: under qemu and on
-the Pi, one test alone, control first); 88-91 are caught on the laptop by the structural and byte tests and under wine
+the arm64 board, one test alone, control first); 88-91 are caught on the laptop by the structural and byte tests and under wine
 (`tools/win64-plants.txt`), which also reruns the shared defects 38, 40-47, 50-55, 66 and 67 on the Win64 flavour (not
 39, whose `idiv` fault wine reports as an unhandled exception that kills the program, and not 48 and 49, which are in
 SysV assembly). A dropped guard is a different test on each ABI: on x86 it faults (`#DE`), so SysV turns the signal
@@ -2354,12 +2354,12 @@ would then agree with the library where both are wrong, so the evaluator spells 
 propagation, the sign of zero, saturation) and is compared to the hardware instead. *Generalising the SysV probes*: one test asserting three conventions would hide which is
 wrong. *Treating the simulator as the arm64 verdict*: it is written by the same author as the emitter and can share a
 misreading of the manual with it, and its arithmetic is the host's, so it says nothing about a real core. It is a dev
-loop that runs on every host and an extra catch; the verdicts are `qemu-aarch64` and the Pi.
+loop that runs on every host and an extra catch; the verdicts are `qemu-aarch64` and real arm64 hardware.
 
 **Known limits.** Instruction-cache coherence, a real kernel's W^X, memory ordering and the Windows kernel are outside
-every instrument here (`qemu-user`, wine and the simulator model none of them); the Pi covers the first three for
+every instrument here (`qemu-user`, wine and the simulator model none of them); the arm64 board covers the first three for
 arm64. A claim in this section says "under wine" (wine 10.0, the host's features), "under `qemu-aarch64`" (10.0.13) or
-"on the Pi (Cortex-A72)", and "simulated" for the simulator.
+"on a Cortex-A72 board", and "simulated" for the simulator.
 
 ## Floats and division across the three backends (spec-runtime-float, CAP-7)
 
@@ -2401,7 +2401,7 @@ operations on arm64 and Win64".
 | `F32` result taken | `movd eax, xmm0` (never as 64 bits) | the same | `fmov w0, s0` (the standard does not promise the upper half) |
 | between compiled functions | a float is its bit word in the register or the stack word an `I64` uses; `I32` and `F32` cut at the callee's entry and at the receiver | the same, with `GRJIT_WIN64_INTERNAL_REG_ARGS` (4) register slots | the same |
 | callee-saved vector registers | none (SysV has none) | `xmm6`-`xmm15`, never encoded | low halves of `d8`-`d15`, never encoded |
-| what shows it | the helper-ABI probe against assembly | the structural scan of the registers encoded, the bytes of the argument loads, the sentinel test under wine | the same scan, the sentinel test under `qemu-aarch64` and on the Pi, the simulator |
+| what shows it | the helper-ABI probe against assembly | the structural scan of the registers encoded, the bytes of the argument loads, the sentinel test under wine | the same scan, the sentinel test under `qemu-aarch64` and on the arm64 board, the simulator |
 | FP control state | default MXCSR assumed, never written | the same | default FPCR assumed (a test reads it and skips by name if it is not) |
 
 Helpers are non-variadic on every target, and natives (`CALL_NATIVE`) stay integer-only. The Win64 SSE2
@@ -2490,7 +2490,7 @@ interpreter).
 
 ### Floats, division and conversion against C, and the CPU-feature arms (spec-runtime-float)
 
-*Instrument.* `bench/bench.c` of runtime-jit `613c115`, runtime-core `08deb9e`, cutil `d440e43`, built in the build image (`ghoti-build:gcc16`: GCC 16.2.0, `-O2 -g -std=c17 -ffp-contract=off`, release) and run through `tools/evo` on the EVO-X2 (AMD Ryzen AI MAX+ 395, Linux 7.2.9, governor `powersave` (the clock, boost and SMT state were not recorded during the runs), detected CPU features `x86_64-v1+sse4.1+popcnt+lzcnt+bmi1`), the box otherwise idle (load 0.8 before the run), 2026-10-11. The calibration case reads 1.170 ns a step. Each case is the best of 5 repeats of 10,000,000 iterations (1,000 in a smoke run), the whole harness was run **5 times**, and each figure is the **median of the five runs' bests, with the minimum and the spread (maximum less minimum) in brackets as (minimum; spread)**. To reproduce: `make -C libs/runtime-jit build/linux/release/apps/bench/bench PREFIX=<prefix>` and `build/linux/release/apps/bench/bench`. The results of every compiled loop are checked in the case against the C reference's (a float by its bits) in a smoke run too, and planted defect 101 (a reference one ulp off) shows that the check can fail. No qemu or wine figure is recorded anywhere here.
+*Instrument.* `bench/bench.c` of runtime-jit `613c115`, runtime-core `08deb9e`, cutil `d440e43`, built in the build image (`ghoti-build:gcc16`: GCC 16.2.0, `-O2 -g -std=c17 -ffp-contract=off`, release) and run on a 32-thread x86-64 build box (AMD Ryzen AI MAX+ 395, Linux 7.2.9, governor `powersave` (the clock, boost and SMT state were not recorded during the runs), detected CPU features `x86_64-v1+sse4.1+popcnt+lzcnt+bmi1`), the box otherwise idle (load 0.8 before the run), 2026-10-11. The calibration case reads 1.170 ns a step. Each case is the best of 5 repeats of 10,000,000 iterations (1,000 in a smoke run), the whole harness was run **5 times**, and each figure is the **median of the five runs' bests, with the minimum and the spread (maximum less minimum) in brackets as (minimum; spread)**. To reproduce: `make -C libs/runtime-jit build/linux/release/apps/bench/bench PREFIX=<prefix>` and `build/linux/release/apps/bench/bench`. The results of every compiled loop are checked in the case against the C reference's (a float by its bits) in a smoke run too, and planted defect 101 (a reference one ulp off) shows that the check can fail. No qemu or wine figure is recorded anywhere here.
 
 *The C loops are honest.* Each `ref-loop-*` case is the same loop in C built with the project's flags, with an empty `asm volatile` naming its accumulator after every iteration (a register-class constraint per target: `+x` on x86-64, `+w` on arm64), so the compiler can neither fold it to a closed form nor vectorize or remove it; the harness refuses a reference that runs faster than 0.05 ns an operation. The disassembly of the seven references was read once on this build: `ref-loop-f64-add` is `cvtsi2sd`, `mulsd`, `addsd`, the increment and the compare, one dependent `addsd` chain; `-f64-div` the same with `divsd`; `-f64-cmp` a `cvtsi2sd`, a `mulsd`, `comisd`/`ucomisd` twice and three condition-to-integer sequences (`seta`, `setnp` with `cmovne`, `sbb`); `-i64-div-s` and `-i64-rem-s` a `cqo` and an `idiv` in every iteration with the divisor computed in the iteration; `-i32-div-u` a `div ecx`; `-cvt-trunc` `cvtsi2sd`, `mulsd`, `cvttsd2si` and an add. None is vectorized, none is a closed form, and none was removed. The compiled `F64` loop (the `runtime-jit` code bytes of `loop-f64-add`, read with `objdump -D -b binary`) has `cvtsi2sd`, `mulsd` and `addsd` between its compare and its back jump, with the frame-slot loads and stores around each
 
@@ -2521,7 +2521,7 @@ interpreter).
 
 *Against the figures recorded before.* The rows of the first measurement (an Intel Core 7 150U, GCC 14.2) are another machine and another compiler and are not comparable with the table above. On this machine the earlier call figures of "Calls between compiled functions, Measured" (2.641 to 2.823 for `loop-compiled-call`, 1.670 to 1.790 for `loop-tail-call`, 1.020 to 1.091, 1.021 to 1.107 and 1.027 to 1.114 for the three native loops) were re-measured on `613c115`: 2.726 (2.634; 0.159), 1.716 (1.658; 0.102), 1.044 (1.018; 0.049), 1.065 (1.018; 0.071) and 1.070 (1.022; 0.166). All five are inside the earlier ranges: not told apart. The first loop rows on this machine: `loop-plain` 0.487 (0.478; 0.018), `loop-poll` 0.603 (0.592; 0.030), `loop-call` 1.033 (1.010; 0.059), `compile-12k-sites` 13,859,963 ns.
 
-**On real arm64 (a Raspberry Pi 4, Cortex-A72).** *Instrument:* the same harness, runtime-jit `613c115`, runtime-core `08deb9e`, cutil `d440e43`, built in `suite/Containerfile.build.arm64` (GCC 16.2.0 aarch64, `-O2 -g -std=c17 -ffp-contract=off`, release) through `tools/evo --box pi4`, the Raspberry Pi 4 Model B Rev 1.4 (Linux 6.18.50, governor `ondemand`, the television's controller with nothing else of ours running, capped at 3 GiB and 3 CPUs; load 1.3 before the run), detected CPU features `arm64-v8`, **3 runs** of the whole harness, 2026-10-11. Statistic: the median of the three runs' bests, followed by (the minimum of the three; the spread). The calibration reads 3.337 ns a step. The C references were disassembled on the Pi (`objdump` is in the arm64 image; job `float8-pid`, the same source): `ref-loop-f64-add` is `scvtf`, `fmul`, `fadd` and the loop control, one dependent `fadd` chain; `-f64-div` the same with `fdiv`; `-f64-cmp` an `scvtf`, an `fmul`, `fcmpe`/`fcmp` three times and `cinc`; `-i64-div-s` an `and`, an `add` and an `sdiv` in every iteration; `-i64-rem-s` the same with `sdiv` and `msub`; `-i32-div-u` a `udiv` on `w` registers; `-cvt-trunc` `scvtf`, `fmul`, `fcvtzs` and an add. None is vectorized, none is a closed form, and none was removed; the near-equal figures of `ref-loop-i64-div-s` and `ref-loop-i32-div-u` (3.783 and 3.784 ns) are two different loops (`sdiv` against `udiv`) that read the same, which is a measurement and not a sign that one was replaced. Every loop's answer was checked against its reference on the Pi, which runs the F64, divide and truncation emission on real arm64. CPU clock: `scaling_cur_freq` 1.8 GHz (the maximum) when read after the run, governor `ondemand`.
+**On real arm64 (a Cortex-A72 board).** *Instrument:* the same harness, runtime-jit `613c115`, runtime-core `08deb9e`, cutil `d440e43`, built in `suite/Containerfile.build.arm64` (GCC 16.2.0 aarch64, `-O2 -g -std=c17 -ffp-contract=off`, release), on a 4-core Cortex-A72 board with 8 GB (Linux 6.18.50, governor `ondemand`, the run capped at 3 GiB and 3 CPUs; load 1.3 before the run), detected CPU features `arm64-v8`, **3 runs** of the whole harness, 2026-10-11. Statistic: the median of the three runs' bests, followed by (the minimum of the three; the spread). The calibration reads 3.337 ns a step. The C references were disassembled on the board (`objdump` is in the arm64 image; the same source): `ref-loop-f64-add` is `scvtf`, `fmul`, `fadd` and the loop control, one dependent `fadd` chain; `-f64-div` the same with `fdiv`; `-f64-cmp` an `scvtf`, an `fmul`, `fcmpe`/`fcmp` three times and `cinc`; `-i64-div-s` an `and`, an `add` and an `sdiv` in every iteration; `-i64-rem-s` the same with `sdiv` and `msub`; `-i32-div-u` a `udiv` on `w` registers; `-cvt-trunc` `scvtf`, `fmul`, `fcvtzs` and an add. None is vectorized, none is a closed form, and none was removed; the near-equal figures of `ref-loop-i64-div-s` and `ref-loop-i32-div-u` (3.783 and 3.784 ns) are two different loops (`sdiv` against `udiv`) that read the same, which is a measurement and not a sign that one was replaced. Every loop's answer was checked against its reference on the board, which runs the F64, divide and truncation emission on real arm64. CPU clock: `scaling_cur_freq` 1.8 GHz (the maximum) when read after the run, governor `ondemand`.
 
 | Loop (ns per iteration) | Compiled | The C loop | Compiled over C |
 | --- | --- | --- | --- |
