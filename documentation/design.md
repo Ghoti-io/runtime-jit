@@ -623,9 +623,12 @@ parameter count, then the engine's token for the function (`grjit_builder_set_to
 The token is an opaque call target identity and may include a module or program
 index. For deoptimization, `grjit_builder_set_guest_function` separately names
 the 32-bit guest function ID stored on the matching runtime-core guest frame.
-The verifier compares that declared ID with every frame state's guest function;
-engines must set it on both compiled builders and their interpreter frame-push
-paths. Tang, for example, uses a program-qualified token and the function
+The verifier refuses a module-qualified token (one above 32 bits) on a function with
+frame states and no explicit guest function ID. It does not compare the ID with the
+poll identity of each frame state: a module-qualified engine's poll function is not
+the guest function ID, which is the point of naming it. Engines must set it on both
+compiled builders and their interpreter frame-push paths, and a frame whose ID is
+wrong is paired with the wrong guest function or refused at rebuild. Tang, for example, uses a program-qualified token and the function
 index within that program as the guest frame ID.
 A `FAILED` status (below) reaches the adapter as the fatal exit
 `GRJIT_EXIT_REBUILD_FAILED`.
@@ -2595,7 +2598,7 @@ The public IR includes `TRAP(kind)` exits, unsigned `BR_TABLE`, multi-value
 edge on guest calls. The test evaluator defines the shared semantics. Values
 remain in eight-byte slots; this does not reserve a representation for future
 `v128` values. Indexed addresses are `base + index * scale + displacement`;
-the base is `PTR`, the index is `I32` or `I64`, and scale is a byte multiplier
+the base is `PTR` or `REF` (a `REF` base reads an object's payload), the index is `I32` or `I64`, and scale is a byte multiplier
 of 1, 2, 4, or 8. Larger memory64 offsets are formed with ordinary IR adds.
 Bounds checks are explicit IR, and guard-page traps are not provided.
 
