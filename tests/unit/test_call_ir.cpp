@@ -718,4 +718,68 @@ TEST(CallIr, ThePrinterShowsBothCallsTheirTokensAndBothStates) {
   EXPECT_EQ(print(pf).find("callable"), std::string::npos);
 }
 
+TEST(CallIr, AGuardOnADivisorDoesNotServeADivisionAfterACallThatReturnsANewOneAsItsSecondResult) {
+  // The guard says the divisor is not zero. A call with two results then writes
+  // its second into the divisor, and the callee may return zero there: the
+  // guard is about the old value, so the division is refused. The same function
+  // whose call writes another register is the control and is accepted.
+  for (bool redefines : {false, true}) {
+    SCOPED_TRACE(redefines ? "the call writes the divisor" : "the call writes another register");
+    B b("redefined-divisor", 2);
+    GRJIT_CallHooks h = all_hooks();
+    b.callable(h);
+    GRJIT_VReg x = b.param(GRJIT_TYPE_I64);
+    GRJIT_VReg d = b.param(GRJIT_TYPE_I64);
+    GRJIT_VReg c = b.reg(GRJIT_TYPE_I64), first = b.reg(GRJIT_TYPE_I64);
+    GRJIT_VReg other = b.reg(GRJIT_TYPE_I64), q = b.reg(GRJIT_TYPE_I64);
+    b.at(b.block());
+    const std::vector<GRJIT_FrameSlot> state = {grjit_frame_slot_vreg(x), grjit_frame_slot_vreg(d)};
+    b.cmp(GRJIT_CMP_NE, c, V(d), I(0));
+    b.guard(V(c), kExit, state);
+    const GRJIT_VReg results[] = {first, redefines ? d : other};
+    const GRJIT_Operand args[] = {V(x)};
+    ASSERT_EQ(grjit_builder_call_slot_results(b.b, results, 2,
+        reinterpret_cast<uintptr_t>(&g_entry_word), 99, args, 1, kId,
+        state.data(), state.size(), kExit, state.data(), state.size()), GRJIT_OK);
+    b.bin(GRJIT_OP_DIV_U, q, V(x), V(d));
+    b.ret(V(q));
+    Fn f(b.finish());
+    GRJIT_Result verified{};
+    const std::string why = verify_reason(f, &verified);
+    if (redefines) {
+      EXPECT_NE(verified, GRJIT_OK) << "a division by a register a call just wrote was accepted";
+    } else {
+      EXPECT_EQ(verified, GRJIT_OK) << why;
+    }
+  }
+}
+
+TEST(CallIr, ASlotCallWhoseEntryWordAddressIsTheImmediateZeroIsRefused) {
+  // Every other form refuses a null slot or code pointer; the operand form
+  // took an immediate zero, and the call then read the entry word at address 0.
+  for (uint64_t address : {uint64_t{0}, reinterpret_cast<uintptr_t>(&g_entry_word)}) {
+    SCOPED_TRACE(address == 0 ? "the address is zero" : "the address is a real slot");
+    B b("null-slot-operand", 1);
+    GRJIT_CallHooks h = all_hooks();
+    b.callable(h);
+    GRJIT_VReg x = b.param(GRJIT_TYPE_I64);
+    GRJIT_VReg r = b.reg(GRJIT_TYPE_I64);
+    b.at(b.block());
+    const std::vector<GRJIT_FrameSlot> state = {grjit_frame_slot_vreg(x)};
+    const GRJIT_Operand args[] = {V(x)};
+    ASSERT_EQ(grjit_builder_call_slot_operand_results_env(b.b, &r, 1, I(static_cast<int64_t>(address)), 99,
+        grjit_operand_none(), args, 1, kId, state.data(), state.size(), kExit, state.data(), state.size()),
+        GRJIT_OK);
+    b.ret(V(r));
+    Fn f(b.finish());
+    GRJIT_Result verified{};
+    const std::string why = verify_reason(f, &verified);
+    if (address == 0) {
+      EXPECT_NE(verified, GRJIT_OK) << "a call through the entry word at address zero was accepted";
+    } else {
+      EXPECT_EQ(verified, GRJIT_OK) << why;
+    }
+  }
+}
+
 GRJIT_TEST_MAIN()

@@ -824,8 +824,11 @@ static GRJIT_Result check_op(
             block, index, what, op->arg_count, max_args);
       }
       if (slot) {
+        /* The address of the entry word is an operand here, and an immediate
+         * of zero is no address: it is refused like the static form's zero and
+         * the code-pointer form's null, not read at run time. */
         const bool dynamic_slot = op->address == 0 &&
-            (op->a.kind == GRJIT_OPERAND_IMM ||
+            ((op->a.kind == GRJIT_OPERAND_IMM && op->a.imm != 0) ||
                 (op->a.kind == GRJIT_OPERAND_VREG && vreg_ok(v, op->a.vreg) &&
                     type_of(v, op->a.vreg) == GRJIT_TYPE_PTR));
         if ((!dynamic_slot && op->address == 0) ||
@@ -1746,6 +1749,22 @@ static GRJIT_Result check_one_trunc(Verify * v, const Partial * p, const GRJIT_O
 #endif
 }
 
+/* A register an operation writes: the facts the guard analysis holds about it
+ * end here, and the operation is its definition from now on. */
+typedef struct PartialDef {
+  Partial * p;
+  const GRJIT_Op * op;
+  size_t vreg_count;
+} PartialDef;
+
+static void note_partial_def(void * user, GRJIT_VReg r) {
+  PartialDef * note = user;
+  if (r != GRJIT_NO_VREG && r < note->vreg_count) {
+    note->p->tick[r] = note->p->now;
+    note->p->def[r] = note->op;
+  }
+}
+
 static GRJIT_Result check_partial(Verify * v) {
   const GRJIT_Function * f = v->f;
   bool any = false;
@@ -1801,11 +1820,11 @@ static GRJIT_Result check_partial(Verify * v) {
       } else if (op->kind == GRJIT_OP_GUARD) {
         record_guard(v, &p, &op->a);
       }
-      GRJIT_VReg d = grjit_op_def(op);
-      if (d != GRJIT_NO_VREG && d < n) {
-        p.tick[d] = p.now;
-        p.def[d] = op;
-      }
+      /* Every register the operation writes, not only the first: a call with
+       * several results can overwrite a divisor, a dividend or a truncation's
+       * source with its second. */
+      PartialDef note = {&p, op, n};
+      grjit_op_visit_defs(op, note_partial_def, &note);
     }
   }
   a->free_fn(a->ctx, words);
