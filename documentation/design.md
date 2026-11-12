@@ -625,7 +625,14 @@ included, has been rebuilt into its guest frame, `out[0]` is the cause, and `out
 holds no frame state. The internal entry follows, on a 16-byte boundary with a
 sixteen-byte tag before it: a word that holds a magic number and the function's
 parameter count, then the engine's token for the function (`grjit_builder_set_token`).
-The token is an opaque call target identity and may include a module or program
+The tag carries arities only, and the run-time check compares the arities and the token: the
+types of arguments and results are the front end's. The verifier checks that a result register
+exists and is defined once, and that every return of a function agrees in type, not that a
+caller's declared result type is the type the callee returns. A front end that declares a `REF`
+result for a callee that returns plain bits puts an arbitrary word in a stack-map slot, so a
+front end must declare what its callee returns: a language with typed signatures (Wasm) gets
+that from its validator, and one without (Tang) from its own function table. The token is an
+opaque call target identity and may include a module or program
 index. For deoptimization, `grjit_builder_set_guest_function` separately names
 the 32-bit guest function ID stored on the matching runtime-core guest frame.
 The verifier refuses a module-qualified token (one above 32 bits) on a function with
