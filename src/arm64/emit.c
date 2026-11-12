@@ -1598,8 +1598,8 @@ void grjit_a64_emit_epilogue(GRJIT_A64Emit * e) {
  * a/compiled.h), calls the internal entry, and turns its status into an exit. It uses no
  * callee-saved register but `x29`, which it restores from its own frame record (never from
  * `x29`, which is the marker by then). It clears the walk-start cell on the way out, so a
- * walk after the run reads no dead frames. Its frame is `sp` + 0 .. 32: `out` at 0, the
- * context at 8, `args` at 16. */
+ * walk after the run reads no dead frames. Its frame is `sp` + 0 .. 48: `out` at 0, the
+ * context at 8, the environment at 16, `args` at 24. */
 static void emit_adapter(GRJIT_A64Emit * e) {
   A * a = &e->as;
   const GRJIT_Function * f = e->c.f;
@@ -1781,9 +1781,11 @@ static void emit_internal_prologue(GRJIT_A64Emit * e) {
   if (f->param_count < ireg) {
     if (e->c.shape.has_result_buffer) store_slot(e, arg_regs_internal[f->param_count], GRJIT_SLOT_ARGS);
   } else {
-    grjit_a64_load(a, GRJIT_A64_MEM_X64, GRJIT_A64_X10, GRJIT_A64_FP,
-        (int32_t)(16 + 8 * (f->param_count - ireg)));
-    if (e->c.shape.has_result_buffer) store_slot(e, GRJIT_A64_X10, GRJIT_SLOT_ARGS);
+    if (e->c.shape.has_result_buffer) {
+      grjit_a64_load(a, GRJIT_A64_MEM_X64, GRJIT_A64_X10, GRJIT_A64_FP,
+          (int32_t)(16 + 8 * (f->param_count - ireg)));
+      store_slot(e, GRJIT_A64_X10, GRJIT_SLOT_ARGS);
+    }
   }
   for (size_t i = 0; i < f->param_count; i++) {
     if (i < ireg) {
@@ -1844,7 +1846,7 @@ static GRJIT_Result emit_pass(const GRJIT_Function * f, GRJIT_A64Emit * e,
     e->internal_offset = (uint32_t)grjit_a64_size(a);
     emit_internal_prologue(e);
   } else {
-    /* Prologue: frame record, frame, the three fixed slots, the entry hook, the
+    /* Prologue: frame record, frame, the four fixed slots, the entry hook, the
      * parameters. */
     grjit_a64_push_frame_record(a);
     grjit_a64_mov_sp(a, GRJIT_A64_FP, GRJIT_A64_SP);

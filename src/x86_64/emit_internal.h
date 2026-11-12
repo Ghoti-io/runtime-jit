@@ -107,8 +107,7 @@ typedef struct GRJIT_Emit {
   GRJIT_Label ret_propagate; ///< Returns what a callee returned, `rdx` and `rax` as they are.
   GRJIT_Label overflow;     ///< The prologue's native-stack exit.
   uint32_t internal_offset; ///< Where the internal entry is, after the adapter.
-  GRJIT_Features features;      ///< The optional CPU features the emitter may use (SysV only:
-                                ///< the Win64 flavour is given none).
+  GRJIT_Features features;      ///< The optional CPU features the emitter may use (both flavours).
   GRJIT_Features features_used; ///< The features whose arm was emitted, set at the point the arm
                                 ///< is chosen. A subset of `features`.
 } GRJIT_Emit;
@@ -130,8 +129,7 @@ typedef struct GRJIT_Emit {
  * The recorded sites come back sorted by offset. On failure `out` is still
  * freed by ::grjit_emit_free.
  *
- * `features` is the set the x86-64 SysV emitter may use (features.h); the Win64
- * flavour ignores it. The arm of each feature-dependent operation is chosen from it and
+ * `features` is the set the x86-64 emitter may use, SysV and Win64 alike (features.h). The arm of each feature-dependent operation is chosen from it and
  * nothing else, and the arms taken are recorded in `out->features_used`.
  *
  * @return ::GRJIT_OK, ::GRJIT_ERR_OOM, ::GRJIT_ERR_LIMIT (the byte cap) or

@@ -158,7 +158,7 @@ typedef struct GRJIT_ExceptionSitePending {
 #define GRJIT_ENTRY_TAG_BYTES 16u
 /** The most arguments an internal convention passes in registers, by target:
  *  `rdi, rsi, rdx, rcx, r8, r9` on x86-64 SysV, `x0`-`x7` on arm64. (Win64's,
- *  four, is story 7b's; the shape and the stack-argument area take the count as
+ *  four, is `GRJIT_WIN64_INTERNAL_REG_ARGS`; the shape and the stack-argument area take the count as
  *  a parameter so that each backend's own is the one used.) */
 #define GRJIT_SYSV_INTERNAL_REG_ARGS 6u
 #define GRJIT_ARM64_INTERNAL_REG_ARGS 8u

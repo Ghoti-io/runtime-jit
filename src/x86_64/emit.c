@@ -779,8 +779,11 @@ static void emit_tail_call(GRJIT_Emit * e, const GRJIT_Op * op) {
     for (size_t i = 0; i < n; i++) {
       grjit_asm_load64(a, IARG(e, i), GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, i));
     }
-    grjit_asm_lea(a, GRJIT_RSP, GRJIT_RBP, ra_new);
-    grjit_asm_load64(a, GRJIT_RBP, GRJIT_RSP, -8);
+    /* rsp one word short of the new return address, then `pop rbp` takes the link
+     * and lands rsp on it: nothing below the new rsp is read, so nothing there
+     * (no red zone on Win64) can be disturbed between the two. */
+    grjit_asm_lea(a, GRJIT_RSP, GRJIT_RBP, ra_new - 8);
+    grjit_asm_pop(a, GRJIT_RBP);
     grjit_asm_jmp_r(a, GRJIT_RAX);
     return;
   }
@@ -836,8 +839,8 @@ static void emit_tail_call(GRJIT_Emit * e, const GRJIT_Op * op) {
   for (size_t i = 0; i < n && i < ireg; i++) {
     grjit_asm_load64(a, IARG(e, i), GRJIT_RBP, GRJIT_ARGS_SLOT(regs, e->c.shape.area_slots, i));
   }
-  grjit_asm_lea(a, GRJIT_RSP, GRJIT_RBP, ra_new);
-  grjit_asm_load64(a, GRJIT_RBP, GRJIT_RSP, -8);
+  grjit_asm_lea(a, GRJIT_RSP, GRJIT_RBP, ra_new - 8);
+  grjit_asm_pop(a, GRJIT_RBP); /* the link, and rsp is the new return address's */
   grjit_asm_jmp_r(a, GRJIT_RAX);
 }
 
@@ -1699,9 +1702,13 @@ static void emit_float_cmp(GRJIT_Emit * e, const GRJIT_Op * op) {
     case GRJIT_CMP_LT:
       grjit_asm_setcc(a, GRJIT_COND_A, GRJIT_RAX);
       break;
-    default: /* GE, LE */
+    case GRJIT_CMP_GE:
+    case GRJIT_CMP_LE:
       grjit_asm_setcc(a, GRJIT_COND_AE, GRJIT_RAX);
       break;
+    default: /* the unsigned conditions: the verifier refuses them for floats */
+      e->c.error = GRJIT_ERR_INTERNAL;
+      return;
   }
   store_result(e, op->dst, GRJIT_RAX);
 }
@@ -2550,9 +2557,11 @@ static GRJIT_Result emit_callable(const GRJIT_Function * f, GRJIT_Emit * e,
   if (f->param_count < ireg) {
     if (e->c.shape.has_result_buffer) grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_ARGS, IARG(e, f->param_count));
   } else {
-    grjit_asm_load64(a, GRJIT_RAX, GRJIT_RBP,
-        (int32_t)(16 + 8 * (f->param_count - ireg)));
-    if (e->c.shape.has_result_buffer) grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_ARGS, GRJIT_RAX);
+    if (e->c.shape.has_result_buffer) {
+      grjit_asm_load64(a, GRJIT_RAX, GRJIT_RBP,
+          (int32_t)(16 + 8 * (f->param_count - ireg)));
+      grjit_asm_store64(a, GRJIT_RBP, GRJIT_SLOT_ARGS, GRJIT_RAX);
+    }
   }
   for (size_t i = 0; i < f->param_count; i++) {
     if (i < ireg) {
@@ -2620,7 +2629,7 @@ GRJIT_Result grjit_emit_function(const GRJIT_Function * f,
     goto finish;
   }
 
-  /* Prologue: frame, the three fixed slots, the entry hook, the parameters. */
+  /* Prologue: frame, the four fixed slots, the entry hook, the parameters. */
   uint32_t alloc = frame_bytes;
   if (win64) {
 #if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 6

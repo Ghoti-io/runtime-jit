@@ -50,7 +50,9 @@ typedef struct GRJIT_SiteLive {
 
 /** How many entries of the table an operation with a frame state makes: three
  *  for a call to another compiled function (the push of the callee's guest
- *  frame, the call, and the exit before it, in that order), one otherwise. */
+ *  frame, the call, and the exit before it, in that order), two for a tail call
+ *  (the hook and the exit) and for a native with no exit state, three for a
+ *  native with one, one otherwise. */
 size_t grjit_liveness_site_count(const GRJIT_Op * op);
 
 /** Every site of a function, in block then operation order. */

@@ -140,6 +140,9 @@ void grjit_emit_add_site_for(GRJIT_EmitCommon * c, uint32_t offset,
 
 void grjit_emit_add_exception_site(GRJIT_EmitCommon * c, uint32_t call_offset,
     uint32_t landing_block) {
+  if (c->error != GRJIT_OK) {
+    return;
+  }
   if (c->exception_site_count == c->exception_site_capacity) {
     size_t cap = c->exception_site_capacity == 0 ? 4 : c->exception_site_capacity * 2;
     GRJIT_ExceptionSitePending * p = c->allocator->realloc_fn(c->allocator->ctx,

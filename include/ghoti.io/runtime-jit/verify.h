@@ -51,7 +51,12 @@ extern "C" {
  * whose length is not the function's `interp_slot_count` or that names a
  * register the function does not have; a `GC_POINT` call or a `POLL` with no
  * frame state, or a `POLL` in a function with no poll helper; a derived
- * pointer that is malformed or live at a site where its base is not. A
+ * pointer that is malformed or live at a site where its base is not; a
+ * partial operation that would leave a result undefined; a call or tail call
+ * whose hooks, result list or environment are missing or inconsistent; an
+ * indexed memory access with a bad base, index or scale; a return list that
+ * disagrees with another's in arity or type; a catch landing that does not
+ * exist; a trap with an unknown kind. A
  * function over a cap of `limits`, or a call of more than 6 arguments, is
  * ::GRJIT_ERR_LIMIT.
  *

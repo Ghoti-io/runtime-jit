@@ -813,10 +813,12 @@ leaves the references the exit's rebuild reads updated
 the bytes of stack arguments the caller's and the callee's convention take (whole
 16-byte units), `R = ra + 8 + in_A`, where the original caller expects `rsp` after
 the return, and `ra' = R - 8 - in_T`. In order: load the context into `r10`, the
-return address into `r11` and the caller's saved base into `rax`; copy the callee's
+return address into `r11` and the caller's saved base into a register of its own (the
+link is also stored just below `ra'`, where the callee's prologue writes it); copy the callee's
 stack arguments from the arguments area to `[ra' + 8, R)` through `rdi`; store
 `r11` at `ra'`; load the register arguments from the area; load the entry from the
-entry-save slot into `r11`; `lea rsp, [ra']`; `mov rbp, rax`; `jmp r11`. The
+entry-save slot into `r11`; `lea rsp, [ra' - 8]`; `pop rbp` (the stored link, and `rsp` is
+`ra'`); `jmp r11`. The
 callee's prologue then finds exactly what a call leaves, and its `ret imm16`
 leaves `rsp` at `R`: that is why **the callee pops its own stack arguments** (above)
 and what makes the original caller's stack right whatever the widths in between.

@@ -387,7 +387,7 @@ TEST(Win64Calls, ACallPushesRoundedStackArgumentsJustBeforeTheCallAndTheCalleePo
 }
 
 TEST(Win64Calls, ATailCallMovesTheReturnAddressByTheDifferenceOfTheTwoStackAreas) {
-  /* `lea rsp, [rbp + ra']; mov rbp, [rsp - 8]; jmp rax` ends the replacement,
+  /* `lea rsp, [rbp + ra' - 8]; pop rbp; jmp rax` ends the replacement,
    * with `ra' = 8 + in_A - in_T` and the caller's saved frame link restored.
    * Read for every pair of caller parameters and callee arguments from 0 to 16: both sides of the
    * four-register boundary, the callee wider, narrower and equal. */
@@ -398,7 +398,7 @@ TEST(Win64Calls, ATailCallMovesTheReturnAddressByTheDifferenceOfTheTwoStackAreas
       Emit em(f);
       ASSERT_TRUE(em.ok());
       const int64_t want = 8 + int64_t{stack_args(params)} - int64_t{stack_args(args)};
-      const Bytes end = {0x48, 0x8B, 0x6C, 0x24, 0xF8, 0xFF, 0xE0}; // mov rbp, [rsp - 8] ; jmp rax
+      const Bytes end = {0x5D, 0xFF, 0xE0}; // pop rbp ; jmp rax, after `lea rsp, [rbp + ra' - 8]`
       size_t found = 0;
       for (size_t i = em.e.internal_offset; i + end.size() <= em.e.size; i++) {
         if (std::memcmp(em.e.bytes + i, end.data(), end.size()) != 0) {
@@ -417,7 +417,7 @@ TEST(Win64Calls, ATailCallMovesTheReturnAddressByTheDifferenceOfTheTwoStackAreas
           std::memcpy(&d32, em.e.bytes + i - 4, 4);
           disp = d32;
         }
-        EXPECT_EQ(disp, want) << "the callee's return address, and so its stack arguments' end, are where its ret imm16 needs them";
+        EXPECT_EQ(disp, want - 8) << "the callee's return address, and so its stack arguments' end, are where its ret imm16 needs them (the lea is one word short, and pop rbp lands rsp on it)";
       }
       EXPECT_EQ(found, 1u) << "one frame replacement";
       /* The copy goes through rcx and never rdi: a tail call to a callee with stack arguments

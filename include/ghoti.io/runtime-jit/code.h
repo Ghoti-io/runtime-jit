@@ -86,7 +86,7 @@ extern "C" {
 
 /** @brief How compiled code ended. */
 typedef enum GRJIT_Exit {
-  /** `RET` ran. The returned value, if any, is in `out[0]`. */
+  /** `RET` ran. The returned values, if any, are in `out[0..n)`, in order. */
   GRJIT_EXIT_RETURNED = 0,
   /** A guard failed. `out[0..interp_slot_count)` hold the guard's frame
    *  state (a register's value, a constant, zero for a dead slot) and

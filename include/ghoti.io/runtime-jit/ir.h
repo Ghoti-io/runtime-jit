@@ -230,7 +230,7 @@ typedef enum GRJIT_OperandKind {
 
 /** @brief An operand: a register or a 64-bit immediate. */
 typedef struct GRJIT_Operand {
-  GRJIT_OperandKind kind; ///< Which of the three.
+  GRJIT_OperandKind kind; ///< Which kind of operand it is (see ::GRJIT_OperandKind).
   GRJIT_VReg vreg;        ///< The register, for ::GRJIT_OPERAND_VREG.
   int64_t imm;            ///< The immediate, for ::GRJIT_OPERAND_IMM.
 } GRJIT_Operand;
@@ -600,8 +600,8 @@ typedef struct GRJIT_Op {
  *   tail call: the pop of the original call, when the callee returns, pops the
  *   guest frame this hook left on top.
  *
- * The struct has no size field, and `tail` was added at its end by story 5 of the calls
- * spec: a client compiled before it must be rebuilt (a C initialiser that names the
+ * The struct has no size field, and `tail` and then `catch_exception` were added at its
+ * end: a client compiled before them must be rebuilt (a C initialiser that names the
  * first four members leaves `tail` NULL, which only a function with no tail calls
  * accepts). Nothing but the fixture in this library's tests builds one yet, so the
  * layout is still free to change; a size field is the answer once an engine ships
