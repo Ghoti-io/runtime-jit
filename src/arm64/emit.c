@@ -407,6 +407,7 @@ static GRJIT_Label emit_dispatch(
       grjit_a64_mov_ri(a, GRJIT_A64_X16,
           (uint64_t)(uintptr_t)grjit_call_target_ok);
       grjit_a64_blr(a, GRJIT_A64_X16);
+      grjit_a64_mov32_rr(a, GRJIT_A64_X0, GRJIT_A64_X0);
       grjit_a64_cbz(a, GRJIT_A64_X0, exit);
       load_slot(e, GRJIT_A64_X16, entry_slot);
     }
@@ -550,6 +551,8 @@ static void emit_guest_call(GRJIT_A64Emit * e, const GRJIT_Op * op) {
     grjit_a64_mov_ri(a, GRJIT_A64_X3, op->landing_target);
     grjit_a64_mov_ri(a, GRJIT_A64_X16, (uint64_t)(uintptr_t)f->hooks.catch_exception);
     grjit_a64_blr(a, GRJIT_A64_X16);
+    /* The hook returns a uint32_t: the upper half of x0 is not defined. */
+    grjit_a64_mov32_rr(a, GRJIT_A64_X0, GRJIT_A64_X0);
     grjit_a64_cbnz(a, GRJIT_A64_X0, propagate_exception);
     grjit_a64_mov_ri(a, GRJIT_A64_X1, GRJIT_STATUS_RETURNED);
     grjit_a64_b(a, e->blocks[op->landing_target]);

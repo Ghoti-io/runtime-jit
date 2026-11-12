@@ -293,7 +293,12 @@ TEST(Calls, CatchCallMapKeepsPriorReferenceUsedByItsLanding) {
   });
 }
 
-TEST(Calls, CatchCallRoutesMatchingExceptionToLandingAndPropagatesUnmatched) {
+using CatchHook = uint32_t (*)(void *, void *, uint64_t, uint32_t);
+
+/* The catch scenario with the hook the caller is given: a handled exception
+ * lands, an unhandled one propagates, whatever the hook leaves above the
+ * 32 bits it returns. */
+void catch_call_case(CatchHook catch_hook) {
   if (!grjit_backend_calls_available()) GTEST_SKIP();
   Engine e;
   const int callee = e.reserve();
@@ -302,7 +307,7 @@ TEST(Calls, CatchCallRoutesMatchingExceptionToLandingAndPropagatesUnmatched) {
   hooks.pop = test_pop;
   hooks.compile = test_compile;
   hooks.deopt = test_deopt;
-  hooks.catch_exception = test_catch_exception;
+  hooks.catch_exception = catch_hook;
 
   B callee_builder("throwing-callee");
   callee_builder.callable(hooks, 0);
@@ -412,6 +417,54 @@ TEST(Calls, CatchCallRoutesMatchingExceptionToLandingAndPropagatesUnmatched) {
   EXPECT_EQ(grcore_entry_slot_clear(e.ctx, e.slots[static_cast<size_t>(callee)]), GRCORE_OK);
   EXPECT_EQ(grcore_code_unregister(e.ctx, start), GRCORE_OK);
 }
+
+TEST(Calls, CatchCallRoutesMatchingExceptionToLandingAndPropagatesUnmatched) {
+  catch_call_case(test_catch_exception);
+}
+
+#if defined(__x86_64__) || defined(__aarch64__)
+/* A hook is a C function returning a uint32_t, and the upper half of the
+ * return register is then undefined in both conventions. A compiled C++
+ * function leaves it zero, so the hook under test is a wrapper in assembly that
+ * calls the real one and sets a bit above the 32 returned: a zero comes back
+ * as 0x1'0000'0000, which is a zero to the caller only if it reads 32 bits. */
+extern "C" {
+__attribute__((used)) CatchHook ghoti_test_real_catch = nullptr;
+uint32_t ghoti_test_dirty_catch(void *, void *, uint64_t, uint32_t);
+}
+#if defined(__x86_64__)
+asm(R"(
+  .text
+  .globl ghoti_test_dirty_catch
+ghoti_test_dirty_catch:
+  sub $40, %rsp
+  call *ghoti_test_real_catch(%rip)
+  add $40, %rsp
+  movabs $0x100000000, %rcx
+  or %rcx, %rax
+  ret
+)");
+#else
+asm(R"(
+  .text
+  .globl ghoti_test_dirty_catch
+ghoti_test_dirty_catch:
+  stp x29, x30, [sp, #-16]!
+  adrp x16, ghoti_test_real_catch
+  ldr x16, [x16, :lo12:ghoti_test_real_catch]
+  blr x16
+  ldp x29, x30, [sp], #16
+  orr x0, x0, #0x100000000
+  ret
+)");
+#endif
+
+TEST(Calls, ACatchHookThatLeavesTheUpperHalfOfItsReturnDirtyIsStillReadAs32Bits) {
+  ghoti_test_real_catch = test_catch_exception;
+  catch_call_case(ghoti_test_dirty_catch);
+  ghoti_test_real_catch = nullptr;
+}
+#endif
 
 TEST(Calls, ATrapPropagatesThroughTheCallableInternalConvention) {
   CALLS_ONLY_WHERE_EMITTED();

@@ -457,6 +457,7 @@ static GRJIT_Label emit_dispatch(
       grjit_asm_mov_ri(a, GRJIT_RAX,
           (uint64_t)(uintptr_t)grjit_call_target_ok);
       grjit_asm_call_r(a, GRJIT_RAX);
+      grjit_asm_mov32_rr(a, GRJIT_RAX, GRJIT_RAX);
       grjit_asm_test_rr(a, GRJIT_RAX, GRJIT_RAX);
       grjit_asm_jcc(a, GRJIT_COND_E, exit);
       grjit_asm_load64(a, GRJIT_RAX, GRJIT_RBP, entry_slot);
@@ -603,6 +604,8 @@ static void emit_guest_call(GRJIT_Emit * e, const GRJIT_Op * op) {
     grjit_asm_mov_ri(a, C_ARG(e, 3), op->landing_target);
     grjit_asm_mov_ri(a, GRJIT_RAX, (uint64_t)(uintptr_t)f->hooks.catch_exception);
     grjit_asm_call_r(a, GRJIT_RAX);
+    /* The hook returns a uint32_t: the upper half of rax is not defined. */
+    grjit_asm_mov32_rr(a, GRJIT_RAX, GRJIT_RAX);
     grjit_asm_test_rr(a, GRJIT_RAX, GRJIT_RAX);
     grjit_asm_jcc(a, GRJIT_COND_NE, propagate_exception);
     grjit_asm_mov_ri(a, ISTATUS(e), GRJIT_STATUS_RETURNED);
