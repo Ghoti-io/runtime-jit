@@ -115,6 +115,41 @@ TEST(Compile, ReturnWritesEveryResultWordInOrder) {
   EXPECT_EQ(run.out[1], 0x7766554433221100ull);
 }
 
+/* A frame of several pages is touched a page at a time as it is allocated, on
+ * every target, so a one-page guard cannot be stepped over; the function still
+ * runs and every slot is where it was put. */
+TEST(Compile, AFrameOfSeveralPagesRunsAndKeepsEverySlot) {
+  GRJIT_REQUIRE_BACKEND();
+  JitWorld w;
+  B b("big-frame", 0);
+  b.at(b.block());
+  std::vector<GRJIT_VReg> regs;
+  for (int i = 0; i < 1300; i++) {  // ~10 KiB of slots
+    regs.push_back(b.reg());
+    b.cnst(regs.back(), 1000 + i);
+  }
+  const GRJIT_Operand values[] = {V(regs.front()), V(regs[650]), V(regs.back())};
+  ASSERT_EQ(grjit_builder_ret_multi(b.b, values, 3), GRJIT_OK);
+  Fn f(b.finish());
+  Compiled c(f, w.pages());
+  ASSERT_TRUE(c) << grjit_result_string(c.result);
+  const auto run = c.run(w.ctx);
+  ASSERT_EQ(run.exit, uint32_t{GRJIT_EXIT_RETURNED});
+  ASSERT_GE(run.out.size(), 3u);
+  EXPECT_EQ(run.out[0], 1000u);
+  EXPECT_EQ(run.out[1], 1650u);
+  EXPECT_EQ(run.out[2], 2299u);
+#if defined(__x86_64__)
+  // The probe is `test [r10], al` / `test [r11], al`: touched, never written.
+  const unsigned char * code = static_cast<const unsigned char *>(grjit_code_address(c.code));
+  size_t probes = 0;
+  for (size_t i = 0; i + 3 <= grjit_code_size(c.code); i++) {
+    probes += code[i] == 0x41 && code[i + 1] == 0x84 && (code[i + 2] == 0x02 || code[i + 2] == 0x03);
+  }
+  EXPECT_GE(probes, 1u) << "a frame past a page was allocated without touching its pages";
+#endif
+}
+
 TEST(Compile, CallableEntryPassesItsResultBufferToTheInternalReturn) {
   GRJIT_REQUIRE_BACKEND();
   JitWorld w;

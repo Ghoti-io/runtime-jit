@@ -360,7 +360,12 @@ which the assembler records (`regs_used`) and a test reads for 2000 generated
 functions, and which objdump confirms from the bytes. The parameters are loaded
 through `r10`.
 
-**Stack probes.** Windows commits a thread's stack a page at a time, by touching
+**Stack probes.** Every target probes a frame of more than a page, on both entries: a
+thread's stack is guarded by a page, and `sub rsp, N` (or `sub sp, sp, N`) that skips more
+than one page puts the first slot store beyond it, in whatever is mapped there, with no
+fault. The default cap allows a megabyte. arm64 touches each page with `ldr xzr, [x17]`,
+lowest address last, using `x16` and `x17`. What follows is the x86-64 form and why Windows
+needs it as well. Windows commits a thread's stack a page at a time, by touching
 the guard page just below what is committed, and an access further down than one
 page is a stack overflow. A frame of more than a page (`N + 8` over 4096; the
 default cap allows a megabyte) is therefore probed before `rsp` moves: a loop of

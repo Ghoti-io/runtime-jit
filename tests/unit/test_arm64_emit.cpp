@@ -74,6 +74,7 @@ Ran simulate(const Emitted & em, const GRJIT_Function * f, void * ctx,
 struct Prologue {
   uint64_t frame_bytes = 0;
   bool shape_ok = false;
+  bool probed = false; ///< A frame past a page is touched a page at a time first.
 };
 Prologue read_prologue(const Emitted & em) {
   Prologue p;
@@ -81,6 +82,13 @@ Prologue read_prologue(const Emitted & em) {
     return p;
   }
   size_t i = 2;
+  if (em.word(i) == 0x910003F1u) { // mov x17, sp: the probe, to its last load, `ldr xzr, [x16]`
+    p.probed = true;
+    while (i < em.words() && em.word(i) != 0xF940021Fu) {
+      i++;
+    }
+    i++;
+  }
   while (i < em.words() && (em.word(i) & 0xFF8003FFu) == 0xD10003FFu) {
     uint64_t imm = (em.word(i) >> 10) & 0xFFFu;
     p.frame_bytes += (em.word(i) & (1u << 22)) ? imm << 12 : imm;
@@ -131,6 +139,7 @@ TEST(Arm64Frame, ThePrologueIsTheFrameRecordThenTheFrameAndTheFrameIsAMultipleOf
     // The three fixed slots, one per register and the accumulator, rounded up.
     size_t slots = n + 1 + GRJIT_FIXED_SLOTS;
     EXPECT_EQ(p.frame_bytes, (slots * 8 + 15) / 16 * 16) << n;
+    EXPECT_EQ(p.probed, p.frame_bytes + 16 > 4096) << n << ": a frame past a page is probed, a smaller one is not";
     EXPECT_EQ(p.frame_bytes % 16, 0u) << n;
     EXPECT_EQ(em.e.meta.meta.frame_bytes, p.frame_bytes) << n;
   }

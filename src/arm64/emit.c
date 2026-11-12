@@ -1730,6 +1730,29 @@ static void emit_pending(GRJIT_A64Emit * e) {
   }
 }
 
+/* A frame past a page is touched a page at a time, lowest address last, before `sp` moves
+ * into it, so a guard page of one page cannot be stepped over (the loads read and discard;
+ * nothing is written). `x16` is the lowest address and `x17` the cursor; both are free in
+ * every prologue, the arguments being in `x0`-`x8` and `x9`. */
+static void emit_stack_probe(GRJIT_A64Emit * e, uint32_t alloc) {
+  A * a = &e->as;
+  if ((uint64_t)alloc + 16u <= 4096u) {
+    return;
+  }
+  GRJIT_Label loop = grjit_a64_label(a);
+  GRJIT_Label tail = grjit_a64_label(a);
+  grjit_a64_mov_sp(a, GRJIT_A64_X17, GRJIT_A64_SP);
+  lea(e, GRJIT_A64_X16, GRJIT_A64_SP, -(int64_t)alloc);
+  grjit_a64_bind(a, loop);
+  grjit_a64_sub_imm(a, GRJIT_A64_X17, GRJIT_A64_X17, 1, true);
+  grjit_a64_cmp(a, GRJIT_A64_X17, GRJIT_A64_X16);
+  grjit_a64_bcond(a, GRJIT_A64_LS, tail);
+  grjit_a64_load(a, GRJIT_A64_MEM_X64, GRJIT_A64_XZR, GRJIT_A64_X17, 0);
+  grjit_a64_b(a, loop);
+  grjit_a64_bind(a, tail);
+  grjit_a64_load(a, GRJIT_A64_MEM_X64, GRJIT_A64_XZR, GRJIT_A64_X16, 0);
+}
+
 /* The internal entry of a callable function: a frame record, the native-stack check (in bytes,
  * AD-28: the lowest address this frame will use against the context's limit word, `x9` holding
  * the context; below it, the chain deopts at the call site and the interpreter continues), the
@@ -1751,6 +1774,7 @@ static void emit_internal_prologue(GRJIT_A64Emit * e) {
   grjit_a64_load(a, GRJIT_A64_MEM_X64, GRJIT_A64_X15, GRJIT_A64_X9, (int32_t)e->c.native_limit_offset);
   grjit_a64_cmp(a, GRJIT_A64_X16, GRJIT_A64_X15);
   grjit_a64_bcond(a, GRJIT_A64_LO, e->overflow);
+  emit_stack_probe(e, alloc);
   grjit_a64_sub_sp(a, alloc);
   store_slot(e, GRJIT_A64_X9, GRJIT_SLOT_CTX);
   store_slot(e, GRJIT_A64_X8, GRJIT_SLOT_ENV);
@@ -1824,6 +1848,7 @@ static GRJIT_Result emit_pass(const GRJIT_Function * f, GRJIT_A64Emit * e,
      * parameters. */
     grjit_a64_push_frame_record(a);
     grjit_a64_mov_sp(a, GRJIT_A64_FP, GRJIT_A64_SP);
+    emit_stack_probe(e, e->c.frame_bytes);
     grjit_a64_sub_sp(a, e->c.frame_bytes);
     store_slot(e, GRJIT_A64_X0, GRJIT_SLOT_CTX);
     store_slot(e, GRJIT_A64_X1, GRJIT_SLOT_ENV);

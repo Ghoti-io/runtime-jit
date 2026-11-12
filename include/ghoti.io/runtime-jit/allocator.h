@@ -51,7 +51,8 @@ extern "C" {
  *
  * All function pointers must be non-NULL. `calloc_fn` must treat overflow of
  * `nitems * size` as failure. A zero-size request returns a usable non-NULL
- * pointer, so NULL always means failure.
+ * pointer, so NULL always means failure. `free_fn` is, like free(), called with
+ * NULL when there is nothing to release, and must accept it.
  */
 typedef GCU_Allocator GRJIT_Allocator;
 

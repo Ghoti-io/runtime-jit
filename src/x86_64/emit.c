@@ -2507,9 +2507,11 @@ static GRJIT_Result emit_callable(const GRJIT_Function * f, GRJIT_Emit * e,
 #else
     alloc += GRJIT_WIN64_OUTGOING;
 #endif
-    if (alloc > (uint32_t)INT32_MAX - GRJIT_WIN64_PAGE) {
-      return GRJIT_ERR_LIMIT;
-    }
+  }
+  /* A frame is probed a page at a time on every target, so the displacements of
+   * the probe, like the allocation, are signed 32-bit fields. */
+  if (alloc > (uint32_t)INT32_MAX - GRJIT_WIN64_PAGE) {
+    return GRJIT_ERR_LIMIT;
   }
   grjit_asm_push(a, GRJIT_RBP);
   e->prologue.push_end = (uint32_t)grjit_asm_size(a);
@@ -2527,7 +2529,7 @@ static GRJIT_Result emit_callable(const GRJIT_Function * f, GRJIT_Emit * e,
 #endif
   grjit_asm_cmp_rm(a, GRJIT_RAX, ICTX(e), (int32_t)e->c.native_limit_offset);
   grjit_asm_jcc(a, GRJIT_COND_B, e->overflow);
-  if (e->win64 && (uint64_t)alloc + 8 > GRJIT_WIN64_PAGE) {
+  if ((uint64_t)alloc + 8 > GRJIT_WIN64_PAGE) {
     /* A frame of a page or more is probed a page at a time, as a plain function's
      * is; r10 is the context and the argument registers are live, and r11 carries the
      * environment into the body, so it is kept in xmm0 (volatile, and no argument of the
@@ -2628,7 +2630,7 @@ GRJIT_Result grjit_emit_function(const GRJIT_Function * f,
     alloc += GRJIT_WIN64_OUTGOING;
 #endif
   }
-  if (win64 && alloc > (uint32_t)INT32_MAX - GRJIT_WIN64_PAGE) {
+  if (alloc > (uint32_t)INT32_MAX - GRJIT_WIN64_PAGE) {
     /* The allocation and the probe displacements are signed 32-bit fields of
      * the encodings; a cap raised past 2 GiB is a limit, not a wrapped value. */
     return GRJIT_ERR_LIMIT;
@@ -2637,7 +2639,9 @@ GRJIT_Result grjit_emit_function(const GRJIT_Function * f,
   e->prologue.push_end = (uint32_t)grjit_asm_size(a);
   grjit_asm_mov_rr(a, GRJIT_RBP, GRJIT_RSP);
   e->prologue.setfp_end = (uint32_t)grjit_asm_size(a);
-  if (win64 && (uint64_t)alloc + 8 > GRJIT_WIN64_PAGE) {
+  if ((uint64_t)alloc + 8 > GRJIT_WIN64_PAGE) {
+    /* A frame past a page would step over a one-page guard: it is touched a
+     * page at a time, on every target and not only where the platform needs it. */
     emit_stack_probe(e, alloc, GRJIT_R10, GRJIT_R11);
   }
   grjit_asm_sub_rsp(a, alloc);
