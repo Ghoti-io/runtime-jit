@@ -26,8 +26,8 @@
  *
  * `runtime-jit` has no options object: compiling is a call, not a long-lived
  * object, so its configuration is the struct the caller fills for that call
- * (::GRJIT_CompileOptions) and this one, with a `_default()` as CONVENTIONS.md
- * section 5 gives every library that reads untrusted structure.
+ * (::GRJIT_CompileOptions) and this one, with a `_default()`, as every Ghoti
+ * library that reads untrusted structure gives its caller.
  */
 
 #ifndef GHOTI_IO_GRJIT_LIMITS_H
