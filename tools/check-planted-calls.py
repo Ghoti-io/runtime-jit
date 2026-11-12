@@ -193,8 +193,8 @@ M = [
     # The edits of runtime-jit's own code.
     ("a call through a pointer does not test the status for DEOPTED", "jit",
      "src/x86_64/emit.c",
-     "  grjit_asm_test_rr(a, ISTATUS(e), ISTATUS(e));\n  grjit_asm_jcc(a, GRJIT_COND_NE, e->ret_propagate);\n  if (op->result_count != 0) {\n    if (dst_is_i32_reg(e, op->dst)) {",
-     "  if (op->kind == GRJIT_OP_CALL_SLOT) {\n    grjit_asm_test_rr(a, ISTATUS(e), ISTATUS(e));\n    grjit_asm_jcc(a, GRJIT_COND_NE, e->ret_propagate);\n  }\n  if (op->result_count != 0) {\n    if (dst_is_i32_reg(e, op->results[0])) {"),
+     "    GRJIT_Label returned = grjit_asm_label(a);\n    grjit_asm_test_rr(a, ISTATUS(e), ISTATUS(e));\n    grjit_asm_jcc(a, GRJIT_COND_E, returned);",
+     "    GRJIT_Label returned = grjit_asm_label(a);\n    if (op->kind == GRJIT_OP_CALL_SLOT) {\n      grjit_asm_test_rr(a, ISTATUS(e), ISTATUS(e));\n      grjit_asm_jcc(a, GRJIT_COND_E, returned);\n    } else {\n      grjit_asm_jmp(a, returned);\n    }"),
     ("a call through a pointer leaves the references out of its call site's stack map", "jit",
      "src/backend/metadata.c",
      "        GRCORE_CodeLocation l = slot_location(v, info->type);\n#if defined(GRJIT_TEST_PLANT_BUG) && GRJIT_TEST_PLANT_BUG == 2",

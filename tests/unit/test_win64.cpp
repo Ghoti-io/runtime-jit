@@ -327,14 +327,18 @@ TEST(Win64Shape, AFrameOverThePageSizeIsProbedADownwardsPageAtATimeBeforeRspMove
   EXPECT_EQ(em.e.prologue.setfp_end, 4u);
   EXPECT_EQ(em.e.prologue.alloc_end, 4 + probe.size());
   EXPECT_LE(em.e.prologue.alloc_end, 255u) << "SizeOfProlog is a byte";
-  /* A frame that fits the page is not probed, and neither is SysV's. */
+  /* A frame that fits the page is not probed. SysV's large frame is, with the same loop: a
+   * thread's one-page guard is no more forgiving there. */
   Fn modest(frame_of(100));
   Emit sm(modest);
   ASSERT_TRUE(sm.ok());
   EXPECT_EQ(sm.count({0x4D, 0x8D, 0x9B, 0x00, 0xF0, 0xFF, 0xFF}), 0u);
   Emit sysv(large, GRJIT_ARCH_X86_64);
   ASSERT_TRUE(sysv.ok());
-  EXPECT_EQ(sysv.count({0x4D, 0x8D, 0x9B, 0x00, 0xF0, 0xFF, 0xFF}), 0u);
+  EXPECT_EQ(sysv.count({0x4D, 0x8D, 0x9B, 0x00, 0xF0, 0xFF, 0xFF}), 1u);
+  Emit sysv_modest(modest, GRJIT_ARCH_X86_64);
+  ASSERT_TRUE(sysv_modest.ok());
+  EXPECT_EQ(sysv_modest.count({0x4D, 0x8D, 0x9B, 0x00, 0xF0, 0xFF, 0xFF}), 0u);
 }
 
 TEST(Win64Shape, TheProbeThresholdIsExactlyWhereTheFramePlusAReturnAddressPassesAPage) {

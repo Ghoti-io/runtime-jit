@@ -309,8 +309,8 @@ TEST(Pin, TheX86_64CodeOfCallableFunctionsWithCallsAndNoTailCallIsByteForByteWha
   EXPECT_EQ(pointer_calls, 8u * 7u * 2u * 2u) << "a call through a pointer per function of forms 1 and 2";
   std::printf("pin x86-64 callable: %llu bytes, hash %016llx\n",
       static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
-  EXPECT_EQ(pin.hash, 0xd12d42b11d874229ull) << pin.bytes << " bytes";
-  EXPECT_EQ(pin.bytes, 310092u);
+  EXPECT_EQ(pin.hash, 0x20a85dc0d491108aull) << pin.bytes << " bytes";
+  EXPECT_EQ(pin.bytes, 321516u);
 }
 
 TEST(Pin, TheX86_64CodeOfCallableFunctionsWithCallsToNativesIsByteForByteWhatWasRecorded) {
@@ -323,8 +323,8 @@ TEST(Pin, TheX86_64CodeOfCallableFunctionsWithCallsToNativesIsByteForByteWhatWas
       static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
   EXPECT_EQ(functions, 4u * 8u * 2u * 4u * 2u);
   EXPECT_TRUE(emitted) << "Win64 emits every one of them, the same bytes twice";
-  EXPECT_EQ(pin.hash, 0x712bc024b9ce766cull) << pin.bytes << " bytes";
-  EXPECT_EQ(pin.bytes, 382644u);
+  EXPECT_EQ(pin.hash, 0xe1e20f79c7f855c1ull) << pin.bytes << " bytes";
+  EXPECT_EQ(pin.bytes, 382132u);
 }
 
 TEST(Pin, TheArm64CodeOfTheGeneratedFunctionsIsByteForByteWhatWasRecorded) {
@@ -349,8 +349,8 @@ TEST(Pin, TheArm64CodeOfCallableFunctionsWithCallsIsByteForByteWhatWasRecorded) 
   std::printf("pin arm64 callable: %u functions, %llu bytes, hash %016llx\n", functions,
       static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
   EXPECT_EQ(pin.bytes % 4, 0u);
-  EXPECT_EQ(pin.hash, 0xec503dfce5b4b535ull) << pin.bytes << " bytes";
-  EXPECT_EQ(pin.bytes, 283796u);
+  EXPECT_EQ(pin.hash, 0xf9c783f71cfe606cull) << pin.bytes << " bytes";
+  EXPECT_EQ(pin.bytes, 295556u);
 }
 
 /* An entry hook is an address the emitter is handed and never calls here: a constant that is not any
@@ -368,8 +368,8 @@ TEST(Pin, TheX86_64CodeOfCallableFunctionsWithAnEntryHookIsByteForByteWhatWasRec
   EXPECT_TRUE(emitted) << "Win64 emits every one of them, the same bytes twice";
   std::printf("pin x86-64 callable with an entry hook: %llu bytes, hash %016llx\n",
       static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
-  EXPECT_EQ(pin.hash, 0xc3f8596866548575ull) << pin.bytes << " bytes";
-  EXPECT_EQ(pin.bytes, 316812u);
+  EXPECT_EQ(pin.hash, 0xe4870dc90b8e9d32ull) << pin.bytes << " bytes";
+  EXPECT_EQ(pin.bytes, 328236u);
 }
 
 TEST(Pin, TheArm64CodeOfCallableFunctionsWithAnEntryHookIsByteForByteWhatWasRecorded) {
@@ -381,8 +381,8 @@ TEST(Pin, TheArm64CodeOfCallableFunctionsWithAnEntryHookIsByteForByteWhatWasReco
   EXPECT_TRUE(emitted) << "Win64 emits every one of them, the same bytes twice";
   std::printf("pin arm64 callable with an entry hook: %llu bytes, hash %016llx\n",
       static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
-  EXPECT_EQ(pin.hash, 0x6a676453293d80a5ull) << pin.bytes << " bytes";
-  EXPECT_EQ(pin.bytes, 291188u);
+  EXPECT_EQ(pin.hash, 0x2c90198dee69c3e0ull) << pin.bytes << " bytes";
+  EXPECT_EQ(pin.bytes, 302948u);
 }
 
 TEST(Pin, TheArm64CodeOfCallableFunctionsWithTailCallsIsByteForByteWhatWasRecorded) {
@@ -398,8 +398,8 @@ TEST(Pin, TheArm64CodeOfCallableFunctionsWithTailCallsIsByteForByteWhatWasRecord
   std::printf("pin arm64 tail calls: %u functions, %llu bytes, hash %016llx\n", functions,
       static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
   EXPECT_EQ(pin.bytes % 4, 0u);
-  EXPECT_EQ(pin.hash, 0x425eb0ffb029f264ull) << pin.bytes << " bytes";
-  EXPECT_EQ(pin.bytes, 119352u);
+  EXPECT_EQ(pin.hash, 0x92add1380b639b5bull) << pin.bytes << " bytes";
+  EXPECT_EQ(pin.bytes, 119184u);
 }
 
 TEST(Pin, TheArm64CodeOfCallableFunctionsWithCallsToNativesIsByteForByteWhatWasRecorded) {
@@ -439,8 +439,8 @@ TEST(Pin, TheWin64CodeOfCallableFunctionsWithCallsIsByteForByteWhatWasRecorded) 
   EXPECT_EQ(pointer_calls, 8u * 7u * 2u * 2u) << "a call through a pointer per function of forms 1 and 2";
   std::printf("pin win64 callable: %u functions, %llu bytes, hash %016llx\n", functions,
       static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
-  EXPECT_EQ(pin.hash, 0xb7ad98e4a7913cc5ull) << pin.bytes << " bytes";
-  EXPECT_EQ(pin.bytes, 323399u);
+  EXPECT_EQ(pin.hash, 0xba9687ba07abde3aull) << pin.bytes << " bytes";
+  EXPECT_EQ(pin.bytes, 334823u);
 }
 
 TEST(Pin, TheWin64CodeOfCallableFunctionsWithCallsToNativesIsByteForByteWhatWasRecorded) {
@@ -453,8 +453,8 @@ TEST(Pin, TheWin64CodeOfCallableFunctionsWithCallsToNativesIsByteForByteWhatWasR
       static_cast<unsigned long long>(pin.bytes), static_cast<unsigned long long>(pin.hash));
   EXPECT_EQ(functions, 4u * 8u * 2u * 4u * 2u);
   EXPECT_TRUE(emitted);
-  EXPECT_EQ(pin.hash, 0x73e133fc3359bfd4ull) << pin.bytes << " bytes";
-  EXPECT_EQ(pin.bytes, 401974u);
+  EXPECT_EQ(pin.hash, 0x8c8f461788c46b10ull) << pin.bytes << " bytes";
+  EXPECT_EQ(pin.bytes, 401462u);
 }
 
 TEST(Pin, WhatGrjitCompileMapsIsWhatTheEmitterProducedForTheNativeInstructionSet) {
