@@ -533,7 +533,7 @@ typedef struct GRJIT_Op {
  * @brief The engine's hooks around a call to another compiled function, and
  *   for the deoptimization of a chain (AD-28).
  *
- * All four are C functions called through the C ABI with the context pointer
+ * All six are C functions called through the C ABI with the context pointer
  * the code was called with, from compiled code. None of them calls the
  * interpreter; the interpreter never runs as a C callee of compiled code.
  *
@@ -552,7 +552,13 @@ typedef struct GRJIT_Op {
  *   refuse a callee with a different arity because the internal ABI uses this
  *   count to determine whether a result buffer is present.
  * - `pop` runs after the callee returned normally, and pops its guest frame and
- *   gives back the reservation it extended. It cannot refuse: the call is
+ *   gives back the reservation it extended. It also runs at a call site with no
+ *   catch landing when the callee returned an exception (`EXCEPTION`): the
+ *   callee's guest frame is on the guest stack until something pops it, and the
+ *   `catch_exception` of a site further out pops exactly one frame, the one of
+ *   the call that site made. So each site an exception passes through pops its
+ *   own callee's frame, and the status goes on as `EXCEPTION` with zero as the
+ *   value. It cannot refuse: the call is
  *   complete, and no frame state describes "complete but not popped". It must not
  *   reach a GC point.
  * - `compile` runs when a call through an entry slot finds the slot empty. It
@@ -619,7 +625,10 @@ typedef struct GRJIT_CallHooks {
    * engine-owned pending exception against this caller environment's landing
    * metadata, and pops the just-returned callee guest frame exactly once on
    * either outcome. Zero handles and enters `landing_block`; nonzero propagates
-   * to the next outer compiled boundary. It does not unwind native/JIT frames. */
+   * to the next outer compiled boundary, with zero as the value (never the
+   * hook's return). It does not unwind native/JIT frames. Like `pop`, it must
+   * not reach a GC point or poll: the call site has recorded no stack map for
+   * it, and the walk cell still describes the callee that returned. */
   uint32_t (*catch_exception)(void * context, void * caller_environment,
       uint64_t callee, uint32_t landing_block);
 } GRJIT_CallHooks;

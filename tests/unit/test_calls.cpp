@@ -65,8 +65,9 @@ uint32_t catch_calls = 0;
 uint64_t catch_callee_seen = 0;
 uint32_t catch_landing_seen = GRJIT_NO_BLOCK;
 void * catch_environment_seen = nullptr;
-uint32_t test_push(void *, void *, uint64_t, const uint64_t *, uint64_t, uint64_t) { return 0; }
-void test_pop(void *) {}
+unsigned push_calls = 0, pop_calls = 0;
+uint32_t test_push(void *, void *, uint64_t, const uint64_t *, uint64_t, uint64_t) { push_calls++; return 0; }
+void test_pop(void *) { pop_calls++; }
 uint32_t test_compile(void *, uint64_t) { return 0; }
 uint32_t test_deopt(void *, uint64_t) { return 0; }
 uint32_t test_catch_exception(void *, void * environment, uint64_t callee, uint32_t landing) {
@@ -416,6 +417,94 @@ void catch_call_case(CatchHook catch_hook) {
   EXPECT_EQ(dynamic_propagated.exit, GRJIT_EXIT_EXCEPTION);
   EXPECT_EQ(grcore_entry_slot_clear(e.ctx, e.slots[static_cast<size_t>(callee)]), GRCORE_OK);
   EXPECT_EQ(grcore_code_unregister(e.ctx, start), GRCORE_OK);
+}
+
+/* A (catching) calls B (a plain call) calls C (which rethrows). Every call
+ * pushed a guest frame before it was made; the catching site's hook pops one,
+ * so the frame of the call B made must be popped by B's own site as the
+ * exception passes through it, or it stays on the guest stack above A's. */
+TEST(Calls, AnExceptionPassingThroughAPlainCallSitePopsTheFrameOfItsCallee) {
+  if (!grjit_backend_calls_available()) GTEST_SKIP();
+  Engine e;
+  const int thrower = e.reserve();
+  const int middle = e.reserve();
+  GRJIT_CallHooks hooks{};
+  hooks.push = test_push;
+  hooks.pop = test_pop;
+  hooks.compile = test_compile;
+  hooks.deopt = test_deopt;
+  hooks.catch_exception = test_catch_exception;
+
+  auto install = [&](int token, B & builder) {
+    Fn fn(builder.finish());
+    Compiled code(fn.f, e.pages());
+    ASSERT_TRUE(code) << grjit_result_string(code.result);
+    GRCORE_Code * handle = nullptr;
+    ASSERT_EQ(grcore_code_create(nullptr, code.code,
+        [](void * p) { grjit_code_destroy(static_cast<GRJIT_Code *>(p)); }, &handle), GRCORE_OK);
+    const uintptr_t start = reinterpret_cast<uintptr_t>(grjit_code_address(code.code));
+    ASSERT_EQ(grcore_code_register(e.ctx, e.engine, handle, start,
+        grjit_code_size(code.code), grjit_code_meta(code.code)), GRCORE_OK);
+    ASSERT_EQ(grjit_entry_slot_install(e.ctx, e.slots[static_cast<size_t>(token)], handle,
+        code.code, static_cast<uint64_t>(token), 0), GRJIT_OK);
+    grcore_code_release(handle);
+    code.code = nullptr;
+  };
+  B thrower_builder("thrower");
+  thrower_builder.callable(hooks, 0);
+  ASSERT_EQ(grjit_builder_set_token(thrower_builder.b, static_cast<uint64_t>(thrower)), GRJIT_OK);
+  ASSERT_EQ(grjit_builder_set_guest_function(thrower_builder.b,
+      static_cast<uint32_t>(thrower)), GRJIT_OK);
+  thrower_builder.at(thrower_builder.block());
+  ASSERT_EQ(grjit_builder_rethrow(thrower_builder.b), GRJIT_OK);
+  install(thrower, thrower_builder);
+
+  const GRCORE_PollIdentity id{3, 7, 0};
+  B middle_builder("plain-middle");
+  middle_builder.callable(hooks, 0);
+  ASSERT_EQ(grjit_builder_set_token(middle_builder.b, static_cast<uint64_t>(middle)), GRJIT_OK);
+  ASSERT_EQ(grjit_builder_set_guest_function(middle_builder.b,
+      static_cast<uint32_t>(middle)), GRJIT_OK);
+  middle_builder.at(middle_builder.block());
+  ASSERT_EQ(grjit_builder_call_slot_results_env(middle_builder.b, nullptr, 0,
+      reinterpret_cast<uintptr_t>(e.slots[static_cast<size_t>(thrower)]),
+      static_cast<uint64_t>(thrower), I(0), nullptr, 0, id, nullptr, 0, id, nullptr, 0),
+      GRJIT_OK);
+  middle_builder.ret();
+  install(middle, middle_builder);
+
+  B caller_builder("catching-caller-of-a-plain-call");
+  caller_builder.callable(hooks);
+  const GRJIT_VReg env = caller_builder.param(GRJIT_TYPE_PTR);
+  const auto body = caller_builder.block();
+  const auto landing = caller_builder.block();
+  const auto value = caller_builder.reg();
+  caller_builder.at(body);
+  ASSERT_EQ(grjit_builder_set_guest_function(caller_builder.b,
+      static_cast<uint32_t>(id.function)), GRJIT_OK);
+  ASSERT_EQ(grjit_builder_call_slot_catch_results_env(caller_builder.b, nullptr, 0,
+      reinterpret_cast<uintptr_t>(e.slots[static_cast<size_t>(middle)]),
+      static_cast<uint64_t>(middle), V(env), nullptr, 0, id, nullptr, 0, id, nullptr, 0,
+      landing), GRJIT_OK);
+  ASSERT_EQ(grjit_builder_const(caller_builder.b, value, 10), GRJIT_OK);
+  ASSERT_EQ(grjit_builder_ret(caller_builder.b, V(value)), GRJIT_OK);
+  caller_builder.at(landing);
+  ASSERT_EQ(grjit_builder_const(caller_builder.b, value, 77), GRJIT_OK);
+  ASSERT_EQ(grjit_builder_ret(caller_builder.b, V(value)), GRJIT_OK);
+  Fn caller_fn(caller_builder.finish());
+  Compiled caller_code(caller_fn.f, e.pages());
+  ASSERT_TRUE(caller_code) << grjit_result_string(caller_code.result);
+
+  int environment = 0;
+  push_calls = pop_calls = 0;
+  catch_calls = 0;
+  catch_accept = true;
+  auto caught = caller_code.run(e.ctx, &environment, {});
+  ASSERT_EQ(caught.exit, GRJIT_EXIT_RETURNED);
+  ASSERT_EQ(caught.out[0], 77u);
+  EXPECT_EQ(push_calls, 2u) << "A pushed for B, and B for C";
+  EXPECT_EQ(catch_calls, 1u) << "the hook pops the frame of the call A made (B's)";
+  EXPECT_EQ(pop_calls, 1u) << "B's site pops C's frame as the exception passes";
 }
 
 TEST(Calls, CatchCallRoutesMatchingExceptionToLandingAndPropagatesUnmatched) {

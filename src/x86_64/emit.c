@@ -612,11 +612,32 @@ static void emit_guest_call(GRJIT_Emit * e, const GRJIT_Op * op) {
     grjit_asm_jmp(a, e->blocks[op->landing_target]);
     grjit_asm_bind(a, propagate_exception);
     grjit_asm_mov_ri(a, ISTATUS(e), GRJIT_STATUS_EXCEPTION);
+    grjit_asm_mov_ri(a, GRJIT_RAX, 0); /* not the hook's value: RETHROW's zero */
     grjit_asm_jmp(a, e->ret_propagate);
     grjit_asm_bind(a, not_exception);
   }
-  grjit_asm_test_rr(a, ISTATUS(e), ISTATUS(e));
-  grjit_asm_jcc(a, GRJIT_COND_NE, e->ret_propagate);
+  if (op->landing_target == GRJIT_NO_BLOCK) {
+    /* No landing here: an exception the callee returned goes on to this
+     * function's caller, but the callee's guest frame is on the guest stack
+     * until something pops it, and the catch hook of a site further out pops
+     * exactly one frame. This site pops its own callee's, then propagates (rax
+     * is zero, as RETHROW leaves it). */
+    GRJIT_Label returned = grjit_asm_label(a);
+    grjit_asm_test_rr(a, ISTATUS(e), ISTATUS(e));
+    grjit_asm_jcc(a, GRJIT_COND_E, returned);
+    grjit_asm_cmp_ri(a, ISTATUS(e), (int32_t)GRJIT_STATUS_EXCEPTION);
+    grjit_asm_jcc(a, GRJIT_COND_NE, e->ret_propagate);
+    grjit_asm_load64(a, C_ARG(e, 0), GRJIT_RBP, GRJIT_SLOT_CTX);
+    grjit_asm_mov_ri(a, GRJIT_RAX, (uint64_t)(uintptr_t)f->hooks.pop);
+    grjit_asm_call_r(a, GRJIT_RAX);
+    grjit_asm_mov_ri(a, ISTATUS(e), GRJIT_STATUS_EXCEPTION);
+    grjit_asm_mov_ri(a, GRJIT_RAX, 0);
+    grjit_asm_jmp(a, e->ret_propagate);
+    grjit_asm_bind(a, returned);
+  } else {
+    grjit_asm_test_rr(a, ISTATUS(e), ISTATUS(e));
+    grjit_asm_jcc(a, GRJIT_COND_NE, e->ret_propagate);
+  }
   if (op->result_count != 0) {
     if (dst_is_i32_reg(e, op->dst)) {
       grjit_asm_mov32_rr(a, GRJIT_RAX, GRJIT_RAX); /* the callee returned a word; an i32 is its low half */

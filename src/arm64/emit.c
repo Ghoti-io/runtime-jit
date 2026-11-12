@@ -558,10 +558,27 @@ static void emit_guest_call(GRJIT_A64Emit * e, const GRJIT_Op * op) {
     grjit_a64_b(a, e->blocks[op->landing_target]);
     grjit_a64_bind(a, propagate_exception);
     grjit_a64_mov_ri(a, GRJIT_A64_X1, GRJIT_STATUS_EXCEPTION);
+    grjit_a64_mov_ri(a, GRJIT_A64_X0, 0); /* not the hook's value: RETHROW's zero */
     grjit_a64_b(a, e->ret_propagate);
     grjit_a64_bind(a, not_exception);
   }
-  grjit_a64_cbnz(a, GRJIT_A64_X1, e->ret_propagate);
+  if (op->landing_target == GRJIT_NO_BLOCK) {
+    /* No landing here: see the x86-64 emitter. This site pops its own callee's
+     * guest frame before an exception goes on to the caller. */
+    GRJIT_Label returned = grjit_a64_label(a);
+    grjit_a64_cbz(a, GRJIT_A64_X1, returned);
+    grjit_a64_cmp_imm(a, GRJIT_A64_X1, GRJIT_STATUS_EXCEPTION);
+    grjit_a64_bcond(a, GRJIT_A64_NE, e->ret_propagate);
+    load_slot(e, GRJIT_A64_X0, GRJIT_SLOT_CTX);
+    grjit_a64_mov_ri(a, GRJIT_A64_X16, (uint64_t)(uintptr_t)f->hooks.pop);
+    grjit_a64_blr(a, GRJIT_A64_X16);
+    grjit_a64_mov_ri(a, GRJIT_A64_X1, GRJIT_STATUS_EXCEPTION);
+    grjit_a64_mov_ri(a, GRJIT_A64_X0, 0);
+    grjit_a64_b(a, e->ret_propagate);
+    grjit_a64_bind(a, returned);
+  } else {
+    grjit_a64_cbnz(a, GRJIT_A64_X1, e->ret_propagate);
+  }
   if (op->result_count != 0) {
     if (vreg_is_narrow(e, op->results[0])) {
       grjit_a64_mov32_rr(a, GRJIT_A64_X0, GRJIT_A64_X0); /* the callee returned a word; an i32 or f32 is its low half */

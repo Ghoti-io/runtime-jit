@@ -2622,7 +2622,10 @@ instruction offset immediately after the call. On an exception status, the
 `catch_exception` hook receives the runtime context and caller environment,
 matches the engine-owned pending exception, and pops the returned callee guest
 frame once. A match branches to the landing block with caller state restored;
-otherwise the exception status propagates to the next compiled boundary.
-Generated code does not unwind native/JIT frames, and operating-system or C++
+otherwise the exception status propagates to the next compiled boundary, with zero
+as the value. A call site with no landing that receives an exception calls `pop` for
+its callee's frame before it propagates, so a frame is popped by the site that made
+its call, and a catching site further out pops exactly the frame of its own call. The
+hook is not a GC point and does not poll. Generated code does not unwind native/JIT frames, and operating-system or C++
 exceptions do not cross it. Exception values and tag matching remain engine
 owned.
