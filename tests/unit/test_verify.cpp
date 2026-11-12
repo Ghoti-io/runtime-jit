@@ -774,3 +774,29 @@ TEST(Verify, ARegisterComputedByBitcastIsTypedByItsDestinationNotItsSource) {
   });
   EXPECT_EQ(bad.first, GRJIT_ERR_INVALID);
 }
+
+namespace {
+uint32_t sites_poll_helper(void *, uint64_t, uint64_t) { return 0; }
+} // namespace
+
+TEST(Verify, AFunctionWhoseStackMapSitesExceedTheLimitIsRefusedWithAReason) {
+  // The limit is on the registers recorded as live, summed over every site.
+  // Two references live at one poll are two entries: a limit of one refuses it,
+  // and the refusal says why, as every other does, rather than leaving the
+  // caller's buffer unwritten.
+  B b("sites", 2);
+  GRJIT_VReg r1 = b.reg(GRJIT_TYPE_REF), r2 = b.reg(GRJIT_TYPE_REF);
+  b.poll_helper(sites_poll_helper);
+  b.at(b.block());
+  b.cnst(r1, 0x1001);
+  b.cnst(r2, 0x1009);
+  b.poll({1, 1, 0}, {grjit_frame_slot_vreg(r1), grjit_frame_slot_vreg(r2)});
+  b.ret(V(r1));
+  Fn f(b.finish());
+  std::string why;
+  EXPECT_EQ(verify(f, &why), GRJIT_OK) << why;  // within the default limit
+  GRJIT_Limits limits = {};
+  limits.max_site_entries = 1;
+  EXPECT_EQ(verify(f, &why, &limits), GRJIT_ERR_LIMIT);
+  EXPECT_FALSE(why.empty()) << "the refusal gave no reason";
+}

@@ -1277,6 +1277,13 @@ static GRJIT_Result check_derived(Verify * v) {
   const GRJIT_Function * f = v->f;
   GRJIT_LiveSites live;
   GRJIT_Result r = grjit_liveness_compute(f, f->allocator, v->limits.max_site_entries, &live);
+  if (r == GRJIT_ERR_LIMIT) {
+    /* A refusal of the function comes with its reason, as every other does. */
+    return refuse(v, r,
+        "the function has more registers live at its stack-map sites than the "
+        "limit of %zu allows",
+        v->limits.max_site_entries);
+  }
   if (r != GRJIT_OK) {
     return r;
   }
