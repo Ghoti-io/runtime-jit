@@ -237,6 +237,13 @@ static GRJIT_Result append_ex(GRJIT_Builder * b, const GRJIT_Op * op,
   if (f->op_count >= b->limits.max_operations) {
     return GRJIT_ERR_LIMIT;
   }
+  /* A branch table's targets are IR memory and, on a target that emits a
+   * compare and a branch for each, code: they count toward the operation cap
+   * together, or ops times targets would be the bound. */
+  if (op->kind == GRJIT_OP_BR_TABLE &&
+      op->target_count > b->limits.max_operations - f->table_targets) {
+    return GRJIT_ERR_LIMIT;
+  }
   /* A helper call carries at most `max_call_arguments`; a call to another
    * compiled function, whose arguments the internal convention puts on the
    * stack past the sixth, is capped by its own limit. */
@@ -382,6 +389,9 @@ static GRJIT_Result append_ex(GRJIT_Builder * b, const GRJIT_Op * op,
   }
   blk->count++;
   f->op_count++;
+  if (op->kind == GRJIT_OP_BR_TABLE) {
+    f->table_targets += op->target_count;
+  }
   return GRJIT_OK;
 }
 

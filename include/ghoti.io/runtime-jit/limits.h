@@ -55,7 +55,7 @@ extern "C" {
 typedef struct GRJIT_Limits {
   size_t max_blocks;           ///< Basic blocks in a function. Default 4096.
   size_t max_vregs;            ///< Virtual registers. Default 65536.
-  size_t max_operations;       ///< Operations in a function. Default 262144.
+  size_t max_operations;       ///< Operations in a function, and the targets of all its branch tables together. Default 262144.
   size_t max_call_arguments;   ///< Arguments of a call. Default 6.
   size_t max_frame_state_slots; ///< Slots of one frame state. Default 4096.
   size_t max_frame_bytes;      ///< Native frame of compiled code, bytes.

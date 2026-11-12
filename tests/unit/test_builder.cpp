@@ -118,6 +118,28 @@ TEST(Builder, FourThousandNinetySevenBlocksIsALimitErrorAndChangesNothing) {
   EXPECT_EQ(grjit_function_block_count(f), 4096u);
 }
 
+/* The targets of every branch table count toward the operation cap together:
+ * otherwise operations times targets is what bounds the IR, and the code size
+ * cap fires only after the memory is spent. */
+TEST(Builder, BranchTableTargetsCountTowardTheOperationCapAcrossTheFunction) {
+  GRJIT_Limits limits{};
+  limits.max_operations = 8;
+  B b("t", 0, &limits);
+  GRJIT_VReg index = b.param(GRJIT_TYPE_I32);
+  const auto entry = b.block();
+  b.at(entry);
+  const GRJIT_BlockId targets[] = {entry, entry, entry, entry};
+  // Each table alone is within the cap, and so are the ops; the sum is not.
+  ASSERT_EQ(grjit_builder_br_table(b.b, V(index), targets, 4, entry), GRJIT_OK);
+  b.at(b.block());
+  EXPECT_EQ(grjit_builder_br_table(b.b, V(index), targets, 5, entry), GRJIT_ERR_LIMIT)
+      << "4 + 5 targets pass the cap of 8";
+  ASSERT_EQ(grjit_builder_br_table(b.b, V(index), targets, 4, entry), GRJIT_OK)
+      << "the control: 4 + 4 is exactly the cap";
+  b.at(b.block());
+  EXPECT_EQ(grjit_builder_br_table(b.b, V(index), targets, 1, entry), GRJIT_ERR_LIMIT);
+}
+
 TEST(Builder, TheOtherCapsAreLimitErrorsToo) {
   GRJIT_Limits limits{};
   limits.max_vregs = 3;

@@ -82,6 +82,7 @@ struct GRJIT_Function {
   size_t state_count;
   size_t state_capacity;
   size_t op_count;
+  size_t table_targets; ///< Targets over all the function's BR_TABLE ops.
 };
 
 /** Result arity declared by all reachable RET and tail-call terminators. */

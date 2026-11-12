@@ -185,6 +185,27 @@ TEST(Verify, F32ImmediateReturnMustFitItsWidth) {
   EXPECT_NE(why.find("f32 immediate"), std::string::npos) << why;
 }
 
+TEST(Verify, BranchTableTargetsOverTheFunctionAreBoundedByTheOperationCap) {
+  B b("tables");
+  GRJIT_VReg index = b.param(GRJIT_TYPE_I32);
+  const auto first = b.block();
+  const auto second = b.block();
+  b.at(first);
+  const GRJIT_BlockId targets[] = {first, second, first};
+  ASSERT_EQ(grjit_builder_br_table(b.b, V(index), targets, 3, second), GRJIT_OK);
+  b.at(second);
+  ASSERT_EQ(grjit_builder_br_table(b.b, V(index), targets, 3, first), GRJIT_OK);
+  Fn f(b.finish());
+  std::string why;
+  EXPECT_EQ(verify(f, &why), GRJIT_OK) << why;  // 2 operations, 6 targets
+  GRJIT_Limits limits = {};
+  limits.max_operations = 5;                    // each table fits, the sum does not
+  EXPECT_EQ(verify(f, &why, &limits), GRJIT_ERR_LIMIT);
+  EXPECT_NE(why.find("br_table targets over the function"), std::string::npos) << why;
+  limits.max_operations = 6;
+  EXPECT_EQ(verify(f, &why, &limits), GRJIT_OK) << why;
+}
+
 TEST(Verify, BranchTableRefusesUnknownTargets) {
   B b("bad-br-table");
   GRJIT_VReg index = b.param(GRJIT_TYPE_I32);

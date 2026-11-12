@@ -42,6 +42,7 @@
 typedef struct Verify {
   const GRJIT_Function * f;
   GRJIT_Limits limits;
+  size_t table_targets; ///< Targets of the BR_TABLE ops checked so far.
   char * reason;
   size_t reason_size;
 } Verify;
@@ -1006,6 +1007,12 @@ static GRJIT_Result check_op(
         return refuse(v, GRJIT_ERR_INVALID,
             "block b%u op %zu: br_table default target does not exist", block, index);
       }
+      if (op->target_count > v->limits.max_operations - v->table_targets) {
+        return refuse(v, GRJIT_ERR_LIMIT,
+            "block b%u op %zu: br_table targets over the function pass the limit of %zu operations",
+            block, index, v->limits.max_operations);
+      }
+      v->table_targets += op->target_count;
       for (size_t i = 0; i < op->target_count; i++) {
         if (op->targets == NULL || op->targets[i] >= v->f->block_count) {
           return refuse(v, GRJIT_ERR_INVALID,
@@ -1851,6 +1858,7 @@ GRJIT_Result grjit_function_verify(const GRJIT_Function * function,
   grjit_limits_resolve(limits, &v.limits);
   v.reason = reason;
   v.reason_size = reason_size;
+  v.table_targets = 0;
   if (function->token > UINT32_MAX && !function->guest_function_explicit &&
       function->state_count != 0) {
     return refuse(&v, GRJIT_ERR_INVALID,
