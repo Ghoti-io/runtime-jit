@@ -331,6 +331,7 @@ done:
   if (r != GRJIT_OK) {
     grjit_metadata_free(&out->meta);
     a->free_fn(a->ctx, out->exception_sites);
+    a->free_fn(a->ctx, out->bytes);
     memset(out, 0, sizeof *out);
   }
   grjit_emit_free(&x86);

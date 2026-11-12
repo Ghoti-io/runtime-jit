@@ -73,7 +73,77 @@ GRJIT_Function * build(const GRJIT_Allocator * allocator, bool callable = false)
   return b.finish();
 }
 
+uint32_t h_push(void *, void *, uint64_t, const uint64_t *, uint64_t, uint64_t) { return 0; }
+void h_pop(void *) {}
+uint32_t h_compile(void *, uint64_t) { return 0; }
+uint32_t h_catch(void *, void *, uint64_t, uint32_t) { return 0; }
+uint32_t h_tail(void *, void *, uint64_t, const uint64_t *, uint64_t, uint64_t) { return 0; }
+uint64_t g_entry_word = 0;
+
+/* A callable function whose one call has a catch landing: the compile records
+ * an exception site for it, and the code object allocates the table of them
+ * after the machine code. */
+GRJIT_Function * build_catching(const GRJIT_Allocator * allocator) {
+  B b("sweep-catch", 0, nullptr, allocator);
+  GRJIT_CallHooks hooks{};
+  hooks.push = h_push;
+  hooks.pop = h_pop;
+  hooks.compile = h_compile;
+  hooks.deopt = deopt_hook;
+  hooks.catch_exception = h_catch;
+  hooks.tail = h_tail;
+  b.callable(hooks, 0);
+  EXPECT_EQ(grjit_builder_set_token(b.b, 7), GRJIT_OK);
+  const GRJIT_BlockId body = b.block();
+  const GRJIT_BlockId landing = b.block();
+  b.at(body);
+  const GRCORE_PollIdentity id{5, 1, 0};
+  EXPECT_EQ(grjit_builder_call_slot_catch_results(b.b, nullptr, 0,
+      reinterpret_cast<uintptr_t>(&g_entry_word), 99, nullptr, 0, id,
+      nullptr, 0, id, nullptr, 0, landing), GRJIT_OK);
+  b.ret();
+  b.at(landing);
+  b.ret();
+  return b.finish();
+}
+
 } // namespace
+
+TEST(AllocFail, EveryAllocationOfACompileWithACatchLandingFailsCleanlyAndLeaksNoBlock) {
+  GRJIT_REQUIRE_BACKEND();
+  // The exception-site table is allocated after the machine code is copied: a
+  // refusal of that allocation must give the copy back with the rest.
+  JitWorld w;
+  Fn f(build_catching(nullptr));
+  ASSERT_NE(f.f, nullptr);
+  uint64_t bytes = w.bytes_in_use();
+  long failures = 0;
+  for (long n = 1;; n++) {
+    TrackingAllocator t;
+    t.fail_at = n;
+    GRJIT_CompileOptions o{};
+    o.pages = w.pages();
+    o.allocator = t.get();
+    GRJIT_Code * out = reinterpret_cast<GRJIT_Code *>(1);
+    GRJIT_Result r = grjit_compile(&o, f, &out);
+    if (r == GRJIT_OK) {
+      ASSERT_NE(out, reinterpret_cast<GRJIT_Code *>(1));
+      size_t sites = 0;
+      EXPECT_NE(grjit_code_exception_sites(out, &sites), nullptr);
+      EXPECT_GT(sites, 0u) << "the function has no exception site: the sweep does not reach the table";
+      grjit_code_destroy(out);
+      EXPECT_EQ(t.live, 0);
+      EXPECT_LT(t.calls, n) << "the sweep ended before the Nth allocation was reached";
+      break;
+    }
+    failures++;
+    ASSERT_EQ(r, GRJIT_ERR_OOM) << n;
+    EXPECT_EQ(t.live, 0) << "a block leaked after failing allocation " << n;
+    EXPECT_EQ(w.bytes_in_use(), bytes) << n;
+    ASSERT_LT(n, 500);
+  }
+  EXPECT_GT(failures, 5);
+}
 
 TEST(AllocFail, EveryAllocationOfCompileFailsCleanlyAndTheSweepEndsInSuccess) {
   GRJIT_REQUIRE_BACKEND();
