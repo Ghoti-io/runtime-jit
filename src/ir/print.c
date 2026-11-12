@@ -344,8 +344,13 @@ static void put_op(Out * o, const GRJIT_Function * f, const GRJIT_Op * op) {
       break;
     case GRJIT_OP_CALL_SLOT:
     case GRJIT_OP_CALL_PTR:
-      if (op->kind == GRJIT_OP_CALL_SLOT) {
+      if (op->kind == GRJIT_OP_CALL_SLOT && (op->address != 0 || op->a.kind == GRJIT_OPERAND_NONE)) {
         put(o, "call.slot 0x%" PRIx64, op->address);
+      } else if (op->kind == GRJIT_OP_CALL_SLOT) {
+        /* The address of the entry word is an operand: printed, so that two
+         * calls through different slots do not print alike. */
+        put(o, "call.slot ");
+        put_operand(o, &op->a);
       } else {
         put(o, "call.ptr ");
         put_operand(o, &op->a);
@@ -361,6 +366,10 @@ static void put_op(Out * o, const GRJIT_Function * f, const GRJIT_Op * op) {
         put_operand(o, &op->args[i]);
       }
       put(o, ")");
+      if (op->environment.kind != GRJIT_OPERAND_NONE) {
+        put(o, " env=");
+        put_operand(o, &op->environment);
+      }
       put_state(o, f, op->state);
       put(o, " exit");
       put_state(o, f, op->exit_state);
@@ -368,8 +377,11 @@ static void put_op(Out * o, const GRJIT_Function * f, const GRJIT_Op * op) {
       break;
     case GRJIT_OP_TAIL_CALL_SLOT:
     case GRJIT_OP_TAIL_CALL_PTR:
-      if (op->kind == GRJIT_OP_TAIL_CALL_SLOT) {
+      if (op->kind == GRJIT_OP_TAIL_CALL_SLOT && (op->address != 0 || op->a.kind == GRJIT_OPERAND_NONE)) {
         put(o, "tail_call.slot 0x%" PRIx64, op->address);
+      } else if (op->kind == GRJIT_OP_TAIL_CALL_SLOT) {
+        put(o, "tail_call.slot ");
+        put_operand(o, &op->a);
       } else {
         put(o, "tail_call.ptr ");
         put_operand(o, &op->a);
@@ -385,6 +397,10 @@ static void put_op(Out * o, const GRJIT_Function * f, const GRJIT_Op * op) {
         put_operand(o, &op->args[i]);
       }
       put(o, ")");
+      if (op->environment.kind != GRJIT_OPERAND_NONE) {
+        put(o, " env=");
+        put_operand(o, &op->environment);
+      }
       put_state(o, f, op->state);
       break;
     case GRJIT_OP_CALL_NATIVE:

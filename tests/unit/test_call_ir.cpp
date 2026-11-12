@@ -754,6 +754,33 @@ TEST(CallIr, AGuardOnADivisorDoesNotServeADivisionAfterACallThatReturnsANewOneAs
   }
 }
 
+TEST(CallIr, ThePrinterShowsTheSlotOperandAndTheEnvironmentOfACall) {
+  // Two functions that differ only in which register holds the slot's entry
+  // word, and in the explicit callee environment, must not print alike.
+  std::string texts[2];
+  for (int variant = 0; variant < 2; variant++) {
+    B b("print-operands", 1);
+    GRJIT_CallHooks h = all_hooks();
+    b.callable(h);
+    GRJIT_VReg first = b.param(GRJIT_TYPE_PTR);
+    GRJIT_VReg second = b.param(GRJIT_TYPE_PTR);
+    GRJIT_VReg x = b.param(GRJIT_TYPE_I64);
+    GRJIT_VReg r = b.reg(GRJIT_TYPE_I64);
+    b.at(b.block());
+    const std::vector<GRJIT_FrameSlot> state = {grjit_frame_slot_vreg(x)};
+    const GRJIT_Operand args[] = {V(x)};
+    ASSERT_EQ(grjit_builder_call_slot_operand_results_env(b.b, &r, 1, V(variant == 0 ? first : second), 99,
+        V(variant == 0 ? second : first), args, 1, kId, state.data(), state.size(), kExit, state.data(),
+        state.size()), GRJIT_OK);
+    b.ret(V(r));
+    Fn f(b.finish());
+    texts[variant] = print(f);
+  }
+  EXPECT_NE(texts[0].find("call.slot v0 callee=99(v2) env=v1"), std::string::npos) << texts[0];
+  EXPECT_NE(texts[1].find("call.slot v1 callee=99(v2) env=v0"), std::string::npos) << texts[1];
+  EXPECT_NE(texts[0], texts[1]);
+}
+
 TEST(CallIr, ASlotCallWhoseEntryWordAddressIsTheImmediateZeroIsRefused) {
   // Every other form refuses a null slot or code pointer; the operand form
   // took an immediate zero, and the call then read the entry word at address 0.
